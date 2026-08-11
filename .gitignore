@@ -1,0 +1,17 @@
+# Rebuildable data artifacts (bathymetry tiles, ANUGA state library, caches)
+data/
+
+# Python
+__pycache__/
+*.pyc
+.pytest_cache/
+.ruff_cache/
+*.egg-info/
+.venv/
+
+# Node
+node_modules/
+frontend/dist/
+
+# macOS
+.DS_Store
