@@ -1,3 +1,4 @@
+import math
 from dataclasses import dataclass
 from datetime import date, datetime, timedelta
 from itertools import pairwise
@@ -162,3 +163,31 @@ def stage_at(events: list[TideEvent], t: datetime) -> TideStage | None:
             phase = "rising" if nxt.kind == "H" else "falling"
             return TideStage(phase, frac, nxt)
     return None
+
+
+def _cosine_height(h0: float, h1: float, frac: float) -> float:
+    return h0 + (h1 - h0) * (1 - math.cos(math.pi * frac)) / 2
+
+
+def interpolate_tide_hours(events: list[TideEvent], day: date, tz: str) -> list[TideHour]:
+    """Cosine interpolation of hourly heights between consecutive hi/lo events.
+
+    Standard tide-clock approximation for subordinate stations, which reject
+    interval=h hourly predictions.
+    """
+    zone = ZoneInfo(tz)
+    start = datetime.combine(day - timedelta(days=1), datetime.min.time(), zone)
+    end = datetime.combine(day + timedelta(days=2), datetime.min.time(), zone)
+    pairs = list(pairwise(sorted(events, key=lambda e: e.time)))
+
+    hours: list[TideHour] = []
+    t = start
+    while t < end:
+        for prev, nxt in pairs:
+            if prev.time <= t <= nxt.time:
+                span = (nxt.time - prev.time).total_seconds()
+                frac = 0.0 if span == 0 else (t - prev.time).total_seconds() / span
+                hours.append(TideHour(t, _cosine_height(prev.height_ft, nxt.height_ft, frac)))
+                break
+        t += timedelta(hours=1)
+    return hours

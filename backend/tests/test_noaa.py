@@ -1,4 +1,5 @@
 from datetime import date, datetime
+from itertools import pairwise
 from zoneinfo import ZoneInfo
 
 import respx
@@ -7,7 +8,9 @@ from httpx import Response
 from tidescout.sources.cache import Cache
 from tidescout.sources.noaa import (
     TideEvent,
+    _cosine_height,
     current_hours,
+    interpolate_tide_hours,
     stage_at,
     tide_events,
     tide_hours,
@@ -94,3 +97,40 @@ def test_stage_at_interpolates():
     assert abs(stage.frac - 0.5) < 0.01
     assert stage.next_event.kind == "L"
     assert stage_at(events, datetime(2026, 8, 15, 1, 0, tzinfo=ET)) is None
+
+
+def test_cosine_height_at_midpoint_frac():
+    # Pure formula check, decoupled from wall-clock alignment: H 5.0ft ->
+    # L 0.5ft, frac=0.5 is the temporal midpoint between the two events
+    # regardless of what clock time that falls on.
+    assert abs(_cosine_height(5.0, 0.5, 0.5) - 2.75) < 0.01
+    assert _cosine_height(5.0, 0.5, 0.0) == 5.0
+    assert abs(_cosine_height(5.0, 0.5, 1.0) - 0.5) < 1e-9
+
+
+def test_interpolate_tide_hours_subordinate_station():
+    # Winyah Bay (8662549) shape: only hi/lo events available, no harmonic
+    # hourly predictions. H@03:00 5.0ft, L@09:12 0.5ft -- the 12-minute
+    # offset is deliberate so no top-of-hour grid point lands exactly on
+    # the true chronological midpoint (covered separately, above, via the
+    # pure formula test).
+    events = [
+        TideEvent(datetime(2026, 8, 15, 3, 0, tzinfo=ET), "H", 5.0),
+        TideEvent(datetime(2026, 8, 15, 9, 12, tzinfo=ET), "L", 0.5),
+    ]
+    hours = interpolate_tide_hours(events, date(2026, 8, 15), "America/New_York")
+
+    by_time = {h.time: h.height_ft for h in hours}
+    assert by_time[datetime(2026, 8, 15, 3, 0, tzinfo=ET)] == 5.0
+
+    # Hours before the first event are absent (unbracketed).
+    assert all(t >= events[0].time for t in by_time)
+    assert datetime(2026, 8, 15, 2, 0, tzinfo=ET) not in by_time
+
+    # Strictly decreasing across the bracketed H->L stretch.
+    bracketed = sorted(
+        (t, v) for t, v in by_time.items() if events[0].time <= t <= events[1].time
+    )
+    assert all(a[1] > b[1] for a, b in pairwise(bracketed))
+
+    assert hours == sorted(hours, key=lambda h: h.time)
