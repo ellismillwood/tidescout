@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from zoneinfo import ZoneInfo
 
 import httpx
@@ -55,13 +55,22 @@ def _value(hourly: dict, name: str, i: int) -> float | None:
     return None if vals is None or vals[i] is None else float(vals[i])
 
 
+def _today(tz: ZoneInfo) -> date:
+    # Fishery-local date, not UTC or system-local: near the day boundary
+    # those can disagree with the fishery's own calendar day, which would
+    # flip the archive/forecast routing decision below. Its own function so
+    # tests can monkeypatch it and pin the boundary without wall-clock races.
+    return datetime.now(tz).date()
+
+
 def fetch_weather(
     fishery: Fishery, day: date, model_key: str, cache: Cache
 ) -> tuple[list[WeatherHour], str]:
     model_code = WEATHER_MODELS[model_key]  # KeyError for unknown keys is intended
     lon, lat = fishery.center
+    tz = ZoneInfo(fishery.timezone)
     start = day - timedelta(days=1)
-    today = datetime.now(UTC).date()
+    today = _today(tz)
     use_archive = day < today - timedelta(days=ARCHIVE_CUTOFF_DAYS)
     params = {
         "latitude": lat,
@@ -84,7 +93,6 @@ def fetch_weather(
     key = f"{fishery.slug}:{day.isoformat()}:{label}"
     cached = cache.get_or_fetch("open-meteo", key, ttl, lambda: _get_json(url, params))
     hourly = cached.payload["hourly"]
-    tz = ZoneInfo(fishery.timezone)
     hours = []
     for i, t in enumerate(hourly["time"]):
         hours.append(

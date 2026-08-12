@@ -1,10 +1,11 @@
-from datetime import date
+from datetime import date, timedelta
 
 import pytest
 import respx
 from httpx import Response
 
 from tidescout.config import load_fishery
+from tidescout.sources import weather
 from tidescout.sources.cache import Cache
 from tidescout.sources.weather import WEATHER_MODELS, fetch_weather
 
@@ -61,6 +62,38 @@ def test_old_dates_route_to_archive(tmp_path):
     hours, label = fetch_weather(f, date(2020, 6, 1), "gfs", Cache(tmp_path / "c.sqlite"))
     assert label == "era5"
     assert len(hours) == 48
+
+
+@respx.mock
+def test_archive_cutoff_uses_fishery_local_today(tmp_path, monkeypatch):
+    # Pin "today" instead of depending on wall-clock time, so this test is
+    # deterministic regardless of what hour/timezone it happens to run in.
+    fixed_today = date(2026, 8, 12)
+    monkeypatch.setattr(weather, "_today", lambda tz: fixed_today)
+    forecast_route = respx.get(url__regex=r"https://api\.open-meteo\.com/v1/forecast.*").mock(
+        return_value=Response(200, json=_fixture(48))
+    )
+    archive_route = respx.get(
+        url__regex=r"https://archive-api\.open-meteo\.com/v1/archive.*"
+    ).mock(return_value=Response(200, json=_fixture(48)))
+    f = load_fishery("winyah-bay")
+
+    # Exactly at the cutoff (today - 7): still forecast.
+    hours, label = fetch_weather(
+        f, fixed_today - timedelta(days=7), "gfs", Cache(tmp_path / "c1.sqlite")
+    )
+    assert label == "gfs"
+    assert len(hours) == 48
+    assert forecast_route.called
+    assert not archive_route.called
+
+    # One day older (today - 8): archive.
+    hours, label = fetch_weather(
+        f, fixed_today - timedelta(days=8), "gfs", Cache(tmp_path / "c2.sqlite")
+    )
+    assert label == "era5"
+    assert len(hours) == 48
+    assert archive_route.called
 
 
 def test_unknown_model_rejected(tmp_path):
