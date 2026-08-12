@@ -1,0 +1,28 @@
+slug: winyah-bay
+name: Winyah Bay
+timezone: America/New_York
+bbox: [-79.45, 33.15, -79.05, 33.60]
+center: [-79.25, 33.35]
+orientation_deg: 135 # entrance faces southeast
+stations:
+  tide: []
+  currents: []
+  water: []
+rivers:
+  - name: Pee Dee
+    usgs_site: ""
+    weight: 1.0
+  - name: Waccamaw
+    usgs_site: ""
+    weight: 1.0
+  - name: Black
+    usgs_site: ""
+    weight: 1.0
+discharge_buckets:
+  low_below_cfs: 6000
+  high_above_cfs: 25000
+climatology:
+  water_temp_f_by_month:
+    {1: 48, 2: 50, 3: 57, 4: 66, 5: 74, 6: 81, 7: 85, 8: 85, 9: 80, 10: 71, 11: 60, 12: 52}
+  salinity_ppt_by_month:
+    {1: 8, 2: 7, 3: 6, 4: 8, 5: 10, 6: 12, 7: 14, 8: 15, 9: 14, 10: 12, 11: 10, 12: 9}
