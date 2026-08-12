@@ -71,7 +71,7 @@ def moon_info(fishery: Fishery, day: date) -> MoonInfo:
         o = _observer(fishery, start_utc)
         try:
             t = _to_local(getattr(o, method_name)(ephem.Moon()), tz)
-        except ephem.CircumpolarError:
+        except (ephem.CircumpolarError, ephem.NeverUpError):
             return None
         return t if day_start <= t < day_end else None
 
