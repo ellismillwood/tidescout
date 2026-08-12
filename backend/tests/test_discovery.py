@@ -57,7 +57,7 @@ def test_find_current_stations_filters_to_bbox(tmp_path):
 
 @respx.mock
 def test_find_usgs_sites_parses_rdb(tmp_path):
-    respx.get(url__regex=r"https://waterservices\.usgs\.gov/nwis/site/.*").mock(
+    route = respx.get(url__regex=r"https://waterservices\.usgs\.gov/nwis/site/.*").mock(
         return_value=Response(200, text=USGS_RDB)
     )
     f = load_fishery("winyah-bay")
@@ -65,3 +65,12 @@ def test_find_usgs_sites_parses_rdb(tmp_path):
     sites = find_usgs_sites(f, cache, "00060")
     assert {s.id for s in sites} == {"02131000", "02136000"}
     assert all(s.kind == "usgs" for s in sites)
+
+    # Regression guard: the USGS search bbox must pad winyah-bay's bbox
+    # ([-79.45, 33.15, -79.05, 33.60]) by 1.0 degree symmetrically on all
+    # four sides, not just west/north. An asymmetric pad (e.g. only +/-0.1
+    # on south/east) silently misses upstream river gauges that sit east or
+    # south of the bbox -- e.g. the Waccamaw bending northeast toward Longs,
+    # SC, which fell outside the old east boundary.
+    sent_bbox = route.calls.last.request.url.params["bBox"]
+    assert sent_bbox == "-80.4500,32.1500,-78.0500,34.6000"

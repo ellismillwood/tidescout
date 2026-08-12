@@ -42,10 +42,13 @@ rivers:
     weight: 1.0
   # WACCAMAW RIVER NEAR LONGS, SC (33.9127, -78.7150). Confirmed non-tidal
   # via live 3-day IV discharge history: 0 negative readings, 29-56 cfs.
-  # Outside discovery.py's default padded bbox (east pad is only +0.1 deg;
-  # the Waccamaw bends NE past Conway toward Longs on the NC line) -- found
-  # by widening the live USGS site search manually. The only in-bbox
-  # Waccamaw discharge site (Hagley Landing, 02110815) is tidal
+  # Originally found by widening the live USGS site search manually, because
+  # discovery.py's USGS bbox padding was asymmetric (east pad only +0.1 deg)
+  # and missed this site -- the Waccamaw bends NE past Conway toward Longs on
+  # the NC line. That padding is now symmetric (+/-1.0 deg on all four
+  # sides), so a plain `tidescout stations winyah-bay` re-run reproduces this
+  # ID directly; live-reconfirmed in the table after the fix. The only other
+  # in-bbox Waccamaw discharge site (Hagley Landing, 02110815) is tidal
   # (site_tp_cd=ST-TS) and has no live 00060 IV data, so it was rejected for
   # this role (it is instead recorded as a water sensor above).
   - name: Waccamaw

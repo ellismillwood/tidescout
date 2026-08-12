@@ -9,7 +9,9 @@ from tidescout.sources.cache import Cache
 MDAPI = "https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations.json"
 USGS_SITE = "https://waterservices.usgs.gov/nwis/site/"
 TTL = timedelta(days=30)
-# Upstream river gauges sit outside the bay bbox; pad generously for USGS search.
+# Upstream river gauges sit outside the bay bbox, and rivers can bend in any
+# direction (e.g. the Waccamaw bends northeast toward the NC line), so pad
+# generously and symmetrically on all four sides for USGS search.
 USGS_BBOX_PAD_DEG = 1.0
 
 
@@ -56,8 +58,8 @@ def find_current_stations(fishery: Fishery, cache: Cache) -> list[StationInfo]:
 def find_usgs_sites(fishery: Fishery, cache: Cache, param: str) -> list[StationInfo]:
     west, south, east, north = fishery.bbox
     bbox = (
-        f"{west - USGS_BBOX_PAD_DEG:.4f},{south - 0.1:.4f},"
-        f"{east + 0.1:.4f},{north + USGS_BBOX_PAD_DEG:.4f}"
+        f"{west - USGS_BBOX_PAD_DEG:.4f},{south - USGS_BBOX_PAD_DEG:.4f},"
+        f"{east + USGS_BBOX_PAD_DEG:.4f},{north + USGS_BBOX_PAD_DEG:.4f}"
     )
     params = {
         "format": "rdb",
