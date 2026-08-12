@@ -7,9 +7,11 @@ from httpx import Response
 
 from tidescout.sources.cache import Cache
 from tidescout.sources.noaa import (
+    CurrentHour,
     TideEvent,
     _cosine_height,
     current_hours,
+    interpolate_current_hours,
     interpolate_tide_hours,
     stage_at,
     tide_events,
@@ -134,3 +136,37 @@ def test_interpolate_tide_hours_subordinate_station():
     assert all(a[1] > b[1] for a, b in pairwise(bracketed))
 
     assert hours == sorted(hours, key=lambda h: h.time)
+
+
+def test_interpolate_current_hours_linear_and_direction_flip():
+    # ACT6531 shape: subordinate current station, predictions land at
+    # irregular slack/max-flood/max-ebb times, not top-of-hour.
+    points = [
+        CurrentHour(datetime(2026, 8, 15, 0, 20, tzinfo=ET), 1.2, 315.0),
+        CurrentHour(datetime(2026, 8, 15, 1, 40, tzinfo=ET), -0.9, 135.0),
+    ]
+    hours = interpolate_current_hours(points, date(2026, 8, 15), "America/New_York")
+    by_time = {h.time: h for h in hours}
+
+    at_one = by_time[datetime(2026, 8, 15, 1, 0, tzinfo=ET)]
+    assert abs(at_one.speed_kn - 0.15) < 0.001
+    # Interpolated sign (+) still matches the leading point's sign (+), so
+    # direction stays the leading point's flood heading.
+    assert at_one.dir_deg == 315.0
+
+    # Before the first point: unbracketed, absent.
+    assert datetime(2026, 8, 15, 0, 0, tzinfo=ET) not in by_time
+
+
+def test_interpolate_current_hours_exact_grid_passthrough():
+    points = [
+        CurrentHour(datetime(2026, 8, 15, 0, 0, tzinfo=ET), 1.0, 310.0),
+        CurrentHour(datetime(2026, 8, 15, 1, 0, tzinfo=ET), -0.5, 130.0),
+        CurrentHour(datetime(2026, 8, 15, 2, 0, tzinfo=ET), 0.8, 310.0),
+    ]
+    hours = interpolate_current_hours(points, date(2026, 8, 15), "America/New_York")
+    by_time = {h.time: h for h in hours}
+
+    assert by_time[datetime(2026, 8, 15, 0, 0, tzinfo=ET)] == points[0]
+    assert by_time[datetime(2026, 8, 15, 1, 0, tzinfo=ET)] == points[1]
+    assert by_time[datetime(2026, 8, 15, 2, 0, tzinfo=ET)] == points[2]

@@ -6,7 +6,7 @@ from tidescout.errors import SourceUnavailable
 from tidescout.sources import noaa, usgs, weather
 from tidescout.sources.cache import Cache
 from tidescout.sources.dayloader import load_day
-from tidescout.sources.noaa import TideEvent, TideHour
+from tidescout.sources.noaa import CurrentHour, TideEvent, TideHour
 
 ET = ZoneInfo("America/New_York")
 DAY = date(2026, 8, 15)
@@ -22,6 +22,21 @@ def _events() -> list[TideEvent]:
         out.append(TideEvent(t, kind, 5.0 if kind == "H" else 0.5))
         kind = "L" if kind == "H" else "H"
         t += timedelta(hours=6, minutes=12)
+    return out
+
+
+def _current_points() -> list[CurrentHour]:
+    # ACT6531 shape: off-hour slack/max-flood/max-ebb points, continuous
+    # coverage across the 3-day interpolation window so every hour of DAY
+    # is bracketed.
+    out = []
+    t = datetime(2026, 8, 14, 0, 6, tzinfo=ET)
+    speed, flood_dir, ebb_dir = -2.5, 320.0, 140.0
+    while t < datetime(2026, 8, 17, 0, 0, tzinfo=ET):
+        dir_deg = flood_dir if speed >= 0 else ebb_dir
+        out.append(CurrentHour(t, speed, dir_deg))
+        speed = -speed
+        t += timedelta(hours=3, minutes=10)
     return out
 
 
@@ -91,3 +106,45 @@ def test_load_day_uses_direct_tide_hours_when_available(monkeypatch, tmp_path):
 
     assert "tides" not in result.missing
     assert result.hours[5].tide_height_ft == 5.0
+
+
+def test_load_day_interpolates_currents_when_off_hour(monkeypatch, tmp_path):
+    # Addition #2: ACT6531 shape (subordinate current station, irregular
+    # slack/max-flood/max-ebb timestamps) should no longer leave the
+    # currents column silently blank -- dayloader interpolates onto the
+    # hour grid before handing off to the assembler.
+    fishery = load_fishery("winyah-bay")
+
+    monkeypatch.setattr(weather, "fetch_weather", lambda *a, **k: ([], "gfs"))
+    monkeypatch.setattr(noaa, "tide_events", lambda *a, **k: _events())
+    monkeypatch.setattr(noaa, "tide_hours", _unavailable)
+    monkeypatch.setattr(noaa, "current_hours", lambda *a, **k: _current_points())
+    monkeypatch.setattr(usgs, "water_summary", _unavailable)
+    monkeypatch.setattr(usgs, "discharge_summary", _unavailable)
+
+    cache = Cache(tmp_path / "cache.sqlite")
+    result = load_day(fishery, DAY, "gfs", cache)
+
+    assert "currents" not in result.missing
+    assert all(h.current_speed_kn is not None for h in result.hours)
+    assert all(h.current_dir_deg is not None for h in result.hours)
+
+
+def test_load_day_marks_currents_missing_when_station_yields_no_points(monkeypatch, tmp_path):
+    # Regression guard: a current station that exists but returns nothing
+    # (or raises) must still land "currents" in missing exactly once, not
+    # be silently dropped now that there's a post-processing step.
+    fishery = load_fishery("winyah-bay")
+
+    monkeypatch.setattr(weather, "fetch_weather", lambda *a, **k: ([], "gfs"))
+    monkeypatch.setattr(noaa, "tide_events", lambda *a, **k: _events())
+    monkeypatch.setattr(noaa, "tide_hours", _unavailable)
+    monkeypatch.setattr(noaa, "current_hours", lambda *a, **k: [])
+    monkeypatch.setattr(usgs, "water_summary", _unavailable)
+    monkeypatch.setattr(usgs, "discharge_summary", _unavailable)
+
+    cache = Cache(tmp_path / "cache.sqlite")
+    result = load_day(fishery, DAY, "gfs", cache)
+
+    assert result.missing.count("currents") == 1
+    assert all(h.current_speed_kn is None for h in result.hours)

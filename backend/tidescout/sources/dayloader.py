@@ -50,13 +50,21 @@ def load_day(fishery: Fishery, day: date, model_key: str, cache: Cache) -> DayCo
         tides = []
 
     current_station = fishery.stations.currents[0] if fishery.stations.currents else None
-    currents = (
-        attempt(
-            "currents", lambda: noaa.current_hours(current_station, day, fishery.timezone, cache), []
-        )
-        if current_station
-        else (missing.append("currents") or [])
-    )
+    if current_station:
+        # Subordinate current stations (e.g. ACT6531 at the Winyah Bay
+        # entrance) predict at irregular slack/max-flood/max-ebb times, not
+        # top-of-hour, so raw points are interpolated onto the hour grid
+        # before assembly -- same shape as the tide fallback above.
+        try:
+            points = noaa.current_hours(current_station, day, fishery.timezone, cache)
+        except Exception:  # noqa: BLE001
+            points = []
+        currents = noaa.interpolate_current_hours(points, day, fishery.timezone) if points else []
+        if not currents:
+            missing.append("currents")
+    else:
+        missing.append("currents")
+        currents = []
     sun = attempt("sun", lambda: astronomy.sun_times(fishery, day), None)
     moon = attempt("moon", lambda: astronomy.moon_info(fishery, day), None)
     solunar = attempt("solunar", lambda: astronomy.solunar_periods(fishery, day), [])
