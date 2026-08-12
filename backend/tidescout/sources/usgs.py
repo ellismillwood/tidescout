@@ -52,23 +52,33 @@ def fetch_series(
 
     key = f"{query['sites']}:{query['parameterCd']}:{period_days}"
     cached = cache.get_or_fetch("usgs-iv", key, OBS_TTL, fetch)
-    out: dict[tuple[str, str], list[tuple[datetime, float]]] = {}
+    # Accumulate per (site, param) across every timeSeries entry and every
+    # values[] block within it: USGS can split one site/param pair across
+    # multiple entries (e.g. provisional vs. approved) and can repeat the same
+    # instantaneous timestamp across those splits. Keying the accumulator by
+    # timestamp merges all of that into one series and turns a repeat into a
+    # dedupe (the later occurrence in payload order wins) instead of either a
+    # silent overwrite of a whole entry or a duplicate-timestamp row surviving
+    # into the result.
+    by_key: dict[tuple[str, str], dict[datetime, float]] = {}
     for ts in cached.payload.get("value", {}).get("timeSeries", []):
-        site = ts["sourceInfo"]["siteCode"][0]["value"]
-        param = ts["variable"]["variableCode"][0]["value"]
-        points = []
+        try:
+            site = ts["sourceInfo"]["siteCode"][0]["value"]
+            param = ts["variable"]["variableCode"][0]["value"]
+        except (KeyError, IndexError, TypeError):
+            continue  # malformed entry; skip it, keep processing the rest
+        points = by_key.setdefault((site, param), {})
         for block in ts.get("values", []):
             for p in block.get("value", []):
                 try:
                     v = float(p["value"])
-                except (TypeError, ValueError):
-                    continue
+                    t = datetime.fromisoformat(p["dateTime"]).astimezone(UTC)
+                except (KeyError, TypeError, ValueError):
+                    continue  # malformed point: missing/non-ISO dateTime or value
                 if v <= -999:  # USGS sentinel for missing
                     continue
-                points.append((datetime.fromisoformat(p["dateTime"]).astimezone(UTC), v))
-        if points:
-            out[(site, param)] = sorted(points)
-    return out
+                points[t] = v
+    return {pair: sorted(pts.items()) for pair, pts in by_key.items() if pts}
 
 
 def discharge_summary(fishery: Fishery, cache: Cache) -> DischargeSummary:
