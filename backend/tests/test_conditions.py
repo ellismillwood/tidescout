@@ -72,3 +72,34 @@ def test_assemble_day_solunar_tags():
     )
     tagged = [h.time.hour for h in result.hours if "major" in h.solunar]
     assert 11 in tagged and 12 in tagged
+
+
+def test_assemble_day_dst_spring_forward_always_24_rows():
+    # 2026-03-08: US DST start (02:00 -> 03:00 local). assemble_day walks
+    # wall-clock hours, not elapsed real time, so the nonexistent 02:00
+    # local hour still gets a row -- the day is always exactly 24 rows.
+    f = load_fishery("winyah-bay")
+    day = date(2026, 3, 8)
+    result = assemble_day(
+        fishery=f, day=day, model_label="gfs", weather_48h=[],
+        tides=[], events=[], currents=[], sun=None, moon=None,
+        solunar=[], water=None, discharge=None, missing=[],
+    )
+    assert len(result.hours) == 24
+    assert result.hours[0].time == datetime(2026, 3, 8, 0, 0, tzinfo=ET)
+    assert result.hours[-1].time == datetime(2026, 3, 8, 23, 0, tzinfo=ET)
+
+
+def test_assemble_day_dst_fall_back_always_24_rows():
+    # 2026-11-01: US DST end (02:00 -> 01:00 local). The repeated 01:00
+    # local hour appears once, not twice -- still exactly 24 rows.
+    f = load_fishery("winyah-bay")
+    day = date(2026, 11, 1)
+    result = assemble_day(
+        fishery=f, day=day, model_label="gfs", weather_48h=[],
+        tides=[], events=[], currents=[], sun=None, moon=None,
+        solunar=[], water=None, discharge=None, missing=[],
+    )
+    assert len(result.hours) == 24
+    assert result.hours[0].time == datetime(2026, 11, 1, 0, 0, tzinfo=ET)
+    assert result.hours[-1].time == datetime(2026, 11, 1, 23, 0, tzinfo=ET)

@@ -41,7 +41,12 @@ def load_day(fishery: Fishery, day: date, model_key: str, cache: Cache) -> DayCo
         # this subordinate station); any other unexpected error falls back
         # the same way rather than crashing the command.
         except Exception:  # noqa: BLE001
-            tides = noaa.interpolate_tide_hours(events, day, fishery.timezone) if events else []
+            tides = []
+        # The fallback also applies when tide_hours "succeeds" with a
+        # genuinely empty list (no exception at all) -- not just when it
+        # raises -- so both failure shapes land here the same way.
+        if not tides and events:
+            tides = noaa.interpolate_tide_hours(events, day, fishery.timezone)
         if not tides:
             missing.append("tides")
     else:

@@ -37,6 +37,12 @@ class DayConditions:
     fishery_slug: str
     day: date
     model_label: str
+    # Always exactly 24 wall-clock-labeled rows (00:00 through 23:00 local).
+    # On DST-transition days the loop below walks wall-clock hours, not
+    # elapsed real time, so the nonexistent local hour still appears as a
+    # label on the spring-forward day, and the repeated local hour appears
+    # once, not twice, on the fall-back day -- see
+    # test_assemble_day_dst_spring_forward/fall_back in test_conditions.py.
     hours: list[HourlyConditions]
     sun: SunTimes | None
     moon: MoonInfo | None

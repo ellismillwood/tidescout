@@ -70,6 +70,26 @@ def test_load_day_falls_back_to_interpolated_tides_when_hourly_unavailable(monke
     assert "discharge" in result.missing
 
 
+def test_load_day_falls_back_to_interpolated_tides_when_hourly_succeeds_empty(monkeypatch, tmp_path):
+    # tide_hours can also "succeed" with a genuinely empty list -- no
+    # exception at all -- and the fallback must still trigger on that path,
+    # not just on SourceUnavailable.
+    fishery = load_fishery("winyah-bay")
+
+    monkeypatch.setattr(weather, "fetch_weather", lambda *a, **k: ([], "gfs"))
+    monkeypatch.setattr(noaa, "tide_events", lambda *a, **k: _events())
+    monkeypatch.setattr(noaa, "tide_hours", lambda *a, **k: [])
+    monkeypatch.setattr(noaa, "current_hours", _unavailable)
+    monkeypatch.setattr(usgs, "water_summary", _unavailable)
+    monkeypatch.setattr(usgs, "discharge_summary", _unavailable)
+
+    cache = Cache(tmp_path / "cache.sqlite")
+    result = load_day(fishery, DAY, "gfs", cache)
+
+    assert "tides" not in result.missing
+    assert all(h.tide_height_ft is not None for h in result.hours)
+
+
 def test_load_day_marks_tides_missing_when_both_paths_empty(monkeypatch, tmp_path):
     fishery = load_fishery("winyah-bay")
 

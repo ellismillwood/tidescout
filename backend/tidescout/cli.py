@@ -6,6 +6,16 @@ app = typer.Typer(no_args_is_help=True, help="TideScout: SC inshore fishing deci
 console = Console()
 
 
+def _snap_zero(v: float) -> float:
+    """Round values that display as zero at 1 decimal to plain 0.0.
+
+    Prevents "-0.0" from printing under a signed (`:+.1f`) format at slack
+    water / a flat pressure trend, where the true value is a tiny negative
+    float that rounds to zero but keeps its sign.
+    """
+    return 0.0 if abs(v) < 0.05 else v
+
+
 @app.callback()
 def _root() -> None:
     """TideScout CLI."""
@@ -83,11 +93,11 @@ def conditions(
             h.time.strftime("%H:%M"),
             f"{h.tide_height_ft:.1f}" if h.tide_height_ft is not None else "—",
             f"{arrow}{h.tide_frac:.0%}" if h.tide_frac is not None else "—",
-            f"{h.current_speed_kn:+.1f}" if h.current_speed_kn is not None else "—",
+            f"{_snap_zero(h.current_speed_kn):+.1f}" if h.current_speed_kn is not None else "—",
             wind,
             f"{h.wind_gust_kn:.0f}" if h.wind_gust_kn is not None else "—",
             f"{h.pressure_mb:.1f}" if h.pressure_mb is not None else "—",
-            f"{h.pressure_trend_mb_3h:+.1f}" if h.pressure_trend_mb_3h is not None else "—",
+            f"{_snap_zero(h.pressure_trend_mb_3h):+.1f}" if h.pressure_trend_mb_3h is not None else "—",
             f"{h.cloud_cover_pct:.0f}%" if h.cloud_cover_pct is not None else "—",
             f"{h.air_temp_f:.0f}" if h.air_temp_f is not None else "—",
             ",".join(h.solunar) or "—",
