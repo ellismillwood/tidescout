@@ -20,3 +20,5 @@ Personal fishing decision-support app for SC inshore waters (Winyah Bay first; C
 
     # quality gate
     make check
+
+    # all cached API data lives in data/cache.sqlite — delete it to force a full refresh

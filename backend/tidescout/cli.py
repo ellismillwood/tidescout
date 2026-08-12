@@ -80,7 +80,11 @@ def conditions(
     result = load_day(fishery, day, model, default_cache())
 
     table = Table(title=f"{fishery.name} — {day} — model: {result.model_label}")
-    for col in ("hour", "tide ft", "stage", "cur kn", "wind", "gust", "press", "trend", "cloud", "air°F", "solunar"):
+    columns = (
+        "hour", "tide ft", "stage", "cur kn", "wind", "gust", "press",
+        "trend", "cloud", "air°F", "solunar",
+    )
+    for col in columns:
         table.add_column(col, justify="right")
     for h in result.hours:
         arrow = {"rising": "↑", "falling": "↓"}.get(h.tide_phase or "", "")
@@ -97,7 +101,11 @@ def conditions(
             wind,
             f"{h.wind_gust_kn:.0f}" if h.wind_gust_kn is not None else "—",
             f"{h.pressure_mb:.1f}" if h.pressure_mb is not None else "—",
-            f"{_snap_zero(h.pressure_trend_mb_3h):+.1f}" if h.pressure_trend_mb_3h is not None else "—",
+            (
+                f"{_snap_zero(h.pressure_trend_mb_3h):+.1f}"
+                if h.pressure_trend_mb_3h is not None
+                else "—"
+            ),
             f"{h.cloud_cover_pct:.0f}%" if h.cloud_cover_pct is not None else "—",
             f"{h.air_temp_f:.0f}" if h.air_temp_f is not None else "—",
             ",".join(h.solunar) or "—",
@@ -109,12 +117,24 @@ def conditions(
             f"set {result.sun.sunset:%H:%M} dusk {result.sun.dusk:%H:%M}"
         )
     if result.moon:
-        console.print(f"moon: {result.moon.phase_frac:.0%} illuminated, transits {[t.strftime('%H:%M') for t in result.moon.transits]}")
+        transits = [t.strftime("%H:%M") for t in result.moon.transits]
+        console.print(f"moon: {result.moon.phase_frac:.0%} illuminated, transits {transits}")
     if result.water:
-        trend = f" ({result.water.temp_trend_f_3d:+.1f}°F/3d)" if result.water.temp_trend_f_3d is not None else ""
-        console.print(f"water: {result.water.temp_f:.0f}°F{trend}, salinity {result.water.salinity_ppt:.0f} ppt [{result.water.source}]")
+        trend = (
+            f" ({result.water.temp_trend_f_3d:+.1f}°F/3d)"
+            if result.water.temp_trend_f_3d is not None
+            else ""
+        )
+        console.print(
+            f"water: {result.water.temp_f:.0f}°F{trend}, "
+            f"salinity {result.water.salinity_ppt:.0f} ppt [{result.water.source}]"
+        )
     if result.discharge:
-        console.print(f"discharge: {result.discharge.bucket} ({result.discharge.cfs_now:,.0f} cfs now)" if result.discharge.cfs_now else f"discharge: {result.discharge.bucket}")
+        console.print(
+            f"discharge: {result.discharge.bucket} ({result.discharge.cfs_now:,.0f} cfs now)"
+            if result.discharge.cfs_now
+            else f"discharge: {result.discharge.bucket}"
+        )
     if result.missing:
         console.print(f"[yellow]missing sources: {', '.join(result.missing)}[/yellow]")
 

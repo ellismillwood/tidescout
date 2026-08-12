@@ -51,6 +51,10 @@ def test_fetch_weather_forecast(tmp_path):
     assert "models=gfs_seamless" in str(sent)
     for key in HOURLY_KEYS:
         assert key in str(sent)
+    assert "wind_speed_unit=kn" in str(sent)
+    assert "temperature_unit=fahrenheit" in str(sent)
+    assert "precipitation_unit=inch" in str(sent)
+    assert "timezone=America" in str(sent)
 
 
 @respx.mock

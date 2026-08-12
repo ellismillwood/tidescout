@@ -1,5 +1,6 @@
 import json
 import sqlite3
+import sys
 from collections.abc import Callable
 from dataclasses import dataclass
 from datetime import UTC, datetime, timedelta
@@ -49,6 +50,11 @@ class Cache:
         except Exception as exc:
             if existing is not None:
                 stale_payload, fetched_at = existing
+                print(
+                    f"warning: {source}/{key} serving stale data cached "
+                    f"{fetched_at.isoformat()}",
+                    file=sys.stderr,
+                )
                 return Cached(stale_payload, fetched_at, fresh=False)
             raise SourceUnavailable(source, str(exc)) from exc
         self._conn.execute(
