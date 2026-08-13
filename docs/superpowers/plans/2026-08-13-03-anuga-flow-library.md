@@ -1141,13 +1141,19 @@ def friction_field(domain, slug: str, fishery: Fishery) -> np.ndarray:
         zones = src.read(1)
         transform = src.transform
     z_at = sample_to_centroids(domain, zones, transform)
+    # Enum verified against engine/terrain.py::zones in Task 4 (uint8):
+    #   0 = nodata, 1 = land (z >= land_elev_m), 2 = shallow, 3 = mid-depth,
+    #   4 = deep (z < deep_min_m).  FIVE values, not four.
     n = np.full(z_at.shape, cfg.manning_flat, dtype="float64")
-    n[z_at == 3] = cfg.manning_channel   # deep
-    n[z_at == 1] = cfg.manning_marsh     # land/marsh
+    n[z_at == 4] = cfg.manning_channel   # deep -> smooth channel bed
+    n[z_at == 3] = cfg.manning_flat      # mid-depth
+    n[z_at == 2] = cfg.manning_flat      # shallow
+    n[z_at == 1] = cfg.manning_marsh     # land / marsh -- rough, vegetated
+    n[z_at == 0] = cfg.manning_marsh     # nodata slivers: treat as land, never 0
     return n
 ```
 
-**Confirm the zone enum before trusting those numbers:** read `engine/terrain.py::zones` and map the constants to the right `manning_*` value. If the enum ordering differs from the assumption above, fix the mapping here, not in `terrain.py`.
+**Do not re-guess the enum.** Task 4 verified it directly and it is five values, not four; an earlier draft of this plan had `3` meaning "deep", which would have given mid-depth water the channel's friction and left genuinely deep water at the flat default. If you change `terrain.zones`, change this mapping in the same commit.
 
 - [ ] **Step 5: Test it**
 
