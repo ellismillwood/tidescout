@@ -143,6 +143,44 @@ def conditions(
         console.print(f"[yellow]missing sources: {', '.join(result.missing)}[/yellow]")
 
 
+@app.command()
+def features(slug: str, rebuild: bool = typer.Option(False, "--rebuild")) -> None:
+    """Build (if needed) and summarize the ambush-feature inventory."""
+    from shapely.geometry import shape
+
+    from tidescout.config import load_fishery
+    from tidescout.paths import fishery_data_dir
+    from tidescout.pipeline.features import build_features, load_features
+
+    fishery = load_fishery(slug)
+    path = fishery_data_dir(slug) / "features.geojson"
+    if rebuild or not path.exists():
+        build_features(slug, fishery)
+    fc = load_features(slug)
+    counts: dict[str, int] = {}
+    for f in fc["features"]:
+        counts[f["properties"]["type"]] = counts.get(f["properties"]["type"], 0) + 1
+    table = Table(title=f"{fishery.name} — ambush features")
+    table.add_column("type")
+    table.add_column("count", justify="right")
+    for k in sorted(counts):
+        table.add_row(k, str(counts[k]))
+    console.print(table)
+    sized = [f for f in fc["features"] if "area_m2" in f["properties"]]
+    for f in sorted(sized, key=lambda x: -x["properties"]["area_m2"])[:5]:
+        # Deviation from a literal "take the exterior ring's first vertex"
+        # reading: that point can sit arbitrarily far from the feature's
+        # visual location for an elongated/irregular polygon (a channel-
+        # hugging wall, an oxbow bar), which would make the printed lat/lon
+        # misleading rather than merely imprecise. shapely's centroid is the
+        # actual area-weighted center the docstring/brief text calls for,
+        # and geometry is already in EPSG:4326 here so no extra transform.
+        lon, lat = shape(f["geometry"]).centroid.coords[0]
+        console.print(
+            f"  {f['id']}: {f['properties']['area_m2']:,.0f} m² near ({lat:.4f}, {lon:.4f})"
+        )
+
+
 @bathy_app.command()
 def discover(
     slug: str,
