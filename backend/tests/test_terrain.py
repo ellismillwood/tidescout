@@ -25,6 +25,22 @@ def test_curvature_sign_in_pit():
     assert c[20, 20] > 0  # concave up at the pit bottom
 
 
+def test_curvature_nan_safe():
+    # curvature's double-differentiation is an effective stride-2 stencil:
+    # a naive self-cell-only mask leaves all 8 immediate neighbors of an
+    # isolated NaN finite (see engine/terrain.py's comment on curvature).
+    # Require the 2-cell dilation to cover the source cell and its full
+    # 8-neighbor ring, while a cell 3+ cells away stays untouched.
+    z = np.zeros((20, 20), dtype="float32")
+    z[10, 10] = np.nan
+    c = curvature(z, 10.0)
+    assert np.isnan(c[10, 10])
+    ring = [(9, 9), (9, 10), (9, 11), (10, 9), (10, 11), (11, 9), (11, 10), (11, 11)]
+    for i, j in ring:
+        assert np.isnan(c[i, j]), f"expected NaN at {(i, j)}"
+    assert not np.isnan(c[13, 10])  # 3 cells away: outside the corruption radius
+
+
 def test_zones_bands():
     z = np.array([[2.0, 0.0, -1.0, -5.0, np.nan]], dtype="float32")
     out = zones(z, land_elev_m=1.5, shallow_max_m=-0.3, deep_min_m=-3.0)

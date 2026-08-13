@@ -21,6 +21,9 @@ def _write(path: Path, arr: np.ndarray, template_meta: dict, dtype: str, nodata)
 
 
 def build_derivatives(slug: str, fishery: Fishery) -> dict[str, Path]:
+    """Write slope/curv/zones next to the source raster (same grid/CRS); nodata
+    masks relative to the source: zones == source, slope ⊇ source by ~1 cell,
+    curv ⊇ source by 2 cells (see engine.terrain for why each differs)."""
     z, _, meta = read_bathy(slug)
     d = fishery_data_dir(slug)
     s = terrain.slope_deg(z, fishery.bathymetry.cell_m)
