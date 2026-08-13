@@ -3,8 +3,7 @@ from pathlib import Path
 import yaml
 
 from tidescout.models import Fishery
-
-FISHERIES_DIR = Path(__file__).resolve().parents[2] / "fisheries"
+from tidescout.paths import FISHERIES_DIR
 
 
 def load_fishery(slug: str, root: Path | None = None) -> Fishery:
