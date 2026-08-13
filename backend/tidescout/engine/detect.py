@@ -145,30 +145,40 @@ def detect_creek_mouths(
     if not creeks.any():
         return []
     skel = skeletonize(creeks)
-    # `opening()` rounds convex corners of the wet region (any real coastline
-    # will have some -- a point, a headland, or just the valid-data
-    # bounding box after a NaN-bordered mosaic/warp). That rounding leaves
-    # 1-3 px slivers wet-but-not-opened right next to open_water, which
-    # `creeks` then picks up and `skeletonize` reduces to a 1-2 px stub --
-    # indistinguishable from a real mouth by the proximity test below.
-    # Confirmed empirically on a NaN-bordered flat basin (no real creek
-    # anywhere): 4 spurious stubs, exactly one per rectangle corner, each
-    # skeletonizing to 1-2 px. A genuine creek is long and thin (that's
-    # *why* it survives the opening at all, per this function's docstring),
-    # so requiring each skeleton connected-component to have at least
-    # `open_radius` pixels -- the same length scale that produced the
-    # artifact -- clears the corner stubs (verified: max 2 px) while a real
-    # creek's skeleton (verified: 95 px on the synthetic creek) is untouched.
-    skel_labels, skel_n = ndimage.label(skel, structure=np.ones((3, 3)))
-    if skel_n:
-        comp_sizes = ndimage.sum_labels(
-            np.ones_like(skel_labels), skel_labels, index=range(1, skel_n + 1)
-        )
-        keep = {i + 1 for i, sz in enumerate(comp_sizes) if sz >= open_radius}
-        skel = np.isin(skel_labels, list(keep))
     dist_to_open = ndimage.distance_transform_edt(~open_water) * cell_m
     width = ndimage.distance_transform_edt(creeks) * cell_m
-    mouth_px = skel & (dist_to_open <= t.mouth_search_radius_m)
+    # `opening()` rounds convex corners of the wet region wherever one sits
+    # near nodata or the array's own edge (a real coastline will have some
+    # -- a point, a headland, or just a NaN-bordered mosaic's valid-data
+    # boundary). That rounding leaves 1-3 px wet-but-not-opened slivers
+    # immediately adjacent to open_water, which `creeks` picks up and
+    # `skeletonize` reduces to a 1-2 px stub -- indistinguishable from a
+    # real short creek's mouth by proximity-to-open-water alone (confirmed:
+    # a genuine 60-100 m feeder creek, well within what Winyah's marsh
+    # actually has, also skeletonizes to 2-5 px, so filtering by skeleton
+    # *length* drops real creeks along with the artifacts -- verified: both
+    # were being dropped before this fix).
+    #
+    # Origin, not length, is what actually discriminates them: the artifact
+    # is *always* within a couple cells of nodata or the boundary (that's
+    # the mechanism that produces it -- the disk footprint reaches past the
+    # edge/nodata corner and clips a chunk of the wet region right there).
+    # A real creek mouth has no reason to sit there. Exclude candidate mouth
+    # pixels within `artifact_reach_cells` of either, rather than filtering
+    # by how long the skeleton component is. Verified: eliminates all
+    # corner/point stubs on both a rectangular NaN border and an irregular
+    # diamond-shaped coastline (0 spurious mouths, was 4 on the rectangle),
+    # while every real creek from 60 m up finds its mouth (was: only
+    # >=110 m survived under the length filter).
+    artifact_reach_cells = 2
+    near_nodata = ndimage.binary_dilation(np.isnan(z), iterations=artifact_reach_cells)
+    near_edge = np.zeros(z.shape, dtype=bool)
+    near_edge[:artifact_reach_cells, :] = True
+    near_edge[-artifact_reach_cells:, :] = True
+    near_edge[:, :artifact_reach_cells] = True
+    near_edge[:, -artifact_reach_cells:] = True
+    artifact_zone = near_nodata | near_edge
+    mouth_px = skel & (dist_to_open <= t.mouth_search_radius_m) & ~artifact_zone
     rows, cols = np.nonzero(mouth_px)
     if rows.size == 0:
         return []
@@ -209,11 +219,24 @@ def detect_bars(
         area = float(region.sum()) * cell_m * cell_m
         if area < t.bar_min_area_m2:
             continue
-        boundary = region & ~ndimage.binary_erosion(region)
+        # border_value=1 (not scipy's default 0): default erosion treats
+        # space beyond the array edge as background, so a region pixel
+        # sitting on the array's own boundary always erodes away and gets
+        # counted as "boundary" regardless of whether real deep water is
+        # anywhere nearby -- verified: a ridge shifted to touch the array
+        # edge read pct_deep_boundary=0.9557 (18 phantom edge-boundary px
+        # diluting the denominator) vs the true 1.0 with border_value=1,
+        # identical on every region that doesn't touch the array edge.
+        boundary = region & ~ndimage.binary_erosion(region, border_value=1)
         pct = float((boundary & deep_dilated).sum()) / max(1, int(boundary.sum()))
         if pct < 0.25:
             continue
-        polys = _mask_polygons(region, transform, t.bar_min_area_m2, cell_m)
+        # min_area_m2=0.0: already gated on `area` above (raw pixel count),
+        # which is exactly the polygon's eventual vector area for an
+        # orthogonal raster-to-vector conversion -- re-checking the same
+        # threshold here would be redundant. _mask_polygons' own cell_area
+        # sanity floor still applies.
+        polys = _mask_polygons(region, transform, 0.0, cell_m)
         for g in polys:
             out.append(
                 Feature(

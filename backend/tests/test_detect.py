@@ -71,3 +71,44 @@ def test_orientation_of_ew_line():
     from shapely.geometry import LineString
 
     assert abs(detect.orientation_deg(LineString([(0, 0), (100, 0)])) - 90.0) < 1.0
+
+
+def test_creek_mouth_border_artifact_suppressed():
+    """Regression (fix round 1, critical finding): a NaN border 'like the
+    real raster' wrapped around an otherwise flat, fully-wet basin used to
+    produce 4 spurious creek_mouth features -- one per corner rounded off
+    by opening()'s disk footprint. No real feature exists anywhere in this
+    DEM, bordered or not."""
+    z = synth.border_nan(synth.open_basin())
+    feats = detect.detect_creek_mouths(z, _thresholds(), synth.CELL, synth.TRANSFORM)
+    assert feats == []
+
+
+def test_short_real_creek_found_despite_nan_border():
+    """Regression (fix round 1, critical finding): the original fix for the
+    border-corner artifact above filtered candidate mouths by skeleton
+    *length* (>= open_radius px), which also silently dropped genuine short
+    creeks -- a 60 m marsh feeder creek skeletonizes to only 2 px, the same
+    ballpark as a 1-2 px corner-rounding stub. This creek sits in the grid
+    interior, away from the NaN border, alongside the border's own corner
+    artifacts elsewhere in the grid; the mouth must still be found."""
+    z = synth.border_nan(synth.short_creek_mouth_dem(60.0))
+    feats = detect.detect_creek_mouths(z, _thresholds(), synth.CELL, synth.TRANSFORM)
+    mouths = [f for f in feats if f.type == "creek_mouth"]
+    assert len(mouths) == 1
+    true_mouth = Point(synth.TRANSFORM * (99.5, 100.5))
+    assert mouths[0].geometry.distance(true_mouth) < 100.0
+
+
+def test_bar_touching_array_edge_not_boundary_biased():
+    """Regression (fix round 1, important finding): binary_erosion's default
+    border_value=0 treats space beyond the array edge as background, so a
+    region pixel sitting on the array's own boundary always eroded into
+    "boundary" regardless of whether real deep water was anywhere nearby --
+    deflating pct_deep_boundary (verified: 0.9557 instead of the true 1.0
+    for this exact ridge, an 18-pixel dilution from the west-edge column
+    alone). With border_value=1, only real interior-to-region edges count."""
+    z = synth.edge_touching_bar_dem()
+    feats = detect.detect_bars(z, _thresholds(), synth.CELL, synth.TRANSFORM)
+    assert feats, "ridge touching the array edge must still be detected as a bar"
+    assert all(f.attrs["pct_deep_boundary"] >= 0.99 for f in feats)

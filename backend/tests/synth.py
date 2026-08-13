@@ -55,3 +55,35 @@ def hole_dem(size=200):
     yy, xx = np.mgrid[0:size, 0:size]
     z[np.hypot(xx - 100, yy - 100) < 8] = -10.0
     return z
+
+
+def border_nan(z, width=6):
+    """Wrap the outer `width` cells of an array in NaN, simulating the real
+    raster's mosaic/warp nodata edge -- for regression-testing detector
+    behavior against an actual data boundary, not just the array's own edge."""
+    z = z.copy()
+    z[:width, :] = np.nan
+    z[-width:, :] = np.nan
+    z[:, :width] = np.nan
+    z[:, -width:] = np.nan
+    return z
+
+
+def short_creek_mouth_dem(creek_len_m=60.0, size=200):
+    """Same geometry as creek_mouth_dem, but the creek only runs `creek_len_m`
+    north from open water instead of the full grid -- a short marsh feeder
+    creek (Winyah's marsh has genuine creeks in the 60-100 m range), as
+    opposed to the ~980 m creek in creek_mouth_dem."""
+    z = np.full((size, size), 1.0, dtype="float32")
+    z[100:, :] = -4.0
+    rows = round(creek_len_m / CELL)
+    z[100 - rows : 100, 98:101] = -2.0
+    return z
+
+
+def edge_touching_bar_dem(size=200):
+    """Same ridge as point_bar_dem, shifted so its west side touches the
+    array's own edge (col 0) instead of being interior on all sides."""
+    z = np.full((size, size), -6.0, dtype="float32")
+    z[90:110, 0:140] = -1.0
+    return z
