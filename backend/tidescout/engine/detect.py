@@ -10,7 +10,10 @@ from skimage.morphology import disk, opening, skeletonize
 
 from tidescout.models import FeatureThresholds, Fishery
 
-WET_LEVEL_M = 0.0  # approximate mean-water wetness for static detection
+# Default only. Static detectors ask "is this cell wet at a representative
+# water level"; ANUGA has a time-varying free surface, so the two notions of
+# "wet" are about to diverge. Callers pass their own.
+WET_LEVEL_M = 0.0
 
 
 @dataclass
@@ -76,9 +79,13 @@ def _mask_polygons(
 
 
 def detect_dropoffs(
-    z: np.ndarray, slope: np.ndarray, t: FeatureThresholds, transform: Affine
+    z: np.ndarray,
+    slope: np.ndarray,
+    t: FeatureThresholds,
+    transform: Affine,
+    wet_level_m: float = WET_LEVEL_M,
 ) -> list[Feature]:
-    wet = ~np.isnan(z) & (z < WET_LEVEL_M)
+    wet = ~np.isnan(z) & (z < wet_level_m)
     mask = wet & (slope >= t.dropoff_slope_deg)
     cell = abs(transform.a)
     out = []
@@ -114,12 +121,16 @@ def detect_dropoffs(
 
 
 def detect_holes(
-    z: np.ndarray, t: FeatureThresholds, cell_m: float, transform: Affine
+    z: np.ndarray,
+    t: FeatureThresholds,
+    cell_m: float,
+    transform: Affine,
+    wet_level_m: float = WET_LEVEL_M,
 ) -> list[Feature]:
     filled = np.nan_to_num(z, nan=1000.0)
     closed = ndimage.grey_closing(filled, size=15)
     pocket = (closed - filled) > t.hole_delta_m
-    pocket &= ~np.isnan(z) & (z < WET_LEVEL_M)
+    pocket &= ~np.isnan(z) & (z < wet_level_m)
     out = []
     for g in _mask_polygons(
         pocket, transform, t.hole_min_area_m2, cell_m, max_area_m2=t.hole_max_area_m2
@@ -155,9 +166,13 @@ def detect_flats(
 
 
 def detect_creek_mouths(
-    z: np.ndarray, t: FeatureThresholds, cell_m: float, transform: Affine
+    z: np.ndarray,
+    t: FeatureThresholds,
+    cell_m: float,
+    transform: Affine,
+    wet_level_m: float = WET_LEVEL_M,
 ) -> list[Feature]:
-    wet = ~np.isnan(z) & (z < WET_LEVEL_M)
+    wet = ~np.isnan(z) & (z < wet_level_m)
     if not wet.any():
         return []
     open_radius = max(1, round(60.0 / cell_m))

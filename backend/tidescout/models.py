@@ -36,6 +36,7 @@ class BathymetryConfig(BaseModel):
     cell_m: float = 10.0
     land_elev_m: float = 1.5
     contour_depths_m: list[float] = [-2.0, -5.0, -10.0, -15.0]
+    static_wet_level_m: float = 0.0
 
 
 class FeatureThresholds(BaseModel):
@@ -74,6 +75,34 @@ class KnownSpot(BaseModel):
     notes: str = ""
 
 
+class ModelDomain(BaseModel):
+    """Outer boundary of the hydrodynamic model, authored not inferred.
+
+    Ocean and estuary are hydraulically connected through several inlets, so
+    no automatic rule separates them -- see the Plan 3 spike findings. Vertices
+    are (x_km, y_km) in the fishery's bathymetry EPSG, listed clockwise.
+    """
+
+    polygon_utm_km: list[tuple[float, float]]
+    wet_level_m: float = 1.5  # cut the shoreline at highest simulated water
+    simplify_m: float = 25.0  # shoreline generalisation before meshing
+    clean_cells: int = 3  # morphological close/open radius, in cells
+
+
+class AnugaConfig(BaseModel):
+    base_edge_m: float = 60.0
+    jetty_edge_m: float = 15.0
+    jetty_radius_m: float = 300.0
+    manning_channel: float = 0.022
+    manning_flat: float = 0.030
+    manning_marsh: float = 0.045
+    spin_up_h: float = 6.0
+    cycle_h: float = 12.42
+    snapshot_minutes: float = 30.0
+    mass_tolerance: float = 1e-3  # measured residual is ~4e-4; 1e-6 fails healthy runs
+    max_workers: int = 6  # performance cores only -- see Task 11
+
+
 class Fishery(BaseModel):
     slug: str
     name: str
@@ -88,3 +117,5 @@ class Fishery(BaseModel):
     bathymetry: BathymetryConfig = BathymetryConfig()
     features: FeatureThresholds = FeatureThresholds()
     jetties: list[JettySeed] = []
+    model_domain: ModelDomain | None = None
+    anuga: AnugaConfig = AnugaConfig()

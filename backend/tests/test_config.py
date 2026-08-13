@@ -34,3 +34,22 @@ def test_bathymetry_and_feature_config():
         for lon, lat in j.coords:
             assert f.bbox[0] <= lon <= f.bbox[2]
             assert f.bbox[1] <= lat <= f.bbox[3]
+
+
+def test_winyah_has_a_closed_model_domain():
+    f = load_fishery("winyah-bay")
+    assert f.model_domain is not None
+    poly = f.model_domain.polygon_utm_km
+    assert len(poly) >= 4
+    assert poly[0] != poly[-1], "polygon is implicitly closed; do not repeat the first vertex"
+    xs = [p[0] for p in poly]
+    ys = [p[1] for p in poly]
+    # sanity: inside the Winyah UTM 17N analysis grid (643.8-681.9 E, 3669.0-3719.5 N km)
+    assert 643.0 < min(xs) and max(xs) < 682.0
+    assert 3668.0 < min(ys) and max(ys) < 3720.0
+
+
+def test_anuga_mass_tolerance_is_not_machine_precision():
+    """A 1e-6 assert fails on a healthy wetting/drying run (measured 4.2e-4)."""
+    f = load_fishery("winyah-bay")
+    assert f.anuga.mass_tolerance >= 1e-4

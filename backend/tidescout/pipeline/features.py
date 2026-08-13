@@ -42,16 +42,17 @@ def build_features(slug: str, fishery: Fishery) -> Path:
     cell = fishery.bathymetry.cell_m
     epsg = fishery.bathymetry.epsg
     t = fishery.features
+    wet_level_m = fishery.bathymetry.static_wet_level_m
     slope = slope_deg(z, cell)
 
     def lonlat_to_grid(lons, lats):
         return warp_transform("EPSG:4326", f"EPSG:{epsg}", lons, lats)
 
     feats = (
-        detect.detect_dropoffs(z, slope, t, transform)
-        + detect.detect_holes(z, t, cell, transform)
+        detect.detect_dropoffs(z, slope, t, transform, wet_level_m)
+        + detect.detect_holes(z, t, cell, transform, wet_level_m)
         + detect.detect_flats(z, slope, t, transform)
-        + detect.detect_creek_mouths(z, t, cell, transform)
+        + detect.detect_creek_mouths(z, t, cell, transform, wet_level_m)
         + detect.detect_bars(z, t, cell, transform)
         + detect.seed_jetties(fishery, lonlat_to_grid)
     )
