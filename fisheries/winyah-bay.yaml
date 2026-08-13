@@ -1,0 +1,72 @@
+slug: winyah-bay
+name: Winyah Bay
+timezone: America/New_York
+bbox: [-79.45, 33.15, -79.05, 33.60]
+center: [-79.25, 33.35]
+orientation_deg: 135 # entrance faces southeast
+stations:
+  # South Island Ferry, Intracoastal Waterway (33.2517, -79.2683) -- in-bay,
+  # preferred by name per NOAA CO-OPS mdapi tidepredictions live lookup.
+  tide: ["8662549"]
+  # Winyah Bay entrance (33.2072, -79.1845) -- nearest the jetties/bay mouth,
+  # per NOAA CO-OPS mdapi currentpredictions live lookup.
+  currents: ["ACT6531"]
+  water:
+    # WACCAMAW RIVER NEAR PAWLEYS ISLAND, SC (33.5066, -79.1270) -- tidal
+    # reach (site_tp_cd=ST-TS), live-reporting both params (temp 27.5-30.9
+    # degC, salinity 0.0 ppth over the last 3 days).
+    - kind: usgs
+      station: "021108125"
+      params: ["00010", "00480"]
+    # WACCAMAW R NR HAGLEY LANDING NR PAWLEYS ISLAND, SC (33.4446, -79.1739)
+    # -- tidal reach, live-reporting both params (temp 28.9-29.8 degC,
+    # salinity 0.0-1.0 ppth).
+    - kind: usgs
+      station: "02110815"
+      params: ["00010", "00480"]
+    # SAMPIT RIVER BELOW US 17 NEAR GEORGETOWN, SC (33.3599, -79.2880) --
+    # right at Georgetown; only 00010 (temp) reports live, no 00480 data
+    # available for this site, so salinity omitted.
+    - kind: usgs
+      station: "02136371"
+      params: ["00010"]
+rivers:
+  # PEE DEE RIVER AT PEEDEE, SC (34.2043, -79.5484). Confirmed non-tidal via
+  # live 3-day IV discharge history: 0 negative readings, 3830-6710 cfs.
+  # (More-downstream "PEE DEE RIVER AT HWY 701 NR BUCKSPORT, SC" 02135200 is
+  # classified site_tp_cd=ST but empirically tidal -- 7 negative/reversing
+  # readings in the same window -- so excluded despite being closer to the
+  # bay.)
+  - name: Pee Dee
+    usgs_site: "02131000"
+    weight: 1.0
+  # WACCAMAW RIVER NEAR LONGS, SC (33.9127, -78.7150). Confirmed non-tidal
+  # via live 3-day IV discharge history: 0 negative readings, 29-56 cfs.
+  # Originally found by widening the live USGS site search manually, because
+  # discovery.py's USGS bbox padding was asymmetric (east pad only +0.1 deg)
+  # and missed this site -- the Waccamaw bends NE past Conway toward Longs on
+  # the NC line. That padding is now symmetric (+/-1.0 deg on all four
+  # sides), so a plain `tidescout stations winyah-bay` re-run reproduces this
+  # ID directly; live-reconfirmed in the table after the fix. The only other
+  # in-bbox Waccamaw discharge site (Hagley Landing, 02110815) is tidal
+  # (site_tp_cd=ST-TS) and has no live 00060 IV data, so it was rejected for
+  # this role (it is instead recorded as a water sensor above).
+  - name: Waccamaw
+    usgs_site: "02110500"
+    weight: 1.0
+  # BLACK RIVER AT KINGSTREE, SC (33.6623, -79.8361). Confirmed non-tidal via
+  # live 3-day IV discharge history: 0 negative readings, 35-46 cfs. The
+  # more-downstream alternative "BLACK RIVER NEAR ANDREWS, SC" 02136030 is
+  # also site_tp_cd=ST but returned no live 00060 IV data in the same query,
+  # so it was rejected as unreliable for real-time use.
+  - name: Black
+    usgs_site: "02136000"
+    weight: 1.0
+discharge_buckets:
+  low_below_cfs: 6000
+  high_above_cfs: 25000
+climatology:
+  water_temp_f_by_month:
+    {1: 48, 2: 50, 3: 57, 4: 66, 5: 74, 6: 81, 7: 85, 8: 85, 9: 80, 10: 71, 11: 60, 12: 52}
+  salinity_ppt_by_month:
+    {1: 8, 2: 7, 3: 6, 4: 8, 5: 10, 6: 12, 7: 14, 8: 15, 9: 14, 10: 12, 11: 10, 12: 9}
