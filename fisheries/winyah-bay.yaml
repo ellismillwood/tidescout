@@ -63,8 +63,16 @@ rivers:
     usgs_site: "02136000"
     weight: 1.0
 discharge_buckets:
-  low_below_cfs: 6000
-  high_above_cfs: 25000
+  # Recalibrated 2026-08-13 from 365 days of USGS daily means (statCd 00003),
+  # weighted composite of the three gauges below (all weight 1.0). n=365 days:
+  # min 1232 / p25 2774 / median 3866 / p75 6292 / max 22996 cfs.
+  # Per-gauge means: Pee Dee 3745 (02131000, 365d), Waccamaw 642 (02110500,
+  # 365d), Black 397 (02136000, 363d) cfs -- the composite is ~78% Pee Dee,
+  # which is why the old 6000/25000 pair (authored before the gauges were
+  # chosen) put nearly every day in "low" (p75 of 6292 barely clears the old
+  # low threshold, and 25000 is above the observed max).
+  low_below_cfs: 2774
+  high_above_cfs: 6292
 climatology:
   water_temp_f_by_month:
     {1: 48, 2: 50, 3: 57, 4: 66, 5: 74, 6: 81, 7: 85, 8: 85, 9: 80, 10: 71, 11: 60, 12: 52}
