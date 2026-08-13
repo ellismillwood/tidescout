@@ -84,8 +84,17 @@ def detect_dropoffs(
     out = []
     for g in _mask_polygons(mask, transform, t.hole_min_area_m2 / 4.0, cell):
         sel = rio_features.geometry_mask([g], z.shape, transform, invert=True)
-        mean_slope = float(np.nanmean(slope[sel])) if sel.any() else 0.0
-        ftype = "wall" if mean_slope >= t.wall_slope_deg else "dropoff"
+        vals = slope[sel]
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            continue
+        mean_slope = float(np.mean(vals))
+        p90_slope = float(np.percentile(vals, 90))
+        max_slope = float(np.max(vals))
+        stat = {"p90": p90_slope, "max": max_slope, "mean": mean_slope}[
+            t.wall_slope_estimator
+        ]
+        ftype = "wall" if stat >= t.wall_slope_deg else "dropoff"
         out.append(
             Feature(
                 ftype,
@@ -93,6 +102,8 @@ def detect_dropoffs(
                 {
                     "area_m2": float(g.area),
                     "mean_slope_deg": mean_slope,
+                    "p90_slope_deg": p90_slope,
+                    "max_slope_deg": max_slope,
                     "min_z": float(np.nanmin(z[sel])),
                     "max_z": float(np.nanmax(z[sel])),
                     "orientation_deg": orientation_deg(g),

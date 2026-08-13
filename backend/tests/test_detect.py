@@ -58,6 +58,36 @@ def test_gate_dropoff_found_and_typed():
     assert any(f.type == "wall" for f in feats)  # 9 m over 10 m cell = 24 deg
 
 
+def test_steep_step_is_typed_as_wall():
+    """A polygon containing genuinely steep cells must type as wall even though
+    its mean slope is dragged down by the 8 deg boundary it is cut at.
+
+    Deviation from the brief (a bare 12 m single-column step): a lone abrupt
+    step produces a dropoff mask that is *homogeneous* -- every masked cell
+    sees the identical central-difference slope (~31 deg for a 12 m step), so
+    mean == max there and the dilution bug this test exists to catch can
+    never manifest, before or after the fix. Verified empirically: the
+    brief's literal fixture already types as "wall" under the *old*
+    mean-based estimator, so it cannot RED-fail. A gentler ramp (~10 deg,
+    above the 8 deg dropoff threshold but below the 20 deg wall threshold)
+    feeding into a sharp step (~31-35 deg), both inside the same connected
+    mask polygon, gives mean ~15 deg (typed "dropoff" by the old estimator)
+    vs p90 ~35 deg (typed "wall" by the new one) -- confirmed directly.
+    """
+    z = np.full((200, 200), -2.0, dtype="float32")
+    ramp_start, ramp_cols, d_ramp = 90, 8, 1.8  # ~10 deg/column ramp
+    for i in range(ramp_cols):
+        z[:, ramp_start + i] = -2.0 - d_ramp * (i + 1)
+    step_col = ramp_start + ramp_cols
+    z[:, step_col:] = z[0, step_col - 1] - 12.0  # sharp 12 m step after the ramp
+    from tidescout.engine.terrain import slope_deg as _slope
+    from tidescout.models import FeatureThresholds
+    slope = _slope(z, 10.0)
+    feats = detect.detect_dropoffs(z, slope, FeatureThresholds(), synth.TRANSFORM)
+    types = {f.type for f in feats}
+    assert "wall" in types, f"expected a wall, got {types}"
+
+
 def test_gate_hole_found():
     z = synth.hole_dem()
     feats = detect.detect_holes(z, _thresholds(), synth.CELL, synth.TRANSFORM)

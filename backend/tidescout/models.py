@@ -41,6 +41,11 @@ class BathymetryConfig(BaseModel):
 class FeatureThresholds(BaseModel):
     dropoff_slope_deg: float = 8.0
     wall_slope_deg: float = 20.0
+    # Walls are typed on an upper percentile, not the mean: the polygon's own
+    # boundary is cut at dropoff_slope_deg, so its mean slope is structurally
+    # incapable of reaching wall_slope_deg. p90 is robust to the one-cell
+    # artefacts that nanmax would latch onto.
+    wall_slope_estimator: Literal["p90", "max", "mean"] = "p90"
     hole_delta_m: float = 1.5
     hole_min_area_m2: float = 2000.0
     flat_max_slope_deg: float = 1.0
