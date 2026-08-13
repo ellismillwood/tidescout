@@ -1,5 +1,6 @@
 from datetime import date
 
+from tidescout.engine import tides
 from tidescout.engine.conditions import DayConditions, assemble_day
 from tidescout.errors import SourceUnavailable
 from tidescout.models import Fishery
@@ -36,23 +37,23 @@ def load_day(fishery: Fishery, day: date, model_key: str, cache: Cache) -> DayCo
             "tide-events", lambda: noaa.tide_events(tide_station, day, fishery.timezone, cache), []
         )
         try:
-            tides = noaa.tide_hours(tide_station, day, fishery.timezone, cache)
+            tide_hours = noaa.tide_hours(tide_station, day, fishery.timezone, cache)
         # Winyah Bay 8662549 always lands here (CO-OPS rejects interval=h for
         # this subordinate station); any other unexpected error falls back
         # the same way rather than crashing the command.
         except Exception:  # noqa: BLE001
-            tides = []
+            tide_hours = []
         # The fallback also applies when tide_hours "succeeds" with a
         # genuinely empty list (no exception at all) -- not just when it
         # raises -- so both failure shapes land here the same way.
-        if not tides and events:
-            tides = noaa.interpolate_tide_hours(events, day, fishery.timezone)
-        if not tides:
+        if not tide_hours and events:
+            tide_hours = tides.interpolate_tide_hours(events, day, fishery.timezone)
+        if not tide_hours:
             missing.append("tides")
     else:
         missing.append("tides")
         events = []
-        tides = []
+        tide_hours = []
 
     current_station = fishery.stations.currents[0] if fishery.stations.currents else None
     if current_station:
@@ -64,7 +65,7 @@ def load_day(fishery: Fishery, day: date, model_key: str, cache: Cache) -> DayCo
             points = noaa.current_hours(current_station, day, fishery.timezone, cache)
         except Exception:  # noqa: BLE001
             points = []
-        currents = noaa.interpolate_current_hours(points, day, fishery.timezone) if points else []
+        currents = tides.interpolate_current_hours(points, day, fishery.timezone) if points else []
         if not currents:
             missing.append("currents")
     else:
@@ -78,6 +79,6 @@ def load_day(fishery: Fishery, day: date, model_key: str, cache: Cache) -> DayCo
 
     return assemble_day(
         fishery=fishery, day=day, model_label=label, weather_48h=weather_48h,
-        tides=tides, events=events, currents=currents, sun=sun, moon=moon,
+        tides=tide_hours, events=events, currents=currents, sun=sun, moon=moon,
         solunar=solunar, water=water, discharge=discharge, missing=missing,
     )
