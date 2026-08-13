@@ -181,6 +181,61 @@ def features(slug: str, rebuild: bool = typer.Option(False, "--rebuild")) -> Non
         )
 
 
+@app.command()
+def spots(slug: str) -> None:
+    """Show each known spot's nearest detected feature (static validation aid)."""
+    from rasterio.warp import transform as warp_transform
+    from shapely.geometry import Point, shape
+
+    from tidescout.config import load_fishery, load_known_spots
+    from tidescout.pipeline.features import load_features
+
+    fishery = load_fishery(slug)
+    known = load_known_spots(slug)
+    if not known:
+        console.print(f"no spots in fisheries/{slug}.known-spots.yaml — add some!")
+        return
+    fc = load_features(slug)
+    epsg = fishery.bathymetry.epsg
+
+    def to_utm(lons, lats):
+        return warp_transform("EPSG:4326", f"EPSG:{epsg}", lons, lats)
+
+    feats = []
+    for f in fc["features"]:
+        g = shape(f["geometry"])
+        xs, ys = to_utm(*zip(*[(c[0], c[1]) for c in _all_coords(g)], strict=True))
+        feats.append((f["id"], f["properties"]["type"], list(zip(xs, ys, strict=True))))
+    table = Table(title=f"{fishery.name} — known spots vs detected features")
+    for col in ("spot", "nearest feature", "type", "distance m"):
+        table.add_column(col)
+    for s in known:
+        (sx,), (sy,) = to_utm([s.lon], [s.lat])
+        p = Point(sx, sy)
+        best = min(
+            (
+                (fid, ftype, min(p.distance(Point(x, y)) for x, y in coords))
+                for fid, ftype, coords in feats
+            ),
+            key=lambda r: r[2],
+        )
+        table.add_row(s.name, best[0], best[1], f"{best[2]:,.0f}")
+    console.print(table)
+
+
+def _all_coords(geom):
+    """Sample a geometry's coords for nearest-point distance. Approximate for
+    polygons (exterior ring only, no interior sampling) -- fine for a static
+    validation aid, not exact closest-approach geometry."""
+    if geom.geom_type == "Point":
+        return [(geom.x, geom.y)]
+    if geom.geom_type == "LineString":
+        return list(geom.coords)
+    if geom.geom_type == "Polygon":
+        return list(geom.exterior.coords)
+    return [(geom.centroid.x, geom.centroid.y)]
+
+
 @bathy_app.command()
 def discover(
     slug: str,

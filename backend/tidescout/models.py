@@ -56,6 +56,14 @@ class JettySeed(BaseModel):
     coords: list[tuple[float, float]]  # lon, lat vertices, >=2
 
 
+class KnownSpot(BaseModel):
+    name: str
+    lon: float
+    lat: float
+    kind_hint: str = ""
+    notes: str = ""
+
+
 class Fishery(BaseModel):
     slug: str
     name: str
