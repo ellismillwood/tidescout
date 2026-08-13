@@ -3,6 +3,8 @@ from rich.console import Console
 from rich.table import Table
 
 app = typer.Typer(no_args_is_help=True, help="TideScout: SC inshore fishing decision support.")
+bathy_app = typer.Typer(no_args_is_help=True, help="Bathymetry tile discovery and processing.")
+app.add_typer(bathy_app, name="bathy")
 console = Console()
 
 
@@ -137,6 +139,50 @@ def conditions(
         )
     if result.missing:
         console.print(f"[yellow]missing sources: {', '.join(result.missing)}[/yellow]")
+
+
+@bathy_app.command()
+def discover(
+    slug: str,
+    catalog_url: str = typer.Option(
+        "https://www.ngdc.noaa.gov/thredds/catalog/tiles/tiled_19as/catalog.html",
+        "--catalog-url",
+    ),
+) -> None:
+    """Find CUDEM tiles intersecting the fishery bbox; verify and record a manifest.
+
+    Live source is NCEI THREDDS, not S3: no public S3/GeoTIFF bucket exists for
+    CUDEM (verified against the AWS Open Data Registry and direct bucket-name
+    probes -- see the cudem.py module comment and task-4-report.md for the full
+    resolution-ladder log). cudem.py still carries the brief's original
+    list_s3_keys/candidate_tiles S3 path, tested and intact, for a genuinely
+    S3-hosted source if one is ever used.
+    """
+    import rasterio
+
+    from tidescout.config import load_fishery
+    from tidescout.sources import cudem
+
+    fishery = load_fishery(slug)
+    keys = cudem.list_thredds_keys(catalog_url)
+    candidate_keys = cudem.thredds_candidate_keys(fishery, keys)
+    console.print(f"{len(keys)} keys under catalog; {len(candidate_keys)} intersect bbox")
+    entries = []
+    for key in candidate_keys:
+        url = cudem.thredds_tile_url(key)
+        with rasterio.open(url) as src:  # OPeNDAP metadata read only, no full download
+            b = src.bounds
+            entries.append(
+                {
+                    "key": key,
+                    "url": url,
+                    "bounds": [b.left, b.bottom, b.right, b.top],
+                    "crs": str(src.crs),
+                }
+            )
+        console.print(f"  ok {key} bounds={entries[-1]['bounds']}")
+    path = cudem.write_manifest(slug, entries)
+    console.print(f"manifest written: {path} ({len(entries)} tiles)")
 
 
 def main() -> None:
