@@ -20,3 +20,17 @@ def test_load_winyah_bay():
 def test_unknown_fishery_raises():
     with pytest.raises(FileNotFoundError):
         load_fishery("lake-lanier")
+
+
+def test_bathymetry_and_feature_config():
+    f = load_fishery("winyah-bay")
+    assert f.bathymetry.epsg == 26917
+    assert f.bathymetry.cell_m == 10.0
+    assert f.features.dropoff_slope_deg > 0
+    assert f.features.wall_slope_deg > f.features.dropoff_slope_deg
+    assert len(f.jetties) == 2
+    for j in f.jetties:
+        assert len(j.coords) >= 2
+        for lon, lat in j.coords:
+            assert f.bbox[0] <= lon <= f.bbox[2]
+            assert f.bbox[1] <= lat <= f.bbox[3]

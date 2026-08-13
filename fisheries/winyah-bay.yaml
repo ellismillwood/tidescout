@@ -70,3 +70,16 @@ climatology:
     {1: 48, 2: 50, 3: 57, 4: 66, 5: 74, 6: 81, 7: 85, 8: 85, 9: 80, 10: 71, 11: 60, 12: 52}
   salinity_ppt_by_month:
     {1: 8, 2: 7, 3: 6, 4: 8, 5: 10, 6: 12, 7: 14, 8: 15, 9: 14, 10: 12, 11: 10, 12: 9}
+bathymetry:
+  epsg: 26917
+  cell_m: 10.0
+  land_elev_m: 1.5
+  contour_depths_m: [-2.0, -5.0, -10.0, -15.0]
+features: {} # all defaults; tune here during validation
+jetties:
+  # Approximate from memory of the chart — refine vertices against
+  # imagery/ENC during the known-spots validation pass. Format: [lon, lat].
+  - name: North Jetty
+    coords: [[-79.1850, 33.2320], [-79.1630, 33.2160]]
+  - name: South Jetty
+    coords: [[-79.1910, 33.2220], [-79.1700, 33.2050]]

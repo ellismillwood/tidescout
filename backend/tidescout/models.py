@@ -31,6 +31,31 @@ class Climatology(BaseModel):
     salinity_ppt_by_month: dict[int, float]
 
 
+class BathymetryConfig(BaseModel):
+    epsg: int = 26917
+    cell_m: float = 10.0
+    land_elev_m: float = 1.5
+    contour_depths_m: list[float] = [-2.0, -5.0, -10.0, -15.0]
+
+
+class FeatureThresholds(BaseModel):
+    dropoff_slope_deg: float = 8.0
+    wall_slope_deg: float = 20.0
+    hole_delta_m: float = 1.5
+    hole_min_area_m2: float = 2000.0
+    flat_max_slope_deg: float = 1.0
+    flat_band_m: tuple[float, float] = (-1.5, 0.5)
+    shallow_max_m: float = -0.3
+    deep_min_m: float = -3.0
+    bar_min_area_m2: float = 1500.0
+    mouth_search_radius_m: float = 60.0
+
+
+class JettySeed(BaseModel):
+    name: str
+    coords: list[tuple[float, float]]  # lon, lat vertices, >=2
+
+
 class Fishery(BaseModel):
     slug: str
     name: str
@@ -42,3 +67,6 @@ class Fishery(BaseModel):
     rivers: list[RiverGauge]
     discharge_buckets: DischargeBuckets
     climatology: Climatology
+    bathymetry: BathymetryConfig = BathymetryConfig()
+    features: FeatureThresholds = FeatureThresholds()
+    jetties: list[JettySeed] = []
