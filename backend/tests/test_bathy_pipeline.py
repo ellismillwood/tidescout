@@ -24,6 +24,29 @@ def _write_tile(path, west, north, value, size=60, res=0.005):
         dst.write(data, 1)
 
 
+def _write_bathy_utm(d: Path, transform, arr, meta_transform=None, crs="EPSG:26917"):
+    """Write a synthetic `bathy_utm.tif` + `bathy_meta.json` pair directly --
+    mirrors `_write_tile`'s pattern above but for the *output* raster
+    `read_bathy` consumes, with an independently-settable meta transform so
+    a test can make the JSON sidecar agree with or disagree from the raster
+    itself (simulating an interrupted build that left a stale sidecar next
+    to a freshly-rewritten tif)."""
+    height, width = arr.shape
+    with rasterio.open(
+        d / "bathy_utm.tif", "w", driver="GTiff", height=height, width=width, count=1,
+        dtype="float32", crs=crs, transform=transform, nodata=bathy.NODATA, compress="lzw",
+    ) as dst:
+        dst.write(arr, 1)
+    mt = transform if meta_transform is None else meta_transform
+    meta = {
+        "crs": crs,
+        "transform": [mt.a, mt.b, mt.c, mt.d, mt.e, mt.f],
+        "width": width, "height": height,
+        "stats": {"min": float(arr.min()), "max": float(arr.max()), "pct_nodata": 0.0},
+    }
+    (d / "bathy_meta.json").write_text(json.dumps(meta))
+
+
 def test_build_bathy_mosaic_and_reproject(tmp_path, monkeypatch):
     from tidescout import paths
 
@@ -72,8 +95,47 @@ def test_build_bathy_mosaic_and_reproject(tmp_path, monkeypatch):
     assert meta["stats"]["min"] <= -5.0 <= meta["stats"]["max"] or meta["stats"]["min"] == -5.0
 
     arr, transform, meta2 = read_bathy("winyah-bay")
-    assert np.isnan(arr[np.isnan(arr)]).all()  # nodata became nan
+    # `data` here is the raw band read directly from `out` above, before
+    # read_bathy's own nodata->nan conversion -- compare sentinel count to
+    # NaN count 1:1 rather than the tautological `arr[isnan(arr)].all()`
+    # (trivially true for any array, checks nothing about nodata handling).
+    assert np.isnan(arr).sum() == int((data == bathy.NODATA).sum())
     assert arr.shape == (meta2["height"], meta2["width"])
+
+
+def test_read_bathy_returns_transform_from_raster_not_meta(tmp_path, monkeypatch):
+    """The Affine `read_bathy` returns must be the raster's own transform, not
+    a value parsed out of bathy_meta.json. This closes a coverage gap too:
+    no prior test asserted anything about the returned Affine's actual
+    values (only its downstream shape/nan consistency)."""
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+    d = paths.fishery_data_dir("winyah-bay")
+    real_transform = from_origin(500000.0, 3700000.0, 10.0, 10.0)
+    arr = np.full((20, 20), -3.0, dtype="float32")
+    _write_bathy_utm(d, real_transform, arr)
+
+    _, out_transform, out_meta = read_bathy("winyah-bay")
+
+    assert tuple(out_transform)[:6] == pytest.approx(tuple(real_transform)[:6], abs=1e-9)
+    assert out_meta["width"] == 20
+    assert out_meta["height"] == 20
+
+
+def test_read_bathy_raises_on_stale_meta_transform(tmp_path, monkeypatch):
+    """An interrupted build can leave a fresh tif paired with a stale
+    bathy_meta.json transform -- read_bathy must raise, naming both, rather
+    than silently returning a misregistered Affine (every downstream
+    artifact -- slope, curvature, feature polygons -- would otherwise be
+    computed against the wrong georeferencing with no warning at all)."""
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+    d = paths.fishery_data_dir("winyah-bay")
+    real_transform = from_origin(500000.0, 3700000.0, 10.0, 10.0)
+    stale_transform = from_origin(505000.0, 3700000.0, 10.0, 10.0)  # 500-cell east offset
+    arr = np.full((20, 20), -3.0, dtype="float32")
+    _write_bathy_utm(d, real_transform, arr, meta_transform=stale_transform)
+
+    with pytest.raises(ValueError, match="transform"):
+        read_bathy("winyah-bay")
 
 
 @respx.mock

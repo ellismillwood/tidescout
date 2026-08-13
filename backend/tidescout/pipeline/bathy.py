@@ -193,10 +193,28 @@ def build_bathy(fishery: Fishery, tile_paths: list[Path]) -> Path:
 
 
 def read_bathy(slug: str) -> tuple[np.ndarray, Affine, dict]:
+    """Read the analysis raster and its georeferencing.
+
+    The returned Affine comes from the tif itself (`src.transform`), not
+    `bathy_meta.json` -- an interrupted `bathy build` can leave a freshly
+    rewritten tif paired with a stale sidecar JSON from a previous run,
+    which would otherwise silently misregister every downstream artifact
+    (slope, curvature, feature polygons) with no error at all. `meta` stays
+    the source of truth for stats/width/height; its transform is only used
+    here to cross-check against the raster's, not returned.
+    """
     out_dir = fishery_data_dir(slug)
     meta = json.loads((out_dir / "bathy_meta.json").read_text())
     with rasterio.open(out_dir / "bathy_utm.tif") as src:
         arr = src.read(1).astype("float32")
+        transform = src.transform
     arr[arr == NODATA] = np.nan
-    t = meta["transform"]
-    return arr, Affine(t[0], t[1], t[2], t[3], t[4], t[5]), meta
+    meta_transform = Affine(*meta["transform"])
+    if not transform.almost_equals(meta_transform, precision=1e-6):
+        raise ValueError(
+            f"{slug}: bathy_utm.tif transform {tuple(transform)[:6]} disagrees with "
+            f"bathy_meta.json transform {tuple(meta_transform)[:6]} -- stale meta from "
+            "an interrupted build?"
+        )
+    assert arr.shape == (meta["height"], meta["width"])
+    return arr, transform, meta

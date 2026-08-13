@@ -209,24 +209,19 @@ def spots(slug: str) -> None:
         return warp_transform("EPSG:4326", f"EPSG:{epsg}", lons, lats)
 
     def to_utm_geom(g):
-        """Reproject a feature's full geometry to UTM for exact `distance`.
+        """Reproject a feature's full geometry to UTM for exact `distance`."""
 
-        Polygon uses the exterior ring only -- interior rings are already
-        dropped upstream (features.py's `_to4326`), so no loss here.
-        """
+        def tx(coords):
+            xs, ys = to_utm(*zip(*coords, strict=True))
+            return list(zip(xs, ys, strict=True))
+
         if g.geom_type == "Point":
-            coords = [(g.x, g.y)]
-        elif g.geom_type == "LineString":
-            coords = list(g.coords)
-        else:
-            coords = list(g.exterior.coords)
-        xs, ys = to_utm(*zip(*coords, strict=True))
-        utm_coords = list(zip(xs, ys, strict=True))
-        if g.geom_type == "Point":
-            return Point(utm_coords[0])
+            return Point(tx([(g.x, g.y)])[0])
         if g.geom_type == "LineString":
-            return LineString(utm_coords)
-        return Polygon(utm_coords)
+            return LineString(tx(list(g.coords)))
+        if g.geom_type == "Polygon":
+            return Polygon(tx(list(g.exterior.coords)), [tx(list(r.coords)) for r in g.interiors])
+        raise TypeError(f"unsupported geometry: {g.geom_type}")
 
     feats = [
         (f["id"], f["properties"]["type"], to_utm_geom(shape(f["geometry"])))

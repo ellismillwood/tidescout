@@ -30,10 +30,10 @@ def _to4326(geom, epsg: int):
     if isinstance(geom, LineString):
         return LineString(tx(list(geom.coords)))
     if isinstance(geom, Polygon):
-        # Interior rings (holes) dropped by design -- see task-9-report.md;
-        # ambush-feature polygons are consumed for area/location, not exact
-        # hole geometry, and no detector's downstream use needs them.
-        return Polygon(tx(list(geom.exterior.coords)))
+        return Polygon(
+            tx(list(geom.exterior.coords)),
+            [tx(list(r.coords)) for r in geom.interiors],
+        )
     raise TypeError(f"unsupported geometry: {geom.geom_type}")
 
 

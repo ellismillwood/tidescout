@@ -1,6 +1,9 @@
 import json
 
 import numpy as np
+import pytest
+from rasterio.warp import transform as warp_transform
+from shapely.geometry import Polygon, shape
 
 from tidescout.config import load_fishery
 from tidescout.pipeline.features import build_features, load_features
@@ -79,3 +82,53 @@ def test_load_features_reads_back_what_build_wrote(tmp_path, monkeypatch):
     out = build_features("winyah-bay", f)
     on_disk = json.loads(out.read_text())
     assert load_features("winyah-bay") == on_disk
+
+
+def _independent_to_utm(poly4326, epsg):
+    """Reproject a lon/lat Polygon (with interiors) back to UTM, computed
+    from scratch in the test rather than by reusing features.py's `_to4326`
+    or cli.py's `to_utm_geom` -- so this check doesn't just confirm the fix
+    agrees with itself."""
+
+    def tx(coords):
+        xs = [c[0] for c in coords]
+        ys = [c[1] for c in coords]
+        us, vs = warp_transform("EPSG:4326", f"EPSG:{epsg}", xs, ys)
+        return list(zip(us, vs, strict=True))
+
+    return Polygon(
+        tx(list(poly4326.exterior.coords)),
+        [tx(list(r.coords)) for r in poly4326.interiors],
+    )
+
+
+def test_donut_bar_polygon_interior_ring_survives_export(tmp_path, monkeypatch):
+    """Regression: a bar that fully encircles a deep pocket rasterizes to a
+    polygon with an interior ring (a donut). If `_to4326` drops interior
+    rings on export (as it used to), the written GeoJSON polygon becomes a
+    filled blob that claims the hole's area as part of the bar -- exactly
+    the bar-78 bug found on real Winyah Bay data (attrs.area_m2 1,324,200 m2
+    vs an exported ring enclosing ~3,116,957 m2 with the hole filled in).
+
+    Assert the exported polygon keeps both rings, and that its ring-enclosed
+    area (reconstructed back to the UTM analysis CRS, exterior minus hole)
+    reconciles with the area_m2 attribute computed upstream in engine.detect
+    from the original hole-bearing UTM geometry.
+    """
+    z = synth.donut_bar_dem()
+    _fake_bathy(tmp_path, monkeypatch, z)
+    f = load_fishery("winyah-bay")
+    build_features("winyah-bay", f)
+    fc = load_features("winyah-bay")
+    bars = [feat for feat in fc["features"] if feat["properties"]["type"] == "bar"]
+    assert bars, "synthetic donut bar must be detected"
+    donut = max(bars, key=lambda ft: len(ft["geometry"]["coordinates"]))
+    assert donut["geometry"]["type"] == "Polygon"
+    rings = donut["geometry"]["coordinates"]
+    assert len(rings) == 2, "exported polygon must keep exterior + interior ring"
+
+    poly4326 = shape(donut["geometry"])
+    assert len(poly4326.interiors) == 1
+
+    poly_utm = _independent_to_utm(poly4326, f.bathymetry.epsg)
+    assert poly_utm.area == pytest.approx(donut["properties"]["area_m2"], rel=0.01)

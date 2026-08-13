@@ -87,3 +87,20 @@ def edge_touching_bar_dem(size=200):
     z = np.full((size, size), -6.0, dtype="float32")
     z[90:110, 0:140] = -1.0
     return z
+
+
+def donut_bar_dem(size=200):
+    """-6 m deep water everywhere, with an 80x80 cell (800x800 m) -1 m
+    shallow ring fully enclosing a 20x20 cell (200x200 m) -6 m deep 'island'
+    at its center.
+
+    The shallow ring is one 4-connected region whose rasterized polygon has
+    an interior ring (a donut) -- the same shape `detect_bars` produces on
+    real Winyah Bay bathymetry for a bar that scours out a deep pocket in
+    its middle (e.g. bar-78). Used to regression-test that interior rings
+    survive `_to4326`/`to_utm_geom` reprojection instead of being flattened
+    into a filled blob that overclaims the hole's area."""
+    z = np.full((size, size), -6.0, dtype="float32")
+    z[60:140, 60:140] = -1.0
+    z[90:110, 90:110] = -6.0
+    return z
