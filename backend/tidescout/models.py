@@ -49,6 +49,11 @@ class FeatureThresholds(BaseModel):
     deep_min_m: float = -3.0
     bar_min_area_m2: float = 1500.0
     mouth_search_radius_m: float = 60.0
+    # Upper bounds. A feature larger than this is a basin, not an ambush point;
+    # see the 47 km2 bar the real Winyah raster produced.
+    bar_max_area_m2: float = 500_000.0     # 0.5 km2
+    flat_max_area_m2: float = 2_000_000.0  # 2 km2 -- flats are legitimately broad
+    hole_max_area_m2: float = 200_000.0    # 0.2 km2
 
 
 class JettySeed(BaseModel):

@@ -83,7 +83,19 @@ bathymetry:
   cell_m: 10.0
   land_elev_m: 1.5
   contour_depths_m: [-2.0, -5.0, -10.0, -15.0]
-features: {} # all defaults; tune here during validation
+features:
+  # Real Winyah bar areas (rebuild 2026-08-13) are a continuous distribution
+  # from hundreds of thousands of m2 up to two basin-scale blobs (47.39 km2,
+  # 18.65 km2) that swallowed most of the estuary and broke nearest-feature
+  # joins. The model default (500,000 m2 / 0.5 km2) also rejects the
+  # synthetic donut-bar regression fixture in test_features_pipeline.py
+  # (a 600,000 m2 hole-scouring shape modeled on real bar-78, 1,324,200 m2)
+  # even though that fixture is a polygon-export shape test, not a blob.
+  # Bumped to 700,000 for clean margin over that fixture while staying well
+  # below the next real bar up (770,000 m2), so no blob-scale bar slips back
+  # in -- this does not restore bar-78 itself, which stays excluded as
+  # basin-scale at 1.32 km2.
+  bar_max_area_m2: 700000.0
 jetties:
   # Approximate from memory of the chart — refine vertices against
   # imagery/ENC during the known-spots validation pass. Format: [lon, lat].

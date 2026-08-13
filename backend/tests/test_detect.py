@@ -12,6 +12,25 @@ def _thresholds():
     return load_fishery("winyah-bay").features
 
 
+def test_mask_polygons_rejects_basin_scale_blobs():
+    # a 150x150-cell blob = 2.25 km2 at 10 m cells
+    mask = np.zeros((200, 200), dtype=bool)
+    mask[20:170, 20:170] = True
+    kept = detect._mask_polygons(
+        mask, synth.TRANSFORM, min_area_m2=1500.0, cell_m=10.0, max_area_m2=1_000_000.0
+    )
+    assert kept == [], "a 2.25 km2 blob must not survive a 1 km2 cap"
+
+
+def test_mask_polygons_keeps_normal_features():
+    mask = np.zeros((200, 200), dtype=bool)
+    mask[100:120, 100:130] = True          # 200x300 m = 0.06 km2
+    kept = detect._mask_polygons(
+        mask, synth.TRANSFORM, min_area_m2=1500.0, cell_m=10.0, max_area_m2=1_000_000.0
+    )
+    assert len(kept) == 1
+
+
 def test_gate_creek_mouth_found():
     z = synth.creek_mouth_dem()
     feats = detect.detect_creek_mouths(z, _thresholds(), synth.CELL, synth.TRANSFORM)

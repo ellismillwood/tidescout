@@ -47,15 +47,31 @@ def orientation_deg(geometry) -> float:
     return float(bearing)
 
 
-def _mask_polygons(mask: np.ndarray, transform: Affine, min_area_m2: float, cell_m: float):
+def _mask_polygons(
+    mask: np.ndarray,
+    transform: Affine,
+    min_area_m2: float,
+    cell_m: float,
+    max_area_m2: float | None = None,
+):
+    """Polygonise a boolean mask, dropping components outside the size band.
+
+    The upper bound is not cosmetic: without it a single connected component
+    can span the whole estuary (a 47 km2 'bar' covering 21 x 35 km was what
+    the real Winyah raster produced), and every point-in-polygon join against
+    it returns distance 0, which destroys 'nearest feature to this cell'.
+    """
     polys = []
     cell_area = cell_m * cell_m
     for geom, val in rio_features.shapes(mask.astype("uint8"), transform=transform):
         if val != 1:
             continue
         g = shape(geom)
-        if g.area >= min_area_m2 and g.area >= cell_area:
-            polys.append(g)
+        if g.area < min_area_m2 or g.area < cell_area:
+            continue
+        if max_area_m2 is not None and g.area > max_area_m2:
+            continue
+        polys.append(g)
     return polys
 
 
@@ -94,7 +110,9 @@ def detect_holes(
     pocket = (closed - filled) > t.hole_delta_m
     pocket &= ~np.isnan(z) & (z < WET_LEVEL_M)
     out = []
-    for g in _mask_polygons(pocket, transform, t.hole_min_area_m2, cell_m):
+    for g in _mask_polygons(
+        pocket, transform, t.hole_min_area_m2, cell_m, max_area_m2=t.hole_max_area_m2
+    ):
         sel = rio_features.geometry_mask([g], z.shape, transform, invert=True)
         rim = float(np.nanmax((closed - filled)[sel]))
         out.append(
@@ -119,7 +137,9 @@ def detect_flats(
     cell = abs(transform.a)
     return [
         Feature("flat", g, {"area_m2": float(g.area)})
-        for g in _mask_polygons(mask, transform, 4.0 * t.hole_min_area_m2, cell)
+        for g in _mask_polygons(
+            mask, transform, 4.0 * t.hole_min_area_m2, cell, max_area_m2=t.flat_max_area_m2
+        )
     ]
 
 
@@ -236,7 +256,7 @@ def detect_bars(
         # orthogonal raster-to-vector conversion -- re-checking the same
         # threshold here would be redundant. _mask_polygons' own cell_area
         # sanity floor still applies.
-        polys = _mask_polygons(region, transform, 0.0, cell_m)
+        polys = _mask_polygons(region, transform, 0.0, cell_m, max_area_m2=t.bar_max_area_m2)
         for g in polys:
             out.append(
                 Feature(
