@@ -90,7 +90,7 @@ def edge_touching_bar_dem(size=200):
 
 
 def donut_bar_dem(size=200):
-    """-6 m deep water everywhere, with an 80x80 cell (800x800 m) -1 m
+    """-6 m deep water everywhere, with a 64x64 cell (640x640 m) -1 m
     shallow ring fully enclosing a 20x20 cell (200x200 m) -6 m deep 'island'
     at its center.
 
@@ -99,8 +99,16 @@ def donut_bar_dem(size=200):
     real Winyah Bay bathymetry for a bar that scours out a deep pocket in
     its middle (e.g. bar-78). Used to regression-test that interior rings
     survive `_to4326`/`to_utm_geom` reprojection instead of being flattened
-    into a filled blob that overclaims the hole's area."""
+    into a filled blob that overclaims the hole's area.
+
+    Net donut area is (64^2 - 20^2) * 10^2 = 369,600 m2, deliberately kept
+    well under FeatureThresholds' default `bar_max_area_m2` (500,000 m2).
+    This fixture's job is to prove an interior ring survives GeoJSON export,
+    a property that holds at any size -- it must not be sized to *reach*
+    the cap (that would let arbitrary test scaffolding dictate a production
+    threshold; if the cap ever needs retuning, that should come from ground
+    truth, not from this fixture)."""
     z = np.full((size, size), -6.0, dtype="float32")
-    z[60:140, 60:140] = -1.0
+    z[68:132, 68:132] = -1.0
     z[90:110, 90:110] = -6.0
     return z
