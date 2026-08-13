@@ -1,3 +1,5 @@
+import json
+
 import typer
 from rich.console import Console
 from rich.table import Table
@@ -182,6 +184,23 @@ def discover(
         console.print(f"  ok {key} bounds={entry['bounds']}")
     path = cudem.write_manifest(slug, entries)
     console.print(f"manifest written: {path} ({len(entries)} tiles)")
+
+
+@bathy_app.command()
+def build(slug: str) -> None:
+    """Download manifest tiles (cached) and build the UTM analysis raster."""
+    from tidescout.config import load_fishery
+    from tidescout.pipeline.bathy import build_bathy, ensure_tiles
+    from tidescout.sources.cudem import load_manifest
+
+    fishery = load_fishery(slug)
+    entries = load_manifest(slug)
+    if not entries:
+        raise typer.BadParameter(f"no tile manifest — run `tidescout bathy discover {slug}` first")
+    tile_paths = ensure_tiles(slug, entries)
+    out = build_bathy(fishery, tile_paths)
+    meta = json.loads((out.parent / "bathy_meta.json").read_text())
+    console.print(f"built {out}: {meta['width']}x{meta['height']} @10m, stats={meta['stats']}")
 
 
 def main() -> None:
