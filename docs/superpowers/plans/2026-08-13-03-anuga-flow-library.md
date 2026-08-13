@@ -758,7 +758,9 @@ In `detect.py`, replace the module constant with a default parameter. Keep the n
 WET_LEVEL_M = 0.0
 ```
 
-Then give every detector that references it a `wet_level_m: float = WET_LEVEL_M` keyword and use the parameter internally rather than the module global. In `pipeline/features.py`, pass `wet_level_m=fishery.bathymetry.land_elev_m - 1.5` — **no.** Pass it explicitly from config instead: add `static_wet_level_m: float = 0.0` to `BathymetryConfig` and thread `fishery.bathymetry.static_wet_level_m` through `build_features`.
+Then give every detector that references it a `wet_level_m: float = WET_LEVEL_M` keyword and use the parameter internally rather than the module global.
+
+Add `static_wet_level_m: float = 0.0` to `BathymetryConfig`, and in `pipeline/features.py` thread `fishery.bathymetry.static_wet_level_m` into each detector call. The default equals the old module constant, so the rebuilt inventory must be unchanged — that is what step 7 verifies.
 
 - [ ] **Step 7: Verify nothing moved**
 
@@ -1754,6 +1756,25 @@ def build_library(
     fishery = load_fishery(slug)
     workers = max_workers or fishery.anuga.max_workers
     results: dict[str, dict] = {}
+
+    if workers == 1:
+        # Serial, in-process: how you debug one misbehaving regime, and the
+        # only path a test can monkeypatch (pool children see no patches).
+        for r, d in REGIME_MATRIX:
+            name = regime_name(r, d)
+            try:
+                out_dir = run_regime(slug, r, d, sim_hours)
+            except Exception as exc:
+                results[name] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+                continue
+            meta = json.loads((out_dir / "regime.json").read_text())
+            meta["status"] = "ok"
+            meta["reversal"] = reversal_check(out_dir)
+            results[name] = meta
+        manifest = regime_dir(slug) / "library.json"
+        manifest.write_text(json.dumps({"regimes": results}, indent=2))
+        return results
+
     with ProcessPoolExecutor(max_workers=workers) as pool:
         futures = {
             pool.submit(run_regime, slug, r, d, sim_hours): regime_name(r, d)
@@ -1781,6 +1802,9 @@ def build_library(
 
 ```python
 def test_build_library_records_a_failed_regime_without_losing_others(monkeypatch, tmp_path):
+    """One blown-up regime must not cost the other eight."""
+    import json
+
     from tidescout import paths
     monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
 
@@ -1789,29 +1813,25 @@ def test_build_library_records_a_failed_regime_without_losing_others(monkeypatch
             raise RuntimeError("solver blew up")
         out = regimes.regime_dir(slug) / regimes.regime_name(r, d)
         out.mkdir(parents=True, exist_ok=True)
-        (out / "regime.json").write_text(json.dumps({"regime": regimes.regime_name(r, d),
-                                                     "snapshots": []}))
+        (out / "regime.json").write_text(
+            json.dumps({"regime": regimes.regime_name(r, d), "snapshots": []})
+        )
         return out
 
     monkeypatch.setattr(regimes, "run_regime", fake_run)
     monkeypatch.setattr(regimes, "reversal_check", lambda d: {"reversed": True})
-    # run in-process so monkeypatching applies
-    monkeypatch.setattr(regimes, "build_library", regimes.build_library.__wrapped__
-                        if hasattr(regimes.build_library, "__wrapped__")
-                        else regimes.build_library)
-    out = {}
-    for r, d in regimes.REGIME_MATRIX:
-        name = regimes.regime_name(r, d)
-        try:
-            fake_run("winyah-bay", r, d)
-            out[name] = {"status": "ok"}
-        except RuntimeError as e:
-            out[name] = {"status": "failed", "error": str(e)}
-    assert out["spring_high"]["status"] == "failed"
-    assert sum(v["status"] == "ok" for v in out.values()) == 8
+
+    # max_workers=1 takes the in-process serial path, so monkeypatching applies.
+    results = regimes.build_library("winyah-bay", max_workers=1)
+
+    assert results["spring_high"]["status"] == "failed"
+    assert "solver blew up" in results["spring_high"]["error"]
+    assert sum(v["status"] == "ok" for v in results.values()) == 8
+    manifest = json.loads((regimes.regime_dir("winyah-bay") / "library.json").read_text())
+    assert len(manifest["regimes"]) == 9
 ```
 
-This tests the failure-isolation contract directly; a `ProcessPoolExecutor` cannot see monkeypatches in its children, so do not try to test the pool itself.
+A `ProcessPoolExecutor` cannot see monkeypatches in its children, which is why `build_library` must take an in-process path at `max_workers=1`. That path is not test-only scaffolding — it is also how you debug a single misbehaving regime under a debugger.
 
 - [ ] **Step 3: Wire up the CLI**
 
@@ -2140,9 +2160,14 @@ def test_bracket_phases_wraps_around_the_cycle():
     assert w == pytest.approx(0.6, abs=1e-6)  # 0.9 is 60% from 0.75 toward 1.0
 
 
-def test_bracket_phases_exact_hit():
+def test_bracket_phases_exact_hit_lands_on_a_snapshot():
+    """Landing exactly on a snapshot must weight it fully. The first bracket
+    that contains the phase wins, so 0.5 comes back as the far end of [0.0,0.5]
+    (weight 1.0) rather than the near end of the next span -- equivalent, and
+    this is the branch the implementation actually takes."""
     lo, hi, w = flow.bracket_phases([0.0, 0.5], 0.5)
-    assert lo == 1 and w == pytest.approx(0.0)
+    assert (lo, hi) == (0, 1)
+    assert w == pytest.approx(1.0)
 
 
 def test_interpolation_is_on_components_not_direction():
@@ -2326,7 +2351,9 @@ def flow_validate(
     xs, ys = warp_transform("EPSG:4326", f"EPSG:{fishery.bathymetry.epsg}", lons, lats)
 
     table = Table(title=f"{fishery.name} — known spots vs flow library ({regime})")
-    for col in ("spot", "expects", "peak speed", "at phase", "max shear", "slack min"):
+    # "speed spread" is the within-radius max-minus-min, a proxy for a seam --
+    # deliberately not called shear, which is the gradient flowlib computes.
+    for col in ("spot", "expects", "peak speed", "at phase", "speed spread", "slack min"):
         table.add_column(col)
 
     for spot, sx, sy in zip(spots, xs, ys, strict=True):
