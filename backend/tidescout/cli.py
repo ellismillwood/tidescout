@@ -208,5 +208,16 @@ def build(slug: str) -> None:
         console.print(f"  derived {name}: {path}")
 
 
+@bathy_app.command()
+def artifacts(slug: str) -> None:
+    """Render hillshade, quicklook PNG, and contour GeoJSON."""
+    from tidescout.config import load_fishery
+    from tidescout.pipeline.artifacts import build_artifacts
+
+    fishery = load_fishery(slug)
+    for name, path in build_artifacts(slug, fishery).items():
+        console.print(f"{name}: {path} ({path.stat().st_size:,} bytes)")
+
+
 def main() -> None:
     app()
