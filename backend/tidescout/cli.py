@@ -188,9 +188,11 @@ def discover(
 
 @bathy_app.command()
 def build(slug: str) -> None:
-    """Download manifest tiles (cached) and build the UTM analysis raster."""
+    """Download manifest tiles (cached), build the UTM analysis raster, and
+    derive slope/curvature/zones rasters from it."""
     from tidescout.config import load_fishery
     from tidescout.pipeline.bathy import build_bathy, ensure_tiles
+    from tidescout.pipeline.derivatives import build_derivatives
     from tidescout.sources.cudem import load_manifest
 
     fishery = load_fishery(slug)
@@ -201,6 +203,9 @@ def build(slug: str) -> None:
     out = build_bathy(fishery, tile_paths)
     meta = json.loads((out.parent / "bathy_meta.json").read_text())
     console.print(f"built {out}: {meta['width']}x{meta['height']} @10m, stats={meta['stats']}")
+    deriv_paths = build_derivatives(slug, fishery)
+    for name, path in deriv_paths.items():
+        console.print(f"  derived {name}: {path}")
 
 
 def main() -> None:
