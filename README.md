@@ -22,3 +22,10 @@ Personal fishing decision-support app for SC inshore waters (Winyah Bay first; C
     make check
 
     # all cached API data lives in data/cache.sqlite — delete it to force a full refresh
+
+    # bathymetry pipeline (Plan 2): discover tiles once, then build + detect
+    ~/.venvs/tidescout/bin/tidescout bathy discover winyah-bay
+    ~/.venvs/tidescout/bin/tidescout bathy build winyah-bay      # ~1-2 GB of tiles cached in data/
+    ~/.venvs/tidescout/bin/tidescout bathy artifacts winyah-bay  # open data/winyah-bay/quicklook.png
+    ~/.venvs/tidescout/bin/tidescout features winyah-bay         # ambush-feature inventory
+    ~/.venvs/tidescout/bin/tidescout spots winyah-bay            # your known spots vs detections
