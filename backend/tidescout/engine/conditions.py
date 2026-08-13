@@ -5,10 +5,12 @@ from datetime import date, datetime, timedelta
 from typing import TYPE_CHECKING
 from zoneinfo import ZoneInfo
 
+from tidescout.engine.tides import stage_at
+
 if TYPE_CHECKING:
+    from tidescout.engine.tides import CurrentHour, TideEvent, TideHour
     from tidescout.models import Fishery
     from tidescout.sources.astronomy import MoonInfo, SolunarPeriod, SunTimes
-    from tidescout.sources.noaa import CurrentHour, TideEvent, TideHour
     from tidescout.sources.usgs import DischargeSummary, WaterSummary
     from tidescout.sources.weather import WeatherHour
 
@@ -67,8 +69,6 @@ def assemble_day(
     discharge: DischargeSummary | None,
     missing: list[str],
 ) -> DayConditions:
-    from tidescout.sources.noaa import stage_at  # pure function, no I/O
-
     tz = ZoneInfo(fishery.timezone)
     day_start = datetime.combine(day, datetime.min.time(), tz)
     day_end = day_start + timedelta(days=1)

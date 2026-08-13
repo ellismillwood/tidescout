@@ -1,0 +1,11 @@
+# Ellis's ground truth for Winyah Bay. Fill freely — this file is the
+# validation input for feature detection now and the ANUGA flow gate in Plan 3.
+# Each spot: name, lon, lat (decimal degrees), kind_hint (eddy | rip | slack |
+# dropoff | hole | flat | creek_mouth | bar | other), notes (tide phase, season,
+# anything). Example (leave commented):
+#   - name: North Jetty rip
+#     lon: -79.1680
+#     lat: 33.2190
+#     kind_hint: rip
+#     notes: last of the ebb, trout stack on the seam
+spots: []

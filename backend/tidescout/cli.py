@@ -1,8 +1,12 @@
+import json
+
 import typer
 from rich.console import Console
 from rich.table import Table
 
 app = typer.Typer(no_args_is_help=True, help="TideScout: SC inshore fishing decision support.")
+bathy_app = typer.Typer(no_args_is_help=True, help="Bathymetry tile discovery and processing.")
+app.add_typer(bathy_app, name="bathy")
 console = Console()
 
 
@@ -137,6 +141,180 @@ def conditions(
         )
     if result.missing:
         console.print(f"[yellow]missing sources: {', '.join(result.missing)}[/yellow]")
+
+
+@app.command()
+def features(slug: str, rebuild: bool = typer.Option(False, "--rebuild")) -> None:
+    """Build (if needed) and summarize the ambush-feature inventory."""
+    from shapely.geometry import shape
+
+    from tidescout.config import load_fishery
+    from tidescout.paths import fishery_data_dir
+    from tidescout.pipeline.features import build_features, load_features
+
+    fishery = load_fishery(slug)
+    path = fishery_data_dir(slug) / "features.geojson"
+    if rebuild or not path.exists():
+        build_features(slug, fishery)
+    fc = load_features(slug)
+    counts: dict[str, int] = {}
+    for f in fc["features"]:
+        counts[f["properties"]["type"]] = counts.get(f["properties"]["type"], 0) + 1
+    table = Table(title=f"{fishery.name} — ambush features")
+    table.add_column("type")
+    table.add_column("count", justify="right")
+    for k in sorted(counts):
+        table.add_row(k, str(counts[k]))
+    console.print(table)
+    sized = [f for f in fc["features"] if "area_m2" in f["properties"]]
+    for f in sorted(sized, key=lambda x: -x["properties"]["area_m2"])[:5]:
+        # Deviation from a literal "take the exterior ring's first vertex"
+        # reading: that point can sit arbitrarily far from the feature's
+        # visual location for an elongated/irregular polygon (a channel-
+        # hugging wall, an oxbow bar), which would make the printed lat/lon
+        # misleading rather than merely imprecise. shapely's centroid is the
+        # actual area-weighted center the docstring/brief text calls for,
+        # and geometry is already in EPSG:4326 here so no extra transform.
+        lon, lat = shape(f["geometry"]).centroid.coords[0]
+        console.print(
+            f"  {f['id']}: {f['properties']['area_m2']:,.0f} m² near ({lat:.4f}, {lon:.4f})"
+        )
+
+
+@app.command()
+def spots(slug: str) -> None:
+    """Show each known spot's nearest detected feature (static validation aid)."""
+    from rasterio.warp import transform as warp_transform
+    from shapely.geometry import LineString, Point, Polygon, shape
+
+    from tidescout.config import load_fishery, load_known_spots
+    from tidescout.paths import fishery_data_dir
+    from tidescout.pipeline.features import load_features
+
+    fishery = load_fishery(slug)
+    known = load_known_spots(slug)
+    if not known:
+        console.print(f"no spots in fisheries/{slug}.known-spots.yaml — add some!")
+        return
+    path = fishery_data_dir(slug) / "features.geojson"
+    if not path.exists():
+        console.print(
+            f"no features.geojson for {slug} — run `tidescout features {slug} --rebuild` first"
+        )
+        return
+    fc = load_features(slug)
+    epsg = fishery.bathymetry.epsg
+
+    def to_utm(lons, lats):
+        return warp_transform("EPSG:4326", f"EPSG:{epsg}", lons, lats)
+
+    def to_utm_geom(g):
+        """Reproject a feature's full geometry to UTM for exact `distance`."""
+
+        def tx(coords):
+            xs, ys = to_utm(*zip(*coords, strict=True))
+            return list(zip(xs, ys, strict=True))
+
+        if g.geom_type == "Point":
+            return Point(tx([(g.x, g.y)])[0])
+        if g.geom_type == "LineString":
+            return LineString(tx(list(g.coords)))
+        if g.geom_type == "Polygon":
+            return Polygon(tx(list(g.exterior.coords)), [tx(list(r.coords)) for r in g.interiors])
+        raise TypeError(f"unsupported geometry: {g.geom_type}")
+
+    feats = [
+        (f["id"], f["properties"]["type"], to_utm_geom(shape(f["geometry"])))
+        for f in fc["features"]
+    ]
+    table = Table(title=f"{fishery.name} — known spots vs detected features")
+    for col in ("spot", "nearest feature", "type", "distance m"):
+        table.add_column(col)
+    for s in known:
+        (sx,), (sy,) = to_utm([s.lon], [s.lat])
+        p = Point(sx, sy)
+        best = min(
+            ((fid, ftype, p.distance(geom)) for fid, ftype, geom in feats),
+            key=lambda r: r[2],
+        )
+        table.add_row(s.name, best[0], best[1], f"{best[2]:,.0f}")
+    console.print(table)
+
+
+@bathy_app.command()
+def discover(
+    slug: str,
+    catalog_url: str = typer.Option(
+        "https://www.ngdc.noaa.gov/thredds/catalog/tiles/tiled_19as/catalog.html",
+        "--catalog-url",
+    ),
+) -> None:
+    """Find CUDEM tiles intersecting the fishery bbox; verify and record a manifest.
+
+    Live source is NCEI THREDDS, not S3: no public S3/GeoTIFF bucket exists for
+    CUDEM (verified against the AWS Open Data Registry and direct bucket-name
+    probes -- see the cudem.py module comment and task-4-report.md for the full
+    resolution-ladder log). cudem.py still carries the brief's original
+    list_s3_keys/candidate_tiles S3 path, tested and intact, for a genuinely
+    S3-hosted source if one is ever used.
+    """
+    import rasterio
+
+    from tidescout.config import load_fishery
+    from tidescout.sources import cudem
+
+    fishery = load_fishery(slug)
+    keys = cudem.list_thredds_keys(catalog_url)
+    candidate_keys = cudem.thredds_candidate_keys(fishery, keys)
+    console.print(f"{len(keys)} keys under catalog; {len(candidate_keys)} intersect bbox")
+    entries = []
+    for key in candidate_keys:
+        # rasterio-only DAP connection string -- never persisted (see
+        # thredds_tile_url's docstring); the manifest gets thredds_file_url()'s
+        # plain downloadable URL instead, via thredds_manifest_entry() below.
+        dap_url = cudem.thredds_tile_url(key)
+        with rasterio.open(dap_url) as src:  # OPeNDAP metadata read only, no full download
+            b = src.bounds
+            entry = cudem.thredds_manifest_entry(
+                key, (b.left, b.bottom, b.right, b.top), str(src.crs)
+            )
+            entries.append(entry)
+        console.print(f"  ok {key} bounds={entry['bounds']}")
+    path = cudem.write_manifest(slug, entries)
+    console.print(f"manifest written: {path} ({len(entries)} tiles)")
+
+
+@bathy_app.command()
+def build(slug: str) -> None:
+    """Download manifest tiles (cached), build the UTM analysis raster, and
+    derive slope/curvature/zones rasters from it."""
+    from tidescout.config import load_fishery
+    from tidescout.pipeline.bathy import build_bathy, ensure_tiles
+    from tidescout.pipeline.derivatives import build_derivatives
+    from tidescout.sources.cudem import load_manifest
+
+    fishery = load_fishery(slug)
+    entries = load_manifest(slug)
+    if not entries:
+        raise typer.BadParameter(f"no tile manifest — run `tidescout bathy discover {slug}` first")
+    tile_paths = ensure_tiles(slug, entries)
+    out = build_bathy(fishery, tile_paths)
+    meta = json.loads((out.parent / "bathy_meta.json").read_text())
+    console.print(f"built {out}: {meta['width']}x{meta['height']} @10m, stats={meta['stats']}")
+    deriv_paths = build_derivatives(slug, fishery)
+    for name, path in deriv_paths.items():
+        console.print(f"  derived {name}: {path}")
+
+
+@bathy_app.command()
+def artifacts(slug: str) -> None:
+    """Render hillshade, quicklook PNG, and contour GeoJSON."""
+    from tidescout.config import load_fishery
+    from tidescout.pipeline.artifacts import build_artifacts
+
+    fishery = load_fishery(slug)
+    for name, path in build_artifacts(slug, fishery).items():
+        console.print(f"{name}: {path} ({path.stat().st_size:,} bytes)")
 
 
 def main() -> None:

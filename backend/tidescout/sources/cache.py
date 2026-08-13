@@ -8,6 +8,7 @@ from pathlib import Path
 from typing import Any
 
 from tidescout.errors import SourceUnavailable
+from tidescout.paths import DATA_DIR
 
 
 @dataclass
@@ -71,6 +72,6 @@ _default: Cache | None = None
 def default_cache() -> Cache:
     global _default
     if _default is None:
-        db = Path(__file__).resolve().parents[3] / "data" / "cache.sqlite"
+        db = DATA_DIR / "cache.sqlite"
         _default = Cache(db)
     return _default
