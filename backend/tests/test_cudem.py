@@ -6,8 +6,11 @@ from tidescout.sources.cudem import (
     candidate_tiles,
     list_s3_keys,
     list_thredds_keys,
+    load_manifest,
     parse_ninth_arc_name,
     thredds_candidate_keys,
+    thredds_file_url,
+    thredds_manifest_entry,
     thredds_tile_url,
 )
 
@@ -104,3 +107,57 @@ def test_thredds_candidate_keys_filters_to_bbox():
     f = load_fishery("winyah-bay")
     got = thredds_candidate_keys(f, keys)
     assert got == ["ncei19_n33x50_w079x50_2019v1.nc", "ncei19_n33x25_w079x25_2019v1.nc"]
+
+
+def test_thredds_file_url_is_plain_downloadable_https():
+    # Fix (2026-08-13): task 5's downloader does httpx.stream("GET", url) and
+    # url.rsplit("/", 1)[-1] for the filename. thredds_tile_url()'s
+    # NETCDF:"...dodsC..." form fails httpx's scheme check outright and leaves
+    # a trailing '"' in the derived filename -- deterministic failure on every
+    # entry. thredds_file_url() is THREDDS's plain HTTPServer form instead.
+    url = thredds_file_url("ncei19_n33x50_w079x50_2019v1.nc")
+    assert url == (
+        "https://www.ngdc.noaa.gov/thredds/fileServer/tiles/tiled_19as/"
+        "ncei19_n33x50_w079x50_2019v1.nc"
+    )
+    assert url.startswith("https://")
+    assert "NETCDF:" not in url
+    assert '"' not in url
+    # what the downloader's rsplit derives as the local filename
+    assert url.rsplit("/", 1)[-1] == "ncei19_n33x50_w079x50_2019v1.nc"
+
+
+def test_thredds_manifest_entry_persists_fileserver_url_not_dap():
+    entry = thredds_manifest_entry(
+        "ncei19_n33x50_w079x50_2019v1.nc",
+        (-79.50018518519876, 33.249814805198355, -79.24981480519834, 33.500185185198774),
+        'GEOGCS["GRS 1980(IUGG, 1980)", ...]',
+    )
+    assert entry["key"] == "ncei19_n33x50_w079x50_2019v1.nc"
+    assert entry["url"] == (
+        "https://www.ngdc.noaa.gov/thredds/fileServer/tiles/tiled_19as/"
+        "ncei19_n33x50_w079x50_2019v1.nc"
+    )
+    assert entry["url"].startswith("https://")
+    assert "NETCDF:" not in entry["url"]
+    assert '"' not in entry["url"]
+    assert entry["bounds"] == [
+        -79.50018518519876,
+        33.249814805198355,
+        -79.24981480519834,
+        33.500185185198774,
+    ]
+
+
+def test_committed_manifest_urls_are_downloadable_fileserver_urls():
+    # Regression guard on the real, live-verified fisheries/winyah-bay.tiles.yaml
+    # (not a mock): every entry's url must be something task 5's
+    # httpx.stream("GET", url) + url.rsplit("/", 1)[-1] can actually use. Catches
+    # any future regression back to persisting thredds_tile_url()'s GDAL-only
+    # NETCDF:"...dodsC..." connection string.
+    entries = load_manifest("winyah-bay")
+    assert 2 <= len(entries) <= 8
+    for e in entries:
+        assert e["url"].startswith("https://"), e["url"]
+        assert "NETCDF:" not in e["url"], e["url"]
+        assert '"' not in e["url"], e["url"]

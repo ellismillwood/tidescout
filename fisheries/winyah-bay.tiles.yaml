@@ -1,5 +1,5 @@
 - key: ncei19_n33x25_w079x25_2019v1.nc
-  url: NETCDF:"https://www.ngdc.noaa.gov/thredds/dodsC/tiles/tiled_19as/ncei19_n33x25_w079x25_2019v1.nc"
+  url: https://www.ngdc.noaa.gov/thredds/fileServer/tiles/tiled_19as/ncei19_n33x25_w079x25_2019v1.nc
   bounds:
   - -79.25018518519876
   - 32.999814805198355
@@ -7,7 +7,7 @@
   - 33.250185185198774
   crs: GEOGCS["GRS 1980(IUGG, 1980)",DATUM["unknown",SPHEROID["GRS80",6378137,298.257222101],TOWGS84[0,0,0,0,0,0,0]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433],AXIS["Longitude",EAST],AXIS["Latitude",NORTH]]
 - key: ncei19_n33x25_w079x50_2019v1.nc
-  url: NETCDF:"https://www.ngdc.noaa.gov/thredds/dodsC/tiles/tiled_19as/ncei19_n33x25_w079x50_2019v1.nc"
+  url: https://www.ngdc.noaa.gov/thredds/fileServer/tiles/tiled_19as/ncei19_n33x25_w079x50_2019v1.nc
   bounds:
   - -79.50018518519876
   - 32.999814805198355
@@ -15,7 +15,7 @@
   - 33.250185185198774
   crs: GEOGCS["GRS 1980(IUGG, 1980)",DATUM["unknown",SPHEROID["GRS80",6378137,298.257222101],TOWGS84[0,0,0,0,0,0,0]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433],AXIS["Longitude",EAST],AXIS["Latitude",NORTH]]
 - key: ncei19_n33x50_w079x25_2019v1.nc
-  url: NETCDF:"https://www.ngdc.noaa.gov/thredds/dodsC/tiles/tiled_19as/ncei19_n33x50_w079x25_2019v1.nc"
+  url: https://www.ngdc.noaa.gov/thredds/fileServer/tiles/tiled_19as/ncei19_n33x50_w079x25_2019v1.nc
   bounds:
   - -79.25018518519876
   - 33.249814805198355
@@ -23,7 +23,7 @@
   - 33.500185185198774
   crs: GEOGCS["GRS 1980(IUGG, 1980)",DATUM["unknown",SPHEROID["GRS80",6378137,298.257222101],TOWGS84[0,0,0,0,0,0,0]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433],AXIS["Longitude",EAST],AXIS["Latitude",NORTH]]
 - key: ncei19_n33x50_w079x50_2019v1.nc
-  url: NETCDF:"https://www.ngdc.noaa.gov/thredds/dodsC/tiles/tiled_19as/ncei19_n33x50_w079x50_2019v1.nc"
+  url: https://www.ngdc.noaa.gov/thredds/fileServer/tiles/tiled_19as/ncei19_n33x50_w079x50_2019v1.nc
   bounds:
   - -79.50018518519876
   - 33.249814805198355
@@ -31,7 +31,7 @@
   - 33.500185185198774
   crs: GEOGCS["GRS 1980(IUGG, 1980)",DATUM["unknown",SPHEROID["GRS80",6378137,298.257222101],TOWGS84[0,0,0,0,0,0,0]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433],AXIS["Longitude",EAST],AXIS["Latitude",NORTH]]
 - key: ncei19_n33x75_w079x25_2019v1.nc
-  url: NETCDF:"https://www.ngdc.noaa.gov/thredds/dodsC/tiles/tiled_19as/ncei19_n33x75_w079x25_2019v1.nc"
+  url: https://www.ngdc.noaa.gov/thredds/fileServer/tiles/tiled_19as/ncei19_n33x75_w079x25_2019v1.nc
   bounds:
   - -79.25018518519876
   - 33.499814805198355
@@ -39,7 +39,7 @@
   - 33.750185185198774
   crs: GEOGCS["GRS 1980(IUGG, 1980)",DATUM["unknown",SPHEROID["GRS80",6378137,298.257222101],TOWGS84[0,0,0,0,0,0,0]],PRIMEM["Greenwich",0],UNIT["degree",0.0174532925199433],AXIS["Longitude",EAST],AXIS["Latitude",NORTH]]
 - key: ncei19_n33x75_w079x50_2019v1.nc
-  url: NETCDF:"https://www.ngdc.noaa.gov/thredds/dodsC/tiles/tiled_19as/ncei19_n33x75_w079x50_2019v1.nc"
+  url: https://www.ngdc.noaa.gov/thredds/fileServer/tiles/tiled_19as/ncei19_n33x75_w079x50_2019v1.nc
   bounds:
   - -79.50018518519876
   - 33.499814805198355

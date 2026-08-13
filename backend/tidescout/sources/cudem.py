@@ -27,6 +27,7 @@ NAME_RE = re.compile(r"ncei19_n(\d+)x(\d+)_w(\d+)x(\d+).*\.(?:tif|nc)$")
 # for the full resolution-ladder log).
 THREDDS_CATALOG_URL = "https://www.ngdc.noaa.gov/thredds/catalog/tiles/tiled_19as/catalog.html"
 THREDDS_DODS_BASE = "https://www.ngdc.noaa.gov/thredds/dodsC/tiles/tiled_19as/"
+THREDDS_FILESERVER_BASE = "https://www.ngdc.noaa.gov/thredds/fileServer/tiles/tiled_19as/"
 THREDDS_DATASET_RE = re.compile(r'dataset=tilesDatasetScan/tiled_19as/([\w.\-]+\.nc)"')
 
 
@@ -102,7 +103,14 @@ def list_thredds_keys(catalog_url: str = THREDDS_CATALOG_URL) -> list[str]:
 
 
 def thredds_tile_url(key: str) -> str:
-    """Build a GDAL netCDF/OPeNDAP URL for a THREDDS-hosted CUDEM tile.
+    """Build a GDAL netCDF/OPeNDAP connection string for a THREDDS-hosted CUDEM
+    tile -- for `rasterio.open()` ONLY, inside `discover`'s bounds/crs check.
+    NOT a real URL: it is GDAL's `NETCDF:"..."` driver-prefix syntax, and it must
+    never be persisted to the manifest -- generic HTTP clients (httpx, etc.)
+    reject its scheme outright, and naive `.rsplit("/", 1)[-1]` filename
+    extraction leaves a stray trailing `"` (caught live 2026-08-13 when task 5's
+    downloader failed on all 6 manifest entries). Use thredds_file_url() for
+    anything that needs a downloadable URL, including the manifest.
 
     Plain https/vsicurl access to the .nc file fails on this platform: GDAL's
     netCDF driver requires Linux userfaultfd for remote/vsicurl reads (verified
@@ -114,6 +122,26 @@ def thredds_tile_url(key: str) -> str:
     bounds/crs, for an ~83MB source file) and CF georeferencing intact.
     """
     return f'NETCDF:"{THREDDS_DODS_BASE}{key}"'
+
+
+def thredds_file_url(key: str) -> str:
+    """Build the plain downloadable HTTPS URL for a THREDDS-hosted CUDEM tile
+    (THREDDS's HTTPServer service). This is what belongs in the manifest and
+    what a generic downloader (httpx.stream, etc.) can fetch directly -- unlike
+    thredds_tile_url()'s GDAL-only `NETCDF:"...dodsC..."` connection string.
+    """
+    return f"{THREDDS_FILESERVER_BASE}{key}"
+
+
+def thredds_manifest_entry(
+    key: str, bounds: tuple[float, float, float, float], crs: str
+) -> dict:
+    """Build one manifest entry for a THREDDS-sourced tile. `bounds`/`crs` come
+    from rasterio (opened via thredds_tile_url()); `url` is deliberately the
+    plain downloadable thredds_file_url() form, not the rasterio-only DAP one.
+    """
+    w, s, e, n = bounds
+    return {"key": key, "url": thredds_file_url(key), "bounds": [w, s, e, n], "crs": crs}
 
 
 def thredds_candidate_keys(fishery: Fishery, keys: list[str]) -> list[str]:

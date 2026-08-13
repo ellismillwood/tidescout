@@ -169,18 +169,17 @@ def discover(
     console.print(f"{len(keys)} keys under catalog; {len(candidate_keys)} intersect bbox")
     entries = []
     for key in candidate_keys:
-        url = cudem.thredds_tile_url(key)
-        with rasterio.open(url) as src:  # OPeNDAP metadata read only, no full download
+        # rasterio-only DAP connection string -- never persisted (see
+        # thredds_tile_url's docstring); the manifest gets thredds_file_url()'s
+        # plain downloadable URL instead, via thredds_manifest_entry() below.
+        dap_url = cudem.thredds_tile_url(key)
+        with rasterio.open(dap_url) as src:  # OPeNDAP metadata read only, no full download
             b = src.bounds
-            entries.append(
-                {
-                    "key": key,
-                    "url": url,
-                    "bounds": [b.left, b.bottom, b.right, b.top],
-                    "crs": str(src.crs),
-                }
+            entry = cudem.thredds_manifest_entry(
+                key, (b.left, b.bottom, b.right, b.top), str(src.crs)
             )
-        console.print(f"  ok {key} bounds={entries[-1]['bounds']}")
+            entries.append(entry)
+        console.print(f"  ok {key} bounds={entry['bounds']}")
     path = cudem.write_manifest(slug, entries)
     console.print(f"manifest written: {path} ({len(entries)} tiles)")
 
