@@ -145,10 +145,12 @@ jetties:
   # sits on the inshore west end of the north trace. Owner-confirmed.
   # Regenerate: .superpowers/sdd/2026-08-13-03-anuga-flow-library/jetty_trace.py
   - name: North Jetty
-    # ridge top -0.86 m NAVD88, traced length 1623 m. Non-linear: runs WNW
-    # inshore, doglegs, then runs E. The bend is load-bearing -- do not
-    # straighten this to two vertices.
-    coords: [[-79.16803, 33.20569], [-79.16345, 33.20409], [-79.15102, 33.20373]]
+    # Traced from CUDEM bathymetry, then extended inshore to the beach at the
+    # owner's direction -- the ridge trace stops ~935 m short because the rock
+    # silts over / drops under survey resolution near shore, but the structure
+    # continues. Three vertices, and the middle one IS the bend: this jetty is
+    # non-linear and must not be straightened.
+    coords: [[-79.17641, 33.21032], [-79.16345, 33.20409], [-79.15102, 33.20373]]
   - name: South Jetty
     # ridge top +0.08 m NAVD88, traced length 1484 m.
     coords: [[-79.16545, 33.19050], [-79.15397, 33.19051], [-79.15152, 33.19012], [-79.14958, 33.19018]]
@@ -181,7 +183,18 @@ model_domain:
   wet_level_m: 0.9
 anuga:
   base_edge_m: 60.0
-  jetty_edge_m: 15.0
+  # Retuned 2026-08-14 (was radius 300.0 / edge 15.0). ANUGA's timestep is
+  # global and CFL-limited by the smallest triangle anywhere, so edge length
+  # is the strong cost lever and radius is the weak one. Measured relative
+  # cost against the previous 300 m / 15 m setting: radius 300->50 m alone
+  # gives only 0.88; edge 15->25 m gives 0.53; the chosen 150 m / 20 m gives
+  # 0.67.
+  # 20 m is chosen deliberately to match the planned AnugaConfig.library_cell_m
+  # = 20.0 (Task 11). The flow library rasterises to a 20 m grid, so mesh
+  # structure finer than that cannot survive into the output -- meshing at
+  # 15 m paid CFL cost for detail the library discards.
+  jetty_radius_m: 150.0
+  jetty_edge_m: 20.0
   # Measured 2026-08-13 from 30 days of live tide_events() at station
   # 8662549 (South Island Ferry): daily range = mean(highs) - mean(lows) per
   # day, then averaged across n=30 days.
