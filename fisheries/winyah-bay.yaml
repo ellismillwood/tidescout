@@ -152,8 +152,13 @@ jetties:
     # non-linear and must not be straightened.
     coords: [[-79.17641, 33.21032], [-79.16345, 33.20409], [-79.15102, 33.20373]]
   - name: South Jetty
-    # ridge top +0.08 m NAVD88, traced length 1484 m.
-    coords: [[-79.16545, 33.19050], [-79.15397, 33.19051], [-79.15152, 33.19012], [-79.14958, 33.19018]]
+    # ridge top +0.08 m NAVD88, traced length 1484 m, then extended inshore to
+    # the beach at the owner's direction ("the jetties should connect all the
+    # way back to the shore"). The traced ridge stopped 1700 m short of land;
+    # measured nearest land (z > 0.9 m) from its west end lies due west at
+    # bearing 270 deg, [-79.18368, 33.19077]. That shore point is prepended,
+    # leaving the traced vertices untouched.
+    coords: [[-79.18368, 33.19077], [-79.16545, 33.19050], [-79.15397, 33.19051], [-79.15152, 33.19012], [-79.14958, 33.19018]]
 model_domain:
   # Authored, not inferred: the Atlantic reconnects to the bay through North
   # Inlet and the ICW, so no cut line or flood-fill separates them (a mouth
@@ -164,8 +169,15 @@ model_domain:
   polygon_utm_km:
     - [660.5, 3673.0]  # SW, inshore of the south approach
     - [666.0, 3670.8]  # S of the entrance
-    - [671.0, 3672.0]  # SE, ~2 km seaward of the jetty tips
-    - [672.0, 3677.5]  # E, offshore abeam the entrance
+    # East edge pushed out to 673.5 km 2026-08-14: with the corrected jetty
+    # geometry, 28% of the north jetty and 36% of the south fell OUTSIDE the
+    # old boundary, so the seaward tips -- where the strongest rips form, and
+    # the structure the spec singles out as must-catch -- were not meshed at
+    # all. 673.5 km gives 100% coverage of both jetties plus ~1 km of apron
+    # beyond the tips, for +9.8% triangles; 674.0 and 675.0 cost more and
+    # cover no more.
+    - [673.5, 3672.0]  # SE, ~1 km seaward of the jetty tips
+    - [673.5, 3677.5]  # E, offshore abeam the entrance
     - [671.5, 3683.0]  # NE, hugging North Island's seaward shore
     - [672.5, 3691.0]  # N along the island
     - [671.5, 3696.0]  # top of North Island
