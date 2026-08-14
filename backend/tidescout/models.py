@@ -7,6 +7,10 @@ class RiverGauge(BaseModel):
     name: str
     usgs_site: str
     weight: float = 1.0
+    # Where this river enters the model domain, lon/lat WGS84. Used to seed
+    # anuga.Inlet_operator's injection region. None => inflow is not attached
+    # for this river (see pipeline/regimes.py::_attach_river_inflows).
+    inflow_lonlat: tuple[float, float] | None = None
 
 
 class WaterSensor(BaseModel):

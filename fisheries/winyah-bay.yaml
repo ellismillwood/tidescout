@@ -48,6 +48,15 @@ rivers:
   - name: Pee Dee
     usgs_site: "02131000"
     weight: 1.0
+    # Injection point for the ANUGA inflow operator, lon/lat WGS84. Read off
+    # model_domain.polygon_utm_km vertex 8 (664.0, 3700.0 -- "across the
+    # delta", the middle of the three river-mouth vertices), converted via
+    # rasterio.warp.transform EPSG:26917 -> EPSG:4326. The domain's northern
+    # boundary only carries three distinct vertices for three rivers upstream
+    # of where their channels actually separate, so this is a proxy entry
+    # point, not the true river mouth -- assigned to the middle vertex
+    # because the Pee Dee's channel runs centrally past Sandy Island.
+    inflow_lonlat: [-79.23598, 33.42685]
   # WACCAMAW RIVER NEAR LONGS, SC (33.9127, -78.7150). Confirmed non-tidal
   # via live 3-day IV discharge history: 0 negative readings, 29-56 cfs.
   # Originally found by widening the live USGS site search manually, because
@@ -62,6 +71,12 @@ rivers:
   - name: Waccamaw
     usgs_site: "02110500"
     weight: 1.0
+    # Vertex 7 (669.0, 3701.0) -- "into the river mouths", the easternmost of
+    # the three -- matches the Waccamaw's real position east of Sandy Island;
+    # this lon/lat also lands within ~0.06 deg of the live Hagley Landing
+    # water-sensor station above (33.4446, -79.1739), which is on the
+    # Waccamaw itself.
+    inflow_lonlat: [-79.18203, 33.43509]
   # BLACK RIVER AT KINGSTREE, SC (33.6623, -79.8361). Confirmed non-tidal via
   # live 3-day IV discharge history: 0 negative readings, 35-46 cfs. The
   # more-downstream alternative "BLACK RIVER NEAR ANDREWS, SC" 02136030 is
@@ -70,6 +85,11 @@ rivers:
   - name: Black
     usgs_site: "02136000"
     weight: 1.0
+    # Vertex 9 (658.0, 3696.0) -- "NW, west of Georgetown", the westernmost
+    # of the three -- matches the Black River joining the Pee Dee well
+    # upstream (near Kingstree) from the west/inland side before the
+    # combined flow reaches the bay.
+    inflow_lonlat: [-79.30119, 33.39169]
 discharge_buckets:
   # Recalibrated 2026-08-13 from 365 days of USGS daily means (statCd 00003),
   # weighted composite of the three gauges below (all weight 1.0). n=365 days:
