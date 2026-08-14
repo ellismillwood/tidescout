@@ -39,6 +39,17 @@ stations:
       station: "02136371"
       params: ["00010"]
 rivers:
+  # WARNING (root cause of the 2026-08-14 library build failure -- 6 of 9
+  # regimes died with "Too small timestep"): inflow_lonlat must sit well
+  # inside the domain, in the channel, in water deeper than -2 m -- NEVER on
+  # or near the model_domain.polygon_utm_km boundary. The Pee Dee point below
+  # was literally on polygon vertex v8 (0.4 m from the reflective `wall`
+  # boundary); injecting 42.8 m3/s there against a reflective wall had
+  # nowhere for the energy to go and produced a 3-7 m/s cell cluster ~1,700 m
+  # upstream against a domain median of 0.045 m/s. Black River's point, 2,050
+  # m inside the domain, showed no anomaly and is the control case. Always
+  # re-verify against the real mesh (wet-cell count inside the 150 m
+  # Inlet_operator injection box) after any domain-polygon or mesh change.
   # PEE DEE RIVER AT PEEDEE, SC (34.2043, -79.5484). Confirmed non-tidal via
   # live 3-day IV discharge history: 0 negative readings, 3830-6710 cfs.
   # (More-downstream "PEE DEE RIVER AT HWY 701 NR BUCKSPORT, SC" 02135200 is
@@ -48,18 +59,11 @@ rivers:
   - name: Pee Dee
     usgs_site: "02131000"
     weight: 1.0
-    # Injection point for the ANUGA inflow operator, lon/lat WGS84. Read off
-    # model_domain.polygon_utm_km vertex 8 (664.0, 3700.0 -- "across the
-    # delta", the middle of the three river-mouth vertices), converted via
-    # rasterio.warp.transform EPSG:26917 -> EPSG:4326. The domain's northern
-    # boundary only carries three distinct vertices for three rivers upstream
-    # of where their channels actually separate, so this is a proxy entry
-    # point, not the true river mouth -- assigned to the middle vertex
-    # because the Pee Dee's channel runs centrally past Sandy Island.
-    # Verified 2026-08-14 against the real 315,564-triangle mesh: 29 wet
-    # centroids (elevation < 0) fall inside Inlet_operator's 150 m injection
-    # box at this point, so the vertex itself needed no correction.
-    inflow_lonlat: [-79.23598, 33.42685]
+    # Moved 2476 m 2026-08-14. Was on domain polygon vertex v8 (0.4 m from the
+    # reflective wall), which caused the corner-injection instability that
+    # killed 6 of 9 regimes. Now 2422 m from the boundary, bed -2.22 m, 961 wet
+    # 10 m cells inside the 150 m inlet box.
+    inflow_lonlat: [-79.22587, 33.40619]
   # WACCAMAW RIVER NEAR LONGS, SC (33.9127, -78.7150). Confirmed non-tidal
   # via live 3-day IV discharge history: 0 negative readings, 29-56 cfs.
   # Originally found by widening the live USGS site search manually, because
@@ -74,19 +78,9 @@ rivers:
   - name: Waccamaw
     usgs_site: "02110500"
     weight: 1.0
-    # Vertex 7 (669.0, 3701.0) -- "into the river mouths", the easternmost of
-    # the three -- matches the Waccamaw's real position east of Sandy Island;
-    # this lon/lat also lands within ~0.06 deg of the live Hagley Landing
-    # water-sensor station above (33.4446, -79.1739), which is on the
-    # Waccamaw itself.
-    # CORRECTED 2026-08-14: the literal vertex checked out to only 3 wet
-    # centroids inside the 150 m injection box against the real mesh -- thin
-    # enough that a small mesh change could empty it and silently drop this
-    # river's inflow. Nudged ~214 m south-southwest along the same channel to
-    # utm=(668800, 3700925), which carries 23 wet centroids in the same box
-    # (verified against the real 315,564-triangle mesh) while staying just as
-    # close to the Hagley Landing sensor coordinate.
-    inflow_lonlat: [-79.18419, 33.43444]
+    # Moved 2469 m 2026-08-14; was 35 m from the reflective wall. Now 1246 m
+    # from the boundary, bed -2.10 m, 626 wet cells in the inlet box.
+    inflow_lonlat: [-79.20462, 33.42022]
   # BLACK RIVER AT KINGSTREE, SC (33.6623, -79.8361). Confirmed non-tidal via
   # live 3-day IV discharge history: 0 negative readings, 35-46 cfs. The
   # more-downstream alternative "BLACK RIVER NEAR ANDREWS, SC" 02136030 is
