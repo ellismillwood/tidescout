@@ -141,6 +141,7 @@ def _attach_river_inflows(domain, fishery: Fishery, inflows: dict[str, float]) -
     from rasterio.warp import transform as warp_transform
 
     epsg = fishery.bathymetry.epsg
+    centroids = domain.get_centroid_coordinates(absolute=True)
     for river in fishery.rivers:
         seed = getattr(river, "inflow_lonlat", None)
         if seed is None:
@@ -149,6 +150,26 @@ def _attach_river_inflows(domain, fishery: Fishery, inflows: dict[str, float]) -
         cx, cy = xs[0], ys[0]
         r = 150.0
         region = [[cx - r, cy - r], [cx + r, cy - r], [cx + r, cy + r], [cx - r, cy + r]]
+        # A coordinate that misses the meshed water body is the most
+        # dangerous silent failure in this whole module: Inlet_operator
+        # itself dies deep inside ANUGA with an unrelated AttributeError
+        # ('Inlet' object has no attribute 'inlet_line') when its region
+        # contains zero centroids, but a region that contains a handful of
+        # *land* centroids would not raise at all -- the run would finish,
+        # regime.json would look plausible, and this river's discharge axis
+        # would be silently meaningless. Fail loudly and specifically here
+        # instead of relying on that downstream crash (or worse, no crash).
+        in_region = (
+            (centroids[:, 0] >= cx - r) & (centroids[:, 0] <= cx + r)
+            & (centroids[:, 1] >= cy - r) & (centroids[:, 1] <= cy + r)
+        )
+        if not in_region.any():
+            raise RuntimeError(
+                f"river inflow for {river.name!r} has no mesh centroids within "
+                f"{r:.0f} m of inflow_lonlat={seed} (utm=({cx:.0f}, {cy:.0f})) -- "
+                "the coordinate does not land in the meshed water body, so this "
+                "river's discharge axis would be silently dropped"
+            )
         anuga.Inlet_operator(domain, region, Q=inflows[river.name])
 
 

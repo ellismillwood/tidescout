@@ -56,6 +56,9 @@ rivers:
     # of where their channels actually separate, so this is a proxy entry
     # point, not the true river mouth -- assigned to the middle vertex
     # because the Pee Dee's channel runs centrally past Sandy Island.
+    # Verified 2026-08-14 against the real 315,564-triangle mesh: 29 wet
+    # centroids (elevation < 0) fall inside Inlet_operator's 150 m injection
+    # box at this point, so the vertex itself needed no correction.
     inflow_lonlat: [-79.23598, 33.42685]
   # WACCAMAW RIVER NEAR LONGS, SC (33.9127, -78.7150). Confirmed non-tidal
   # via live 3-day IV discharge history: 0 negative readings, 29-56 cfs.
@@ -76,7 +79,14 @@ rivers:
     # this lon/lat also lands within ~0.06 deg of the live Hagley Landing
     # water-sensor station above (33.4446, -79.1739), which is on the
     # Waccamaw itself.
-    inflow_lonlat: [-79.18203, 33.43509]
+    # CORRECTED 2026-08-14: the literal vertex checked out to only 3 wet
+    # centroids inside the 150 m injection box against the real mesh -- thin
+    # enough that a small mesh change could empty it and silently drop this
+    # river's inflow. Nudged ~214 m south-southwest along the same channel to
+    # utm=(668800, 3700925), which carries 23 wet centroids in the same box
+    # (verified against the real 315,564-triangle mesh) while staying just as
+    # close to the Hagley Landing sensor coordinate.
+    inflow_lonlat: [-79.18419, 33.43444]
   # BLACK RIVER AT KINGSTREE, SC (33.6623, -79.8361). Confirmed non-tidal via
   # live 3-day IV discharge history: 0 negative readings, 35-46 cfs. The
   # more-downstream alternative "BLACK RIVER NEAR ANDREWS, SC" 02136030 is
@@ -89,7 +99,20 @@ rivers:
     # of the three -- matches the Black River joining the Pee Dee well
     # upstream (near Kingstree) from the west/inland side before the
     # combined flow reaches the bay.
-    inflow_lonlat: [-79.30119, 33.39169]
+    # CORRECTED 2026-08-14: the literal vertex sits on dry marsh -- the
+    # nearest wet mesh centroid was 2,706 m away, so Inlet_operator's 150 m
+    # injection box found zero centroids at all and crashed
+    # (AttributeError: 'Inlet' object has no attribute 'inlet_line').
+    # Moved to the nearest well-covered point on the same west-side channel,
+    # utm=(661500, 3695870), 3,502 m from the original vertex and ~4,837 m
+    # from the Pee Dee injection point (no overlap): 79 wet centroids fall
+    # inside the 150 m box there (verified against the real
+    # 315,564-triangle mesh), better coverage than Pee Dee's own point. A
+    # cluster further south near Georgetown's harbor had even denser
+    # coverage but was rejected -- it is the Sampit's waterway, not a
+    # plausible proxy for the Black/Pee Dee confluence this vertex
+    # represents.
+    inflow_lonlat: [-79.26360, 33.38999]
 discharge_buckets:
   # Recalibrated 2026-08-13 from 365 days of USGS daily means (statCd 00003),
   # weighted composite of the three gauges below (all weight 1.0). n=365 days:
