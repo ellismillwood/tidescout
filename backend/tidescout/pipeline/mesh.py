@@ -139,3 +139,36 @@ def build_mesh(slug: str, fishery: Fishery):
     elev = np.where(np.isfinite(elev), elev, 1.0)
     domain.set_quantity("elevation", elev, location="centroids")
     return domain
+
+
+def friction_field(domain, slug: str, fishery: Fishery) -> np.ndarray:
+    """Per-centroid Manning n from the zones raster.
+
+    zones.tif is a uint8 enum with 0 = nodata. Anything unclassified falls back
+    to the flat value rather than to zero, because a Manning n of 0 is
+    frictionless and would produce spectacular nonsense rather than an error.
+    """
+    import rasterio
+
+    from tidescout.paths import fishery_data_dir
+
+    cfg = fishery.anuga
+    path = fishery_data_dir(slug) / "zones.tif"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"{path} missing -- run `tidescout bathy build {slug}` before meshing"
+        )
+    with rasterio.open(path) as src:
+        zones = src.read(1)
+        transform = src.transform
+    z_at = sample_to_centroids(domain, zones, transform)
+    # Enum verified against engine/terrain.py::zones in Task 4 (uint8):
+    #   0 = nodata, 1 = land (z >= land_elev_m), 2 = shallow, 3 = mid-depth,
+    #   4 = deep (z < deep_min_m).  FIVE values, not four.
+    n = np.full(z_at.shape, cfg.manning_flat, dtype="float64")
+    n[z_at == 4] = cfg.manning_channel   # deep -> smooth channel bed
+    n[z_at == 3] = cfg.manning_flat      # mid-depth
+    n[z_at == 2] = cfg.manning_flat      # shallow
+    n[z_at == 1] = cfg.manning_marsh     # land / marsh -- rough, vegetated
+    n[z_at == 0] = cfg.manning_marsh     # nodata slivers: treat as land, never 0
+    return n

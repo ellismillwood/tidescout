@@ -37,6 +37,12 @@ class BathymetryConfig(BaseModel):
     land_elev_m: float = 1.5
     contour_depths_m: list[float] = [-2.0, -5.0, -10.0, -15.0]
     static_wet_level_m: float = 0.0
+    # Deliberately NOT FeatureThresholds.shallow_max_m/deep_min_m. Those two
+    # drive bar detection; sharing them means retuning bars silently re-buckets
+    # the Manning field and changes every simulation. Defaults match the
+    # previous shared values so this split is a no-op at introduction.
+    zone_shallow_max_m: float = -0.3
+    zone_deep_min_m: float = -3.0
 
 
 class FeatureThresholds(BaseModel):

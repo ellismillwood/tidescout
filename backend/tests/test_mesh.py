@@ -45,3 +45,18 @@ def test_build_mesh_sets_elevation_on_every_centroid(tmp_path, monkeypatch):
     assert len(elev) == len(d.triangles)
     assert np.isfinite(elev).all(), "no NaN may reach the solver"
     assert elev.min() < 0.0
+
+
+def test_friction_field_has_no_zero_values(tmp_path, monkeypatch):
+    z = np.full((300, 300), -5.0, dtype="float32")
+    z[0:40, :] = 5.0
+    _fake_bathy(tmp_path, monkeypatch, z)
+    f = load_fishery("winyah-bay")
+    f.model_domain.polygon_utm_km = []
+    from tidescout.pipeline.derivatives import build_derivatives
+    build_derivatives("winyah-bay", f)
+    d = mesh.build_mesh("winyah-bay", f)
+    n = mesh.friction_field(d, "winyah-bay", f)
+    assert len(n) == len(d.triangles)
+    assert (n > 0).all(), "a zero Manning n is frictionless, not a default"
+    assert n.max() <= 0.1

@@ -5,6 +5,7 @@ import pytest
 import rasterio
 from rasterio.errors import NotGeoreferencedWarning
 
+from tidescout.config import load_fishery
 from tidescout.engine.terrain import zones as compute_zones
 from tidescout.pipeline.artifacts import build_artifacts
 from tidescout.pipeline.derivatives import build_derivatives
@@ -36,10 +37,10 @@ def test_build_derivatives_writes_grid_aligned_rasters(tmp_path, monkeypatch, fi
 
 
 def test_zones_raster_is_categorical_and_nodata_zero(tmp_path, monkeypatch, fishery):
-    # creek_mouth_dem (unlike dropoff_dem, whose two depths -1/-10 m both fall
-    # in the same "deep" band under the fishery's real thresholds) spans three
-    # separate zone bands, so the categorical check below isn't trivially
-    # satisfied by an array of one repeated value.
+    # creek_mouth_dem (unlike dropoff_dem, whose two depths -1/-10 m fall into
+    # only two zone bands -- 3 (mid-depth) and 4 (deep) -- under the fishery's
+    # real thresholds) spans three separate zone bands, so the categorical
+    # check below isn't trivially satisfied by an array of one repeated value.
     z = synth.creek_mouth_dem()
     _fake_bathy(tmp_path, monkeypatch, z)
     paths = build_derivatives("winyah-bay", fishery)
@@ -61,10 +62,26 @@ def test_zones_raster_is_categorical_and_nodata_zero(tmp_path, monkeypatch, fish
         expected = compute_zones(
             z,
             fishery.bathymetry.land_elev_m,
-            fishery.features.shallow_max_m,
-            fishery.features.deep_min_m,
+            fishery.bathymetry.zone_shallow_max_m,
+            fishery.bathymetry.zone_deep_min_m,
         )
         np.testing.assert_array_equal(arr, expected)
+
+
+def test_zone_thresholds_are_independent_of_bar_tuning(tmp_path, monkeypatch):
+    """Retuning bar detection must not move the friction zones."""
+    z = synth.point_bar_dem()
+    _fake_bathy(tmp_path, monkeypatch, z)
+    f = load_fishery("winyah-bay")
+    before = build_derivatives("winyah-bay", f)
+    with rasterio.open(before["zones"]) as src:
+        baseline = src.read(1).copy()
+
+    f.features.shallow_max_m = -0.9      # aggressive bar retune
+    f.features.deep_min_m = -6.0
+    after = build_derivatives("winyah-bay", f)
+    with rasterio.open(after["zones"]) as src:
+        assert np.array_equal(src.read(1), baseline), "zones still alias bar thresholds"
 
 
 def test_build_artifacts_produces_all_outputs(tmp_path, monkeypatch, fishery):
