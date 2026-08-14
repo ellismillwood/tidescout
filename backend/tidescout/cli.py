@@ -319,6 +319,29 @@ def artifacts(slug: str) -> None:
         console.print(f"{name}: {path} ({path.stat().st_size:,} bytes)")
 
 
+@bathy_app.command("wetlands")
+def bathy_wetlands(slug: str) -> None:
+    """Fetch USFWS NWI wetlands intersecting the fishery bbox.
+
+    Independent of CUDEM: bathymetry-threshold land/water is biased in
+    vegetated marsh (lidar returns off canopy), so this is a second,
+    unauthenticated public source for where marsh actually is. Filed under
+    `bathy`, not `flow` -- it is bathymetry-adjacent land/water reference data,
+    not part of the ANUGA mesh/regime pipeline, and is not wired into either
+    yet (see sources/nwi.py module docstring).
+    """
+    from tidescout.config import load_fishery
+    from tidescout.sources import nwi
+    from tidescout.sources.cache import default_cache
+
+    fishery = load_fishery(slug)
+    fc = nwi.fetch_wetlands(fishery, default_cache())
+    path = nwi.wetlands_path(slug)
+    console.print(
+        f"{len(fc['features'])} wetland features -> {path} ({path.stat().st_size:,} bytes)"
+    )
+
+
 @flow_app.command("mesh")
 def flow_mesh(slug: str) -> None:
     """Build the mesh and report its size without simulating."""
