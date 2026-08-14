@@ -214,6 +214,26 @@ def _attach_river_inflows(domain, fishery: Fishery, inflows: dict[str, float]) -
         anuga.Inlet_operator(domain, region, Q=inflows[river.name])
 
 
+def _collect_result(name: str, out_dir: Path, results: dict[str, dict]) -> None:
+    """Turn one completed run's output directory into a result entry.
+
+    Shared by both the serial and pooled paths in `build_library`, and
+    wrapped in its own try/except so that a missing/corrupt `regime.json` or
+    a `reversal_check` failure is isolated exactly like a `run_regime`
+    failure -- recorded for this regime only, never escaping to abort the
+    rest of the library (and lose the manifest write) for a build that was
+    otherwise fine.
+    """
+    try:
+        meta = json.loads((out_dir / "regime.json").read_text())
+        meta["status"] = "ok"
+        meta["reversal"] = reversal_check(out_dir)
+    except Exception as exc:
+        results[name] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+        return
+    results[name] = meta
+
+
 def build_library(
     slug: str, max_workers: int | None = None, sim_hours: float | None = None
 ) -> dict[str, dict]:
@@ -239,10 +259,7 @@ def build_library(
             except Exception as exc:
                 results[name] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
                 continue
-            meta = json.loads((out_dir / "regime.json").read_text())
-            meta["status"] = "ok"
-            meta["reversal"] = reversal_check(out_dir)
-            results[name] = meta
+            _collect_result(name, out_dir, results)
         manifest = regime_dir(slug) / "library.json"
         manifest.write_text(json.dumps({"regimes": results}, indent=2))
         return results
@@ -259,10 +276,7 @@ def build_library(
             except Exception as exc:  # one bad regime must not lose the other eight
                 results[name] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
                 continue
-            meta = json.loads((out_dir / "regime.json").read_text())
-            meta["status"] = "ok"
-            meta["reversal"] = reversal_check(out_dir)
-            results[name] = meta
+            _collect_result(name, out_dir, results)
     manifest = regime_dir(slug) / "library.json"
     manifest.write_text(json.dumps({"regimes": results}, indent=2))
     return results

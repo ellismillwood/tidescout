@@ -350,8 +350,10 @@ def flow_run(
         table.add_column(col)
     for name in sorted(results):
         m = results[name]
+        triangles = m.get("triangles")
         table.add_row(
-            name, m.get("status", "?"), f"{m.get('triangles', 0):,}",
+            name, m.get("status", "?"),
+            f"{triangles:,}" if triangles is not None else "-",
             str(m.get("wall_seconds", "-")),
             f"{m.get('mass_residual', float('nan')):.2e}",
             str(m.get("reversal", {}).get("reversed", "-")),

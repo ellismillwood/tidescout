@@ -165,6 +165,99 @@ def test_build_library_records_a_failed_regime_without_losing_others(monkeypatch
     assert len(manifest["regimes"]) == 9
 
 
+def test_build_library_records_missing_regime_json_without_losing_others(
+    monkeypatch, tmp_path
+):
+    """`run_regime` succeeds but its `regime.json` is missing on disk -- the
+    exact state a killed-mid-flight build leaves behind. Post-processing must
+    fail for that regime only, not abort the loop before the manifest write."""
+    from tidescout import paths
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+
+    def fake_run(slug, r, d, sim_hours=None):
+        out = regimes.regime_dir(slug) / regimes.regime_name(r, d)
+        out.mkdir(parents=True, exist_ok=True)
+        if (r, d) != ("spring", "high"):
+            (out / "regime.json").write_text(
+                json.dumps({"regime": regimes.regime_name(r, d), "snapshots": []})
+            )
+        # spring_high: out_dir exists, but regime.json was never written.
+        return out
+
+    monkeypatch.setattr(regimes, "run_regime", fake_run)
+    monkeypatch.setattr(regimes, "reversal_check", lambda d: {"reversed": True})
+
+    results = regimes.build_library("winyah-bay", max_workers=1)
+
+    assert results["spring_high"]["status"] == "failed"
+    assert sum(v["status"] == "ok" for v in results.values()) == 8
+    manifest = json.loads((regimes.regime_dir("winyah-bay") / "library.json").read_text())
+    assert len(manifest["regimes"]) == 9
+
+
+def test_build_library_records_corrupt_regime_json_without_losing_others(
+    monkeypatch, tmp_path
+):
+    """`regime.json` exists but is unparseable -- e.g. truncated by a killed
+    process mid-write. Must be isolated to that regime, not abort the loop."""
+    from tidescout import paths
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+
+    def fake_run(slug, r, d, sim_hours=None):
+        out = regimes.regime_dir(slug) / regimes.regime_name(r, d)
+        out.mkdir(parents=True, exist_ok=True)
+        if (r, d) == ("spring", "high"):
+            (out / "regime.json").write_text('{"regime": "spring_high", "snap')  # truncated
+        else:
+            (out / "regime.json").write_text(
+                json.dumps({"regime": regimes.regime_name(r, d), "snapshots": []})
+            )
+        return out
+
+    monkeypatch.setattr(regimes, "run_regime", fake_run)
+    monkeypatch.setattr(regimes, "reversal_check", lambda d: {"reversed": True})
+
+    results = regimes.build_library("winyah-bay", max_workers=1)
+
+    assert results["spring_high"]["status"] == "failed"
+    assert sum(v["status"] == "ok" for v in results.values()) == 8
+    manifest = json.loads((regimes.regime_dir("winyah-bay") / "library.json").read_text())
+    assert len(manifest["regimes"]) == 9
+
+
+def test_build_library_records_reversal_check_failure_without_losing_others(
+    monkeypatch, tmp_path
+):
+    """`regime.json` is fine, but `reversal_check` itself raises. Must be
+    isolated to that regime, not abort the loop before the manifest write."""
+    from tidescout import paths
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+
+    def fake_run(slug, r, d, sim_hours=None):
+        out = regimes.regime_dir(slug) / regimes.regime_name(r, d)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "regime.json").write_text(
+            json.dumps({"regime": regimes.regime_name(r, d), "snapshots": []})
+        )
+        return out
+
+    def fake_reversal_check(out_dir):
+        if out_dir.name == "spring_high":
+            raise ValueError("corrupt snapshot array")
+        return {"reversed": True}
+
+    monkeypatch.setattr(regimes, "run_regime", fake_run)
+    monkeypatch.setattr(regimes, "reversal_check", fake_reversal_check)
+
+    results = regimes.build_library("winyah-bay", max_workers=1)
+
+    assert results["spring_high"]["status"] == "failed"
+    assert "corrupt snapshot array" in results["spring_high"]["error"]
+    assert sum(v["status"] == "ok" for v in results.values()) == 8
+    manifest = json.loads((regimes.regime_dir("winyah-bay") / "library.json").read_text())
+    assert len(manifest["regimes"]) == 9
+
+
 def test_attach_river_inflows_raises_on_land_only_region(fishery):
     """Centroids exist in the injection box, but every one of them is dry --
     this is the gap the review found: the old check only tested `.any()`
