@@ -214,6 +214,60 @@ def _attach_river_inflows(domain, fishery: Fishery, inflows: dict[str, float]) -
         anuga.Inlet_operator(domain, region, Q=inflows[river.name])
 
 
+def build_library(
+    slug: str, max_workers: int | None = None, sim_hours: float | None = None
+) -> dict[str, dict]:
+    """Run every regime, as independent processes.
+
+    Deliberately NOT MPI. The nine runs share nothing, so a process pool gets
+    the same wall time as domain decomposition with none of the toolchain --
+    see the Plan 3 spike findings for the measured comparison.
+    """
+    from concurrent.futures import ProcessPoolExecutor, as_completed
+
+    fishery = load_fishery(slug)
+    workers = max_workers or fishery.anuga.max_workers
+    results: dict[str, dict] = {}
+
+    if workers == 1:
+        # Serial, in-process: how you debug one misbehaving regime, and the
+        # only path a test can monkeypatch (pool children see no patches).
+        for r, d in REGIME_MATRIX:
+            name = regime_name(r, d)
+            try:
+                out_dir = run_regime(slug, r, d, sim_hours)
+            except Exception as exc:
+                results[name] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+                continue
+            meta = json.loads((out_dir / "regime.json").read_text())
+            meta["status"] = "ok"
+            meta["reversal"] = reversal_check(out_dir)
+            results[name] = meta
+        manifest = regime_dir(slug) / "library.json"
+        manifest.write_text(json.dumps({"regimes": results}, indent=2))
+        return results
+
+    with ProcessPoolExecutor(max_workers=workers) as pool:
+        futures = {
+            pool.submit(run_regime, slug, r, d, sim_hours): regime_name(r, d)
+            for r, d in REGIME_MATRIX
+        }
+        for fut in as_completed(futures):
+            name = futures[fut]
+            try:
+                out_dir = fut.result()
+            except Exception as exc:  # one bad regime must not lose the other eight
+                results[name] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+                continue
+            meta = json.loads((out_dir / "regime.json").read_text())
+            meta["status"] = "ok"
+            meta["reversal"] = reversal_check(out_dir)
+            results[name] = meta
+    manifest = regime_dir(slug) / "library.json"
+    manifest.write_text(json.dumps({"regimes": results}, indent=2))
+    return results
+
+
 def reversal_check(out_dir: Path) -> dict:
     """Flow must reverse direction across a tidal cycle.
 

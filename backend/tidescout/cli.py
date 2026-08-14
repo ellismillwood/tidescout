@@ -7,6 +7,8 @@ from rich.table import Table
 app = typer.Typer(no_args_is_help=True, help="TideScout: SC inshore fishing decision support.")
 bathy_app = typer.Typer(no_args_is_help=True, help="Bathymetry tile discovery and processing.")
 app.add_typer(bathy_app, name="bathy")
+flow_app = typer.Typer(no_args_is_help=True, help="ANUGA flow-state library.")
+app.add_typer(flow_app, name="flow")
 console = Console()
 
 
@@ -315,6 +317,46 @@ def artifacts(slug: str) -> None:
     fishery = load_fishery(slug)
     for name, path in build_artifacts(slug, fishery).items():
         console.print(f"{name}: {path} ({path.stat().st_size:,} bytes)")
+
+
+@flow_app.command("mesh")
+def flow_mesh(slug: str) -> None:
+    """Build the mesh and report its size without simulating."""
+    from tidescout.config import load_fishery
+    from tidescout.pipeline import mesh as meshmod
+
+    fishery = load_fishery(slug)
+    domain = meshmod.build_mesh(slug, fishery)
+    console.print(
+        f"{len(domain.triangles):,} triangles "
+        f"(base {fishery.anuga.base_edge_m:.0f} m, jetty {fishery.anuga.jetty_edge_m:.0f} m)"
+    )
+
+
+@flow_app.command("run")
+def flow_run(
+    slug: str,
+    workers: int = typer.Option(0, "--workers", help="0 = use anuga.max_workers"),
+    sim_hours: float = typer.Option(0.0, "--sim-hours", help="0 = full spin-up + cycle"),
+) -> None:
+    """Run the full regime matrix as parallel processes."""
+    from tidescout.pipeline.regimes import build_library
+
+    results = build_library(
+        slug, max_workers=workers or None, sim_hours=sim_hours or None
+    )
+    table = Table(title=f"{slug} — regime library")
+    for col in ("regime", "status", "triangles", "wall s", "mass resid", "reversed"):
+        table.add_column(col)
+    for name in sorted(results):
+        m = results[name]
+        table.add_row(
+            name, m.get("status", "?"), f"{m.get('triangles', 0):,}",
+            str(m.get("wall_seconds", "-")),
+            f"{m.get('mass_residual', float('nan')):.2e}",
+            str(m.get("reversal", {}).get("reversed", "-")),
+        )
+    console.print(table)
 
 
 def main() -> None:

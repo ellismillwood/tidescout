@@ -137,6 +137,34 @@ def test_attach_river_inflows_raises_on_empty_region(fishery):
         regimes._attach_river_inflows(domain, fishery, {})
 
 
+def test_build_library_records_a_failed_regime_without_losing_others(monkeypatch, tmp_path):
+    """One blown-up regime must not cost the other eight."""
+    from tidescout import paths
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+
+    def fake_run(slug, r, d, sim_hours=None):
+        if (r, d) == ("spring", "high"):
+            raise RuntimeError("solver blew up")
+        out = regimes.regime_dir(slug) / regimes.regime_name(r, d)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "regime.json").write_text(
+            json.dumps({"regime": regimes.regime_name(r, d), "snapshots": []})
+        )
+        return out
+
+    monkeypatch.setattr(regimes, "run_regime", fake_run)
+    monkeypatch.setattr(regimes, "reversal_check", lambda d: {"reversed": True})
+
+    # max_workers=1 takes the in-process serial path, so monkeypatching applies.
+    results = regimes.build_library("winyah-bay", max_workers=1)
+
+    assert results["spring_high"]["status"] == "failed"
+    assert "solver blew up" in results["spring_high"]["error"]
+    assert sum(v["status"] == "ok" for v in results.values()) == 8
+    manifest = json.loads((regimes.regime_dir("winyah-bay") / "library.json").read_text())
+    assert len(manifest["regimes"]) == 9
+
+
 def test_attach_river_inflows_raises_on_land_only_region(fishery):
     """Centroids exist in the injection box, but every one of them is dry --
     this is the gap the review found: the old check only tested `.any()`
