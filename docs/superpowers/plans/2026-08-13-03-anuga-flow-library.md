@@ -1571,8 +1571,16 @@ def run_regime(
         cfg.mean_range_m, range_bucket, period_s=cfg.cycle_h * 3600.0
     )
     # Start at the initial boundary level so spin-up is not a dam break.
+    #
+    # `np.maximum(elev, ...)` and NOT `np.maximum(elev + 1e-3, ...)`: adding a
+    # nominal 1 mm to keep land "just wet" lays a film over every land cell
+    # (~129,000 of 315,564 on the real Winyah mesh) and collapses ANUGA's CFL
+    # timestep to ~1e-6 s within the first yieldstep -- the solver aborts with
+    # "Too small timestep ... even after 50 steps". Measured: with the film,
+    # unstable; without it, dt holds at ~0.12 s with river inflows attached.
+    # Dry land must start genuinely dry (depth exactly 0).
     domain.set_quantity(
-        "stage", np.maximum(elev + 1e-3, tide(0.0)), location="centroids"
+        "stage", np.maximum(elev, tide(0.0)), location="centroids"
     )
     domain.set_boundary({
         "outer": anuga.Transmissive_momentum_set_stage_boundary(

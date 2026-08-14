@@ -23,6 +23,17 @@ and it was never free anyway: this Mac has no container runtime installed at all
 
 ## 2. API facts worth writing into the plan
 
+> **CORRECTION added 2026-08-14 (Plan 3 Task 9).** The spike scripts initialise
+> `stage = np.maximum(elev + 1e-3, tide(0))`. That nominal 1 mm keeps land "just
+> wet" and is harmless on the spike's smooth synthetic ramp, but it is **unsafe on
+> real bathymetry**: on the Winyah mesh it films ~129,000 of 315,564 cells and
+> collapses ANUGA's CFL timestep to ~1e-6 s inside the first yieldstep, aborting
+> with "Too small timestep … even after 50 steps". Measured A/B on the real mesh:
+> with the film, unstable; with `np.maximum(elev, tide(0))` — dry land genuinely
+> dry — stable at dt ≈ 0.12 s, both with and without river inflows attached.
+> **Dry cells must start at depth exactly 0.** Any future spike copied from here
+> inherits the bug otherwise.
+
 - `anuga.create_domain_from_regions(bounding_polygon, boundary_tags, maximum_triangle_area=None, interior_regions=None, interior_holes=None, hole_tags=None, breaklines=None, regionPtArea=None, minimum_triangle_angle=28.0, ...)`.
   There is **no `mesh_filename` argument** (an easy hallucination).
   `breaklines` and `regionPtArea` are available for channel-edge forcing.
