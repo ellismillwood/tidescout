@@ -29,38 +29,58 @@ Distilled from Plan 2's ledger and final whole-branch review (2026-08-13) before
 - Deferred minors (final review triaged all OK-TO-DEFER): contour ring seam-splitting (~40 m loss cases, stitch recipe in ledger), hillshade nodata-vs-black collision, quicklook not georeferenced, `noaa.__all__` under-declares, `JettySeed` lacks min-2-vertex validator, 3 early-bound path value-imports (patch-target gotchas documented in test_spots.py), README section header stale, empty-feats `min()` edge, Rich-table test parse brittleness, `_write` cross-module private import (rename to `write_raster` when touched).
 - Subagent report prose can drift on specifics (bar-78 vs bar-123 attribution) — verify numbers against artifacts, not summaries. Three more API connection drops this plan; work always survived in the tree/commits — check `git log` before re-dispatching.
 
-## SCDNR intertidal oyster reef layer — availability probed 2026-08-14 (Plan 4 input)
+## SCDNR intertidal oyster reef layer — OBTAINED 2026-08-14 (Plan 4 input)
 
-Spec §4 lists oyster beds as a feature class "if downloadable, adds a feature class; else
-manual pins later", and §13 treats it as optional. It was deferred by name in Plan 1
-("...SECOFS, CUDEM, and oyster layers") and recorded as `oyster ✗` in Plan 2's spec-coverage
-line. **Neither deferral ever checked whether the layer was actually obtainable.** It has now
-been checked, so Plan 4 does not have to re-derive this:
+Spec §4 lists oyster beds as a feature class "if downloadable"; §13 treats it as optional. It was
+deferred by name in Plan 1 and recorded `oyster ✗` in Plan 2 without anyone checking obtainability.
+It has now been checked, downloaded, and characterised.
 
-- **The dataset exists and is a good fit.** `SCDNRoyster2015Live` — 168,373 intertidal reef
-  polygons, NAD83 **UTM 17N** (the same CRS as our analysis grid, so no reprojection risk),
-  extent -80.94..-78.53 lon / 32.02..33.91 lat, which covers Winyah Bay. Digitised from
-  0.25 m 4-band orthophotos (2003-2006), updated from helicopter photography 2011-2015.
-  Metadata: https://www.dnr.sc.gov/GIS/metadata/SCDNR_Oyster2015Live.html
-- **It is NOT publicly downloadable as of this check.** The service that public search results
-  point at — `MRD/Sc_Intertidal_Oyster_Reefs20190402/MapServer` on arcweb.dnr.sc.gov — returns
-  `{"error":{"code":499,"message":"Token Required"}}`. SCDNR's service directory *is* browsable
-  without auth, and the `MRD` folder now lists only `sfpermit` and `SSG19_20test`: the oyster
-  service is no longer published there. So it was unpublished/secured, not merely mis-addressed.
-- **The metadata states Access Constraints: "None"** but publishes no download URL or ordering
-  process. That combination (no policy restriction, no public endpoint) means the realistic route
-  is a direct data request to SCDNR's Marine Resources Division, not scraping.
-- **`MRD/sfpermit` (layer `sfpermit22`) is NOT a substitute** — it is shellfish *permit/harvest
-  ground* boundaries, i.e. management polygons, not reef geometry. Useless for ambush-feature
-  detection.
-- **Auth mechanics if a login is ever granted:** the server reports
-  `isTokenBasedSecurity: true` with `tokenServicesUrl =
-  https://arcweb.dnr.sc.gov/portal/sharing/rest/generateToken`, and `owningSystemUrl =
-  https://arcweb.dnr.sc.gov/portal`. So it is federated to ArcGIS Enterprise Portal: a token is
-  minted by POSTing existing portal credentials (username/password/client/referer/expiration) to
-  that endpoint — the token is the *consequence* of an SCDNR-issued account, never a way to
-  obtain one. `/server/tokens/generateToken` returns HTTP 405 to GET (POST-only).
-- **Scope ruling:** this belongs to Plan 4 (scoring/feature classes), not Plan 3 (flow library).
-  The spec already permits shipping without it. If the request to SCDNR succeeds, the layer drops
-  in as a new `oyster` feature type alongside dropoff/flat/hole/bar/creek_mouth/wall/jetty; if it
-  does not, spec §13's fallback is manual pins in the fishery config.
+**It IS publicly downloadable — no token.** An initial probe wrongly concluded otherwise: the
+service that web searches surface, `MRD/Sc_Intertidal_Oyster_Reefs20190402/MapServer`, is secured
+(HTTP 499 Token Required) and no longer listed in the public `MRD` folder. That is a stale
+endpoint. The LIVE one is found by walking the public ArcGIS Online web app to its web map to its
+operational layer:
+
+```
+scdnr.maps.arcgis.com item 5bc898b455be43bea4a908491d2b3414   (access: public)
+  -> webmap db780044ce3348e785f653a72cc6c6b7
+    -> https://arcweb.dnr.sc.gov/server/rest/services/Hosted/SCDNROyster2015Live/FeatureServer/0
+```
+
+Public, unauthenticated, `maxRecordCount` 2000 with pagination, served in Web Mercator (3857)
+despite metadata claiming UTM 17N — request `outSR=4326` to match the pipeline's GeoJSON
+convention. Fields: `objectid, id, calcgeo_ac, photoedit, photo_year, shape_leng`.
+Working downloader: `.superpowers/sdd/<plan>/fetch_oysters.py`; Plan 4 should promote it to
+`sources/scdnr.py` with the usual SQLite cache. Acknowledge SCDNR as source per their use
+constraints.
+
+**Downloaded for Winyah** to `data/winyah-bay/oyster_reefs.geojson` (gitignored, rebuildable):
+8,451 polygons in the bbox, 6,527 (77%) inside the model domain, `photo_year` uniformly 2008.
+
+**What it is good for — and what it is NOT.** These are fringing reef patches, not bars:
+
+| metric | value |
+|---|---|
+| total area, whole bbox | 0.607 km² |
+| median reef | 24 m² (~5 x 5 m) |
+| p90 | 142 m² |
+| max | 6,458 m² |
+| >= 500 m² (resolvable at the 20 m mesh / 20 m library grid) | 181 |
+| >= 2000 m² | 18 |
+
+- **NOT mesh geometry.** A 24 m² reef is far below the 20 m triangle edge and the 20 m
+  `library_cell_m` raster. Oysters cannot influence the hydrodynamics at our resolution, and
+  meshing them would be meaningless CFL cost. Do not add them to the ANUGA domain.
+- **NOT an ambush-feature class as-is.** 8,451 polygons of median 24 m² would swamp the 2,162-strong
+  feature inventory with noise, and would re-create exactly the nearest-feature problem Task 2 fixed
+  from the other direction (too many tiny features rather than one huge one). If used as features at
+  all, gate on area (>= ~500 m², i.e. 181 of them) or cluster adjacent patches into reef complexes.
+- **YES as a scoring/habitat layer (Plan 4).** Proximity-to-oyster-habitat is a legitimate
+  bite-score factor, especially for redfish. A rasterised reef-density field on the analysis grid is
+  the natural form — it degrades gracefully at any resolution and sidesteps the polygon-count problem.
+
+**Calibration note:** none of Ellis's three known spots sit near a reef — nearest reef is 1.4 km
+(Mud Bay Cut), 3.9 km (Georgetown Lighthouse), 6.5 km (North Jetty). So oyster habitat is not what
+drives his current spots, and any oyster factor should carry a small default weight until validated
+against spots he chooses specifically for oysters. Imagery is 2008, ~18 years stale; intertidal
+reefs migrate, so treat this as a prior, not ground truth.
