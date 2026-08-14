@@ -103,7 +103,12 @@ class ModelDomain(BaseModel):
     ocean_max_z_m: float = -2.0  # boundary segments below this bed level take the tide
     # islands at least this large become mesh holes (interior_holes) instead of
     # being meshed as land; smaller ones are filled as sub-mesh-scale noise.
-    min_island_hole_km2: float = 0.05
+    # Lowered 0.05 -> 0.002 2026-08-14: measured against Winyah's real 149
+    # enclosed land islands (total area 0.75 km2), 0.05 kept only 6 of them as
+    # holes (fills the other 143 -- meshed as water); 0.002 keeps 79. The
+    # remaining fill is cheap (total island area is small) and this is a
+    # fidelity INCREASE, not a mesh-cost tradeoff -- do not raise it back up.
+    min_island_hole_km2: float = 0.002
 
 
 class AnugaConfig(BaseModel):
