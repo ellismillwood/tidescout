@@ -669,6 +669,7 @@ class ModelDomain(BaseModel):
     wet_level_m: float = 1.5      # cut the shoreline at highest simulated water
     simplify_m: float = 25.0      # shoreline generalisation before meshing
     clean_cells: int = 3          # morphological close/open radius, in cells
+    ocean_max_z_m: float = -2.0   # boundary segments below this bed level take the tide
 
 
 class AnugaConfig(BaseModel):
@@ -991,20 +992,64 @@ def build_mesh(slug: str, fishery: Fishery):
         [[list(c) for c in p.exterior.coords[:-1]], edge_to_area(cfg.jetty_edge_m)]
         for p in jetty_regions(fishery, boundary, fishery.bathymetry.epsg)
     ]
+    # Split the boundary. Tagging every segment alike and then imposing the
+    # ocean tide on all of them puts a prescribed water level along the whole
+    # SHORELINE -- of Winyah's 485 polygon segments only 10 are genuinely
+    # seaward. Forcing stage at a drying land boundary produces a thin-layer
+    # momentum blow-up (one cell reached 7.5e6 m/s) that collapses the global
+    # timestep and aborts the run. Measured: shared tag -> unstable at
+    # t~1900 s; split -> stable through the full window.
+    ocean_idx, wall_idx = classify_boundary(ring, z, transform, md.ocean_max_z_m)
+    if not ocean_idx:
+        raise ValueError(
+            f"no boundary segment has bed below {md.ocean_max_z_m} m -- the tide "
+            "would have nowhere to enter the domain"
+        )
     domain = anuga.create_domain_from_regions(
         ring,
-        boundary_tags={"outer": list(range(len(ring)))},
+        boundary_tags={"ocean": ocean_idx, "wall": wall_idx},
         maximum_triangle_area=edge_to_area(cfg.base_edge_m),
         interior_regions=regions or None,
         verbose=False,
     )
-    elev = sample_to_centroids(domain, z, transform)
+    # Elevation at VERTICES, not centroids. DE0/DE1 are discontinuous-elevation
+    # schemes whose well-balanced property is defined on vertex values; setting
+    # centroids only leaves inconsistent vertex elevations and generates
+    # spurious momentum at the wet/dry front.
+    vx, vy = domain.get_vertex_coordinates(absolute=True).T
+    cols, rows = ~transform * (vx, vy)
+    rows = np.clip(rows.astype(int), 0, z.shape[0] - 1)
+    cols = np.clip(cols.astype(int), 0, z.shape[1] - 1)
+    elev = z[rows, cols]
     # nodata slivers at the boundary become land rather than NaN: a NaN
     # elevation propagates through the solver and kills the whole run.
     elev = np.where(np.isfinite(elev), elev, 1.0)
-    domain.set_quantity("elevation", elev, location="centroids")
+    domain.set_quantity("elevation", elev.reshape(-1, 3), location="vertices")
     return domain
+
+
+def classify_boundary(ring, z, transform, ocean_max_z_m: float):
+    """Split bounding-polygon segments into seaward opening vs shoreline wall.
+
+    A segment whose midpoint sits over deep water is where the authored domain
+    polygon cuts across open water -- that is the tide's way in. Everything
+    else follows the shoreline and must be a reflective wall.
+    """
+    ocean_idx, wall_idx = [], []
+    for i in range(len(ring)):
+        ax, ay = ring[i]
+        bx, by = ring[(i + 1) % len(ring)]
+        col, row = ~transform * (0.5 * (ax + bx), 0.5 * (ay + by))
+        row = int(np.clip(row, 0, z.shape[0] - 1))
+        col = int(np.clip(col, 0, z.shape[1] - 1))
+        zb = z[row, col]
+        (ocean_idx if (np.isfinite(zb) and zb < ocean_max_z_m) else wall_idx).append(i)
+    return ocean_idx, wall_idx
 ```
+
+**Do not retag `domain.boundary` after construction** — ANUGA builds its tag
+bookkeeping at mesh time and raises `KeyError` on the old tag. The tags must be
+passed to `create_domain_from_regions`.
 
 **API notes that will otherwise cost an hour:** `create_domain_from_regions` has **no `mesh_filename` argument**. Its real signature is `(bounding_polygon, boundary_tags, maximum_triangle_area=None, interior_regions=None, interior_holes=None, hole_tags=None, poly_geo_reference=None, mesh_geo_reference=None, breaklines=None, regionPtArea=None, minimum_triangle_angle=28.0, fail_if_polygons_outside=True, use_cache=False, verbose=False)`. `set_boundary` raises if you name a tag that is not a `boundary_tags` key.
 
@@ -1582,10 +1627,13 @@ def run_regime(
     domain.set_quantity(
         "stage", np.maximum(elev, tide(0.0)), location="centroids"
     )
+    # Tide enters ONLY at the seaward opening; the shoreline is a wall. Imposing
+    # the tide on every boundary segment collapses the timestep -- see Task 6.
     domain.set_boundary({
-        "outer": anuga.Transmissive_momentum_set_stage_boundary(
+        "ocean": anuga.Transmissive_momentum_set_stage_boundary(
             domain=domain, function=tide
-        )
+        ),
+        "wall": anuga.Reflective_boundary(domain),
     })
 
     inflows = forcing.river_inflow_m3s(fishery, discharge_bucket)
