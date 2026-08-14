@@ -28,3 +28,39 @@ Distilled from Plan 2's ledger and final whole-branch review (2026-08-13) before
 - ANUGA install still unattempted (Plan 3's first risk; container fallback per spec §5). THREDDS/NCEI is the bathy source of record — no CUDEM S3 bucket exists.
 - Deferred minors (final review triaged all OK-TO-DEFER): contour ring seam-splitting (~40 m loss cases, stitch recipe in ledger), hillshade nodata-vs-black collision, quicklook not georeferenced, `noaa.__all__` under-declares, `JettySeed` lacks min-2-vertex validator, 3 early-bound path value-imports (patch-target gotchas documented in test_spots.py), README section header stale, empty-feats `min()` edge, Rich-table test parse brittleness, `_write` cross-module private import (rename to `write_raster` when touched).
 - Subagent report prose can drift on specifics (bar-78 vs bar-123 attribution) — verify numbers against artifacts, not summaries. Three more API connection drops this plan; work always survived in the tree/commits — check `git log` before re-dispatching.
+
+## SCDNR intertidal oyster reef layer — availability probed 2026-08-14 (Plan 4 input)
+
+Spec §4 lists oyster beds as a feature class "if downloadable, adds a feature class; else
+manual pins later", and §13 treats it as optional. It was deferred by name in Plan 1
+("...SECOFS, CUDEM, and oyster layers") and recorded as `oyster ✗` in Plan 2's spec-coverage
+line. **Neither deferral ever checked whether the layer was actually obtainable.** It has now
+been checked, so Plan 4 does not have to re-derive this:
+
+- **The dataset exists and is a good fit.** `SCDNRoyster2015Live` — 168,373 intertidal reef
+  polygons, NAD83 **UTM 17N** (the same CRS as our analysis grid, so no reprojection risk),
+  extent -80.94..-78.53 lon / 32.02..33.91 lat, which covers Winyah Bay. Digitised from
+  0.25 m 4-band orthophotos (2003-2006), updated from helicopter photography 2011-2015.
+  Metadata: https://www.dnr.sc.gov/GIS/metadata/SCDNR_Oyster2015Live.html
+- **It is NOT publicly downloadable as of this check.** The service that public search results
+  point at — `MRD/Sc_Intertidal_Oyster_Reefs20190402/MapServer` on arcweb.dnr.sc.gov — returns
+  `{"error":{"code":499,"message":"Token Required"}}`. SCDNR's service directory *is* browsable
+  without auth, and the `MRD` folder now lists only `sfpermit` and `SSG19_20test`: the oyster
+  service is no longer published there. So it was unpublished/secured, not merely mis-addressed.
+- **The metadata states Access Constraints: "None"** but publishes no download URL or ordering
+  process. That combination (no policy restriction, no public endpoint) means the realistic route
+  is a direct data request to SCDNR's Marine Resources Division, not scraping.
+- **`MRD/sfpermit` (layer `sfpermit22`) is NOT a substitute** — it is shellfish *permit/harvest
+  ground* boundaries, i.e. management polygons, not reef geometry. Useless for ambush-feature
+  detection.
+- **Auth mechanics if a login is ever granted:** the server reports
+  `isTokenBasedSecurity: true` with `tokenServicesUrl =
+  https://arcweb.dnr.sc.gov/portal/sharing/rest/generateToken`, and `owningSystemUrl =
+  https://arcweb.dnr.sc.gov/portal`. So it is federated to ArcGIS Enterprise Portal: a token is
+  minted by POSTing existing portal credentials (username/password/client/referer/expiration) to
+  that endpoint — the token is the *consequence* of an SCDNR-issued account, never a way to
+  obtain one. `/server/tokens/generateToken` returns HTTP 405 to GET (POST-only).
+- **Scope ruling:** this belongs to Plan 4 (scoring/feature classes), not Plan 3 (flow library).
+  The spec already permits shipping without it. If the request to SCDNR succeeds, the layer drops
+  in as a new `oyster` feature type alongside dropoff/flat/hole/bar/creek_mouth/wall/jetty; if it
+  does not, spec §13's fallback is manual pins in the fishery config.
