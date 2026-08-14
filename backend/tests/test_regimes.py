@@ -24,6 +24,24 @@ def test_mass_residual_tolerance_is_not_machine_precision():
     assert load_fishery("winyah-bay").anuga.mass_tolerance >= 1e-4
 
 
+def test_initial_stage_leaves_dry_land_exactly_dry():
+    """Regression for the CFL collapse: `elev + 1e-3` used to film every land
+    cell with a nominal 1 mm, which collapsed ANUGA's timestep to ~1e-6 s on
+    the real mesh (~129,000 of 315,564 cells filmed). Any elev-relative
+    epsilon reintroduced here would show up as positive depth above `level`.
+    """
+    level = 0.0
+    elev = np.array([-5.0, -0.5, 0.0, 0.5, 5.0])
+    stage = regimes.initial_stage(elev, level)
+    depth = stage - elev
+
+    above = elev > level
+    assert not (depth[above] > 0).any()
+
+    below_or_at = ~above
+    assert np.array_equal(stage[below_or_at], np.full(below_or_at.sum(), level))
+
+
 def test_reversal_check_detects_a_one_way_domain(tmp_path):
     meta = {"snapshots": [{"index": 0, "t_s": 0, "phase": 0.0, "stage_bc_m": 0.0},
                           {"index": 1, "t_s": 1800, "phase": 0.1, "stage_bc_m": 0.1}]}

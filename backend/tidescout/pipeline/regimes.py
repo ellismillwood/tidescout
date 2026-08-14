@@ -32,6 +32,17 @@ def regime_dir(slug: str) -> Path:
     return d
 
 
+def initial_stage(elev: np.ndarray, level: float) -> np.ndarray:
+    """Free surface at rest: water to `level`, and dry land genuinely dry.
+
+    Deliberately NOT `elev + eps`. A nominal film over land collapses ANUGA's
+    CFL timestep to ~1e-6 s on real bathymetry (measured: ~129,000 filmed
+    cells of 315,564, run aborts in the first yieldstep). Cells above `level`
+    must start at depth exactly 0.
+    """
+    return np.maximum(elev, level)
+
+
 def mass_residual(domain, v0: float) -> float:
     """Relative closure of ANUGA's volume identity.
 
@@ -82,7 +93,7 @@ def run_regime(
     )
     # Start at the initial boundary level so spin-up is not a dam break.
     domain.set_quantity(
-        "stage", np.maximum(elev + 1e-3, tide(0.0)), location="centroids"
+        "stage", initial_stage(elev, tide(0.0)), location="centroids"
     )
     domain.set_boundary({
         "outer": anuga.Transmissive_momentum_set_stage_boundary(
