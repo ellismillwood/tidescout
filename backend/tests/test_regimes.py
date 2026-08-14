@@ -1,8 +1,38 @@
 import json
 
 import numpy as np
+import pytest
 
 from tidescout.pipeline import regimes
+
+
+class _FakeElevationQuantity:
+    """Stand-in for `domain.get_quantity("elevation")` -- only the one method
+    `_attach_river_inflows` calls."""
+
+    def __init__(self, values: np.ndarray):
+        self._values = values
+
+    def get_values(self, location="centroids"):
+        return self._values
+
+
+class _FakeDomain:
+    """Minimal stand-in for `anuga.Domain`, covering only what
+    `_attach_river_inflows` touches before it would call `Inlet_operator`.
+    Deliberately not a real mesh -- these tests are about the guard, not
+    ANUGA itself."""
+
+    def __init__(self, centroids: np.ndarray, elevation: np.ndarray):
+        self._centroids = centroids
+        self._elev = _FakeElevationQuantity(elevation)
+
+    def get_centroid_coordinates(self, absolute=True):
+        return self._centroids
+
+    def get_quantity(self, name):
+        assert name == "elevation"
+        return self._elev
 
 
 def test_regime_matrix_is_three_by_three():
@@ -54,3 +84,74 @@ def test_reversal_check_detects_a_one_way_domain(tmp_path):
             v=np.zeros(2, "float32"),
         )
     assert regimes.reversal_check(tmp_path)["reversed"] is False
+
+
+def test_reversal_check_detects_a_genuine_reversal(tmp_path):
+    """Flood -> slack -> ebb, well past the noise floor, over enough samples."""
+    meta = {"snapshots": [
+        {"index": 0, "t_s": 0, "phase": 0.0, "stage_bc_m": 0.0},
+        {"index": 1, "t_s": 1800, "phase": 0.1, "stage_bc_m": 0.1},
+        {"index": 2, "t_s": 3600, "phase": 0.2, "stage_bc_m": 0.2},
+    ]}
+    (tmp_path / "regime.json").write_text(json.dumps(meta))
+    for i, val in enumerate([-0.05, 0.0, 0.05]):  # >> REVERSAL_EPS_MPS (0.01)
+        np.savez_compressed(
+            tmp_path / f"snap_{i:03d}.npz",
+            depth=np.array([5.0, 5.0], "float32"),
+            u=np.array([val, val], "float32"),
+            v=np.zeros(2, "float32"),
+        )
+    result = regimes.reversal_check(tmp_path)
+    assert result["reversed"] is True
+    assert result["n_samples"] == 3
+
+
+def test_reversal_check_rejects_near_zero_noise(tmp_path):
+    """Two samples straddling zero by ~1e-4 m/s must not read as a reversal --
+    this is the exact case the review caught: reversed=True from noise near
+    high water."""
+    meta = {"snapshots": [
+        {"index": 0, "t_s": 0, "phase": 0.0, "stage_bc_m": 1.5},
+        {"index": 1, "t_s": 900, "phase": 0.02, "stage_bc_m": 1.5},
+    ]}
+    (tmp_path / "regime.json").write_text(json.dumps(meta))
+    for i, val in enumerate([1e-4, -1e-4]):  # << REVERSAL_EPS_MPS (0.01)
+        np.savez_compressed(
+            tmp_path / f"snap_{i:03d}.npz",
+            depth=np.array([5.0, 5.0], "float32"),
+            u=np.array([val, val], "float32"),
+            v=np.zeros(2, "float32"),
+        )
+    result = regimes.reversal_check(tmp_path)
+    assert result["reversed"] is False
+    assert result["n_samples"] == 2
+
+
+def test_attach_river_inflows_raises_on_empty_region(fishery):
+    """No mesh centroid at all falls near the inflow coordinate."""
+    domain = _FakeDomain(
+        centroids=np.array([[0.0, 0.0]]),
+        elevation=np.array([-5.0]),
+    )
+    with pytest.raises(RuntimeError, match="no WET mesh centroids"):
+        regimes._attach_river_inflows(domain, fishery, {})
+
+
+def test_attach_river_inflows_raises_on_land_only_region(fishery):
+    """Centroids exist in the injection box, but every one of them is dry --
+    this is the gap the review found: the old check only tested `.any()`
+    with no elevation filter, so a marsh-only box would pass silently."""
+    from rasterio.warp import transform as warp_transform
+
+    river = fishery.rivers[0]
+    lon, lat = river.inflow_lonlat
+    xs, ys = warp_transform(
+        "EPSG:4326", f"EPSG:{fishery.bathymetry.epsg}", [lon], [lat]
+    )
+    cx, cy = xs[0], ys[0]
+    domain = _FakeDomain(
+        centroids=np.array([[cx, cy], [cx + 10.0, cy - 10.0]]),
+        elevation=np.array([2.0, 3.0]),  # inside the box, but dry land/marsh
+    )
+    with pytest.raises(RuntimeError, match="no WET mesh centroids"):
+        regimes._attach_river_inflows(domain, fishery, {})

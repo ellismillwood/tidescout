@@ -21,6 +21,28 @@ RANGE_BUCKETS = ["neap", "mean", "spring"]
 DISCHARGE_BUCKETS = ["low", "med", "high"]
 REGIME_MATRIX = [(r, d) for r in RANGE_BUCKETS for d in DISCHARGE_BUCKETS]
 
+# Elevation threshold for "this centroid is genuinely part of the water
+# channel", used only to validate river-inflow placement. Deliberately mean
+# sea level (NAVD88 0.0 m), not ModelDomain.ocean_max_z_m (-2.0 m): that
+# threshold picks out DEEP water for the tide's boundary opening, which is
+# stricter than an inland river channel needs to be. A centroid below MSL is
+# unambiguously bed, not marsh platform (marsh sits at roughly 0..+1.5 m --
+# see ModelDomain.wet_level_m).
+RIVER_WET_MAX_Z_M = 0.0
+
+# Minimum |mean centroid velocity| (m/s) for a sign to count as real flow
+# rather than numerical noise. Near slack water a domain-wide mean velocity
+# can cross zero from floating-point rounding alone -- observed: reversed
+# reported True from two samples ~1e-4 m/s apart, 15 minutes apart, near high
+# water. 1 cm/s sits comfortably above that noise floor and well below any
+# genuine tidal flow speed in the regime library (peak measured 0.127 m/s).
+REVERSAL_EPS_MPS = 0.01
+
+# A single sign flip near slack proves nothing; require enough samples across
+# the cycle that a genuine ebb/flood reversal, not one noisy pair, is what
+# tripped this.
+REVERSAL_MIN_SAMPLES = 3
+
 
 def regime_name(range_bucket: str, discharge_bucket: str) -> str:
     return f"{range_bucket}_{discharge_bucket}"
@@ -156,6 +178,7 @@ def _attach_river_inflows(domain, fishery: Fishery, inflows: dict[str, float]) -
 
     epsg = fishery.bathymetry.epsg
     centroids = domain.get_centroid_coordinates(absolute=True)
+    elev = domain.get_quantity("elevation").get_values(location="centroids")
     for river in fishery.rivers:
         seed = getattr(river, "inflow_lonlat", None)
         if seed is None:
@@ -168,20 +191,24 @@ def _attach_river_inflows(domain, fishery: Fishery, inflows: dict[str, float]) -
         # dangerous silent failure in this whole module: Inlet_operator
         # itself dies deep inside ANUGA with an unrelated AttributeError
         # ('Inlet' object has no attribute 'inlet_line') when its region
-        # contains zero centroids, but a region that contains a handful of
-        # *land* centroids would not raise at all -- the run would finish,
+        # contains zero centroids, but a region that contains only *land* or
+        # *marsh* centroids would not raise at all -- the run would finish,
         # regime.json would look plausible, and this river's discharge axis
-        # would be silently meaningless. Fail loudly and specifically here
-        # instead of relying on that downstream crash (or worse, no crash).
+        # would be silently meaningless. Require at least one WET centroid
+        # (elevation below RIVER_WET_MAX_Z_M) in the box, not merely any
+        # centroid, and fail loudly and specifically here instead of relying
+        # on that downstream crash (or worse, no crash).
         in_region = (
             (centroids[:, 0] >= cx - r) & (centroids[:, 0] <= cx + r)
             & (centroids[:, 1] >= cy - r) & (centroids[:, 1] <= cy + r)
         )
-        if not in_region.any():
+        wet_in_region = in_region & (elev < RIVER_WET_MAX_Z_M)
+        if not wet_in_region.any():
             raise RuntimeError(
-                f"river inflow for {river.name!r} has no mesh centroids within "
-                f"{r:.0f} m of inflow_lonlat={seed} (utm=({cx:.0f}, {cy:.0f})) -- "
-                "the coordinate does not land in the meshed water body, so this "
+                f"river inflow for {river.name!r} has no WET mesh centroids "
+                f"(elevation < {RIVER_WET_MAX_Z_M} m) within {r:.0f} m of "
+                f"inflow_lonlat={seed} (utm=({cx:.0f}, {cy:.0f})) -- the "
+                "coordinate does not land in the meshed water channel, so this "
                 "river's discharge axis would be silently dropped"
             )
         anuga.Inlet_operator(domain, region, Q=inflows[river.name])
@@ -191,7 +218,12 @@ def reversal_check(out_dir: Path) -> dict:
     """Flow must reverse direction across a tidal cycle.
 
     A domain that only ever drains (or only fills) means the boundary never
-    drove it -- the most likely silent failure in the whole pipeline.
+    drove it -- the most likely silent failure in the whole pipeline. A bare
+    sign test on the raw min/max is not enough: near slack water a
+    domain-wide mean velocity crosses zero from floating-point rounding
+    alone, so this requires both a velocity margin (REVERSAL_EPS_MPS) past
+    zero and a minimum number of samples (REVERSAL_MIN_SAMPLES) before
+    calling it a genuine reversal.
     """
     meta = json.loads((out_dir / "regime.json").read_text())
     signs = []
@@ -203,9 +235,18 @@ def reversal_check(out_dir: Path) -> dict:
             continue
         # net along-channel transport, projected on the dominant flow axis
         signs.append(float(np.mean(u[deep]) + np.mean(v[deep])))
+    lo = min(signs) if signs else 0.0
+    hi = max(signs) if signs else 0.0
+    reversed_ = bool(
+        len(signs) >= REVERSAL_MIN_SAMPLES
+        and lo < -REVERSAL_EPS_MPS
+        and hi > REVERSAL_EPS_MPS
+    )
     return {
         "n_samples": len(signs),
-        "reversed": bool(signs and min(signs) < 0 < max(signs)),
-        "min": min(signs) if signs else 0.0,
-        "max": max(signs) if signs else 0.0,
+        "reversed": reversed_,
+        "min": lo,
+        "max": hi,
+        "eps_mps": REVERSAL_EPS_MPS,
+        "min_samples_required": REVERSAL_MIN_SAMPLES,
     }
