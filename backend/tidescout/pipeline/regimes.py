@@ -95,10 +95,13 @@ def run_regime(
     domain.set_quantity(
         "stage", initial_stage(elev, tide(0.0)), location="centroids"
     )
+    # Tide enters ONLY at the seaward opening; the shoreline is a wall. Imposing
+    # the tide on every boundary segment collapses the timestep -- see mesh.py.
     domain.set_boundary({
-        "outer": anuga.Transmissive_momentum_set_stage_boundary(
+        "ocean": anuga.Transmissive_momentum_set_stage_boundary(
             domain=domain, function=tide
-        )
+        ),
+        "wall": anuga.Reflective_boundary(domain),
     })
 
     inflows = forcing.river_inflow_m3s(fishery, discharge_bucket)

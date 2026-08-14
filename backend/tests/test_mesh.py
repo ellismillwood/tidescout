@@ -1,4 +1,5 @@
 import numpy as np
+import pytest
 
 from tidescout.config import load_fishery
 from tidescout.pipeline import mesh
@@ -45,6 +46,44 @@ def test_build_mesh_sets_elevation_on_every_centroid(tmp_path, monkeypatch):
     assert len(elev) == len(d.triangles)
     assert np.isfinite(elev).all(), "no NaN may reach the solver"
     assert elev.min() < 0.0
+
+
+def test_classify_boundary_splits_ocean_from_wall():
+    z = np.full((50, 50), -5.0, dtype="float32")
+    z[0:5, :] = 2.0  # land/shallow strip along the north edge
+    ring = [
+        [500000.0, 3699510.0],  # SW
+        [500490.0, 3699510.0],  # SE
+        [500490.0, 3699995.0],  # NE, over the shallow strip
+        [500000.0, 3699995.0],  # NW, over the shallow strip
+    ]
+    ocean_idx, wall_idx = mesh.classify_boundary(ring, z, synth.TRANSFORM, ocean_max_z_m=-2.0)
+    assert 0 in ocean_idx, "south segment sits over deep water, must be ocean"
+    assert 2 in wall_idx, "north segment sits over the shallow strip, must be wall"
+
+
+def test_build_mesh_boundary_tags_are_ocean_and_wall_minority(tmp_path, monkeypatch):
+    z = np.full((300, 300), -1.0, dtype="float32")  # shallow basin -> wall by default
+    z[290:300, :] = -5.0                             # deep water along the south edge only
+    _fake_bathy(tmp_path, monkeypatch, z)
+    f = load_fishery("winyah-bay")
+    f.model_domain.polygon_utm_km = []
+    d = mesh.build_mesh("winyah-bay", f)
+    tags = set(d.boundary.values())
+    assert tags == {"ocean", "wall"}
+    n_ocean = sum(1 for t in d.boundary.values() if t == "ocean")
+    n_wall = sum(1 for t in d.boundary.values() if t == "wall")
+    assert 0 < n_ocean < n_wall, "ocean must be present but a minority of the boundary"
+
+
+def test_build_mesh_raises_when_no_ocean_segment_qualifies(tmp_path, monkeypatch):
+    z = np.full((300, 300), -1.0, dtype="float32")  # nowhere deep enough for the tide
+    _fake_bathy(tmp_path, monkeypatch, z)
+    f = load_fishery("winyah-bay")
+    f.model_domain.polygon_utm_km = []
+    f.model_domain.ocean_max_z_m = -999.0
+    with pytest.raises(ValueError, match="no boundary segment"):
+        mesh.build_mesh("winyah-bay", f)
 
 
 def test_friction_field_has_no_zero_values(tmp_path, monkeypatch):

@@ -114,6 +114,27 @@ def sample_to_centroids(domain, arr: np.ndarray, transform) -> np.ndarray:
     return arr[rows, cols]
 
 
+def classify_boundary(
+    ring: list, z: np.ndarray, transform, ocean_max_z_m: float
+) -> tuple[list[int], list[int]]:
+    """Split bounding-polygon segments into seaward opening vs shoreline wall.
+
+    A segment whose midpoint sits over deep water is where the authored domain
+    polygon cuts across open water -- that is the tide's way in. Everything
+    else follows the shoreline and must be a reflective wall.
+    """
+    ocean_idx, wall_idx = [], []
+    for i in range(len(ring)):
+        ax, ay = ring[i]
+        bx, by = ring[(i + 1) % len(ring)]
+        col, row = ~transform * (0.5 * (ax + bx), 0.5 * (ay + by))
+        row = int(np.clip(row, 0, z.shape[0] - 1))
+        col = int(np.clip(col, 0, z.shape[1] - 1))
+        zb = z[row, col]
+        (ocean_idx if (np.isfinite(zb) and zb < ocean_max_z_m) else wall_idx).append(i)
+    return ocean_idx, wall_idx
+
+
 def build_mesh(slug: str, fishery: Fishery):
     z, transform, meta = read_bathy(slug)
     md = fishery.model_domain
@@ -126,18 +147,40 @@ def build_mesh(slug: str, fishery: Fishery):
         [[list(c) for c in p.exterior.coords[:-1]], edge_to_area(cfg.jetty_edge_m)]
         for p in jetty_regions(fishery, boundary, fishery.bathymetry.epsg)
     ]
+    # Split the boundary. Tagging every segment alike and then imposing the
+    # ocean tide on all of them puts a prescribed water level along the whole
+    # SHORELINE -- of Winyah's 485 polygon segments only 10 are genuinely
+    # seaward. Forcing stage at a drying land boundary produces a thin-layer
+    # momentum blow-up (one cell reached 7.5e6 m/s) that collapses the global
+    # timestep and aborts the run. Measured: shared tag -> unstable at
+    # t~1900 s; split -> stable through the full window.
+    ocean_max_z_m = md.ocean_max_z_m if md else -2.0
+    ocean_idx, wall_idx = classify_boundary(ring, z, transform, ocean_max_z_m)
+    if not ocean_idx:
+        raise ValueError(
+            f"no boundary segment has bed below {ocean_max_z_m} m -- the tide "
+            "would have nowhere to enter the domain"
+        )
     domain = anuga.create_domain_from_regions(
         ring,
-        boundary_tags={"outer": list(range(len(ring)))},
+        boundary_tags={"ocean": ocean_idx, "wall": wall_idx},
         maximum_triangle_area=edge_to_area(cfg.base_edge_m),
         interior_regions=regions or None,
         verbose=False,
     )
-    elev = sample_to_centroids(domain, z, transform)
+    # Elevation at VERTICES, not centroids. DE0 is a discontinuous-elevation
+    # scheme whose well-balanced property is defined on vertex values; setting
+    # centroids only leaves inconsistent vertex elevations and generates
+    # spurious momentum at the wet/dry front.
+    vx, vy = domain.get_vertex_coordinates(absolute=True).T
+    cols, rows = ~transform * (vx, vy)
+    rows = np.clip(rows.astype(int), 0, z.shape[0] - 1)
+    cols = np.clip(cols.astype(int), 0, z.shape[1] - 1)
+    ev = z[rows, cols]
     # nodata slivers at the boundary become land rather than NaN: a NaN
     # elevation propagates through the solver and kills the whole run.
-    elev = np.where(np.isfinite(elev), elev, 1.0)
-    domain.set_quantity("elevation", elev, location="centroids")
+    ev = np.where(np.isfinite(ev), ev, 1.0)
+    domain.set_quantity("elevation", ev.reshape(-1, 3), location="vertices")
     return domain
 
 

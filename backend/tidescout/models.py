@@ -100,6 +100,7 @@ class ModelDomain(BaseModel):
     wet_level_m: float = 1.5  # cut the shoreline at highest simulated water
     simplify_m: float = 25.0  # shoreline generalisation before meshing
     clean_cells: int = 3  # morphological close/open radius, in cells
+    ocean_max_z_m: float = -2.0  # boundary segments below this bed level take the tide
 
 
 class AnugaConfig(BaseModel):
