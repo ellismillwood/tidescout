@@ -136,12 +136,22 @@ bathymetry:
   contour_depths_m: [-2.0, -5.0, -10.0, -15.0]
 features: {} # all defaults; tune here during validation
 jetties:
-  # Approximate from memory of the chart — refine vertices against
-  # imagery/ENC during the known-spots validation pass. Format: [lon, lat].
+  # Traced from CUDEM bathymetry 2026-08-14, replacing seeds that were
+  # "approximate from memory of the chart" and ran diagonally across North
+  # Island. Method: local-median high-pass (>0.55 m relief), top elevation
+  # capped at +2 m to exclude barrier dunes, skeletonised, centreline traced
+  # endpoint-to-endpoint, simplified to 20 m. Corroboration: the deep entrance
+  # channel runs BETWEEN these two ridges, and Ellis's "North Jetty" known spot
+  # sits on the inshore west end of the north trace. Owner-confirmed.
+  # Regenerate: .superpowers/sdd/2026-08-13-03-anuga-flow-library/jetty_trace.py
   - name: North Jetty
-    coords: [[-79.1850, 33.2320], [-79.1630, 33.2160]]
+    # ridge top -0.86 m NAVD88, traced length 1623 m. Non-linear: runs WNW
+    # inshore, doglegs, then runs E. The bend is load-bearing -- do not
+    # straighten this to two vertices.
+    coords: [[-79.16803, 33.20569], [-79.16345, 33.20409], [-79.15102, 33.20373]]
   - name: South Jetty
-    coords: [[-79.1910, 33.2220], [-79.1700, 33.2050]]
+    # ridge top +0.08 m NAVD88, traced length 1484 m.
+    coords: [[-79.16545, 33.19050], [-79.15397, 33.19051], [-79.15152, 33.19012], [-79.14958, 33.19018]]
 model_domain:
   # Authored, not inferred: the Atlantic reconnects to the bay through North
   # Inlet and the ICW, so no cut line or flood-fill separates them (a mouth
@@ -163,7 +173,12 @@ model_domain:
     - [655.5, 3692.0]  # W, up the Sampit
     - [658.0, 3686.0]  # SW down the west shore
     - [659.0, 3678.0]  # S along the ICW
-  wet_level_m: 1.5
+  # Capped at real high water, not the old blanket 1.5 m: mean_range_m 1.10 *
+  # spring factor 1.28 / 2 = 0.70 m max simulated stage, plus ~0.2 m margin.
+  # Do NOT "helpfully" raise this back toward 1.5 m -- that meshes land that
+  # can never get wet (measured during Task 9: 315,564 tri / 21.4% never-wet
+  # at 1.5 m vs 257,651 tri / 4.2% never-wet at 0.9 m).
+  wet_level_m: 0.9
 anuga:
   base_edge_m: 60.0
   jetty_edge_m: 15.0

@@ -44,17 +44,34 @@ def domain_mask(z, transform, fishery: Fishery, polygon=None) -> np.ndarray:
     return lbl == sizes.argmax()
 
 
-def clean_mask(mask: np.ndarray, cells: int) -> np.ndarray:
+def clean_mask(
+    mask: np.ndarray,
+    cells: int,
+    min_island_hole_km2: float = 0.05,
+    pixel_area_m2: float = 100.0,
+) -> np.ndarray:
     """Drop sub-mesh-scale detail that would explode the boundary vertex count.
 
-    Islands are deliberately filled rather than carved as mesh holes: ANUGA
-    keeps them dry through wetting/drying because they sit above water, and
-    that also lets them flood on a spring tide, which a hole never could.
+    Small islands are filled: they are sub-mesh-scale noise, and filling keeps
+    the boundary vertex count down. Islands at least `min_island_hole_km2`
+    large are left unfilled -- they survive as enclosed False regions here so
+    `domain_polygon` picks them up as interior rings, which `build_mesh` then
+    carves out of the mesh via `interior_holes` instead of paying to triangulate
+    land that can never get wet.
     """
     k = np.ones((cells, cells))
     m = ndimage.binary_closing(mask, k)
     m = ndimage.binary_opening(m, k)
-    m = ndimage.binary_fill_holes(m)
+
+    filled = ndimage.binary_fill_holes(m)
+    holes = filled & ~m
+    lbl, n = ndimage.label(holes)
+    if n:
+        sizes_px = ndimage.sum(holes, lbl, index=np.arange(1, n + 1))
+        for i, size_px in enumerate(sizes_px, start=1):
+            if size_px * pixel_area_m2 / 1e6 < min_island_hole_km2:
+                m |= lbl == i  # sub-threshold hole -- fill it as noise
+
     lbl, _ = ndimage.label(m)
     sizes = np.bincount(lbl.ravel())
     sizes[0] = 0
@@ -139,9 +156,35 @@ def build_mesh(slug: str, fishery: Fishery):
     z, transform, meta = read_bathy(slug)
     md = fishery.model_domain
     cfg = fishery.anuga
-    mask = clean_mask(domain_mask(z, transform, fishery), md.clean_cells if md else 3)
+    pixel_area_m2 = abs(transform.a) * abs(transform.e)
+    min_island_hole_km2 = md.min_island_hole_km2 if md else 0.05
+    mask = clean_mask(
+        domain_mask(z, transform, fishery),
+        md.clean_cells if md else 3,
+        min_island_hole_km2,
+        pixel_area_m2,
+    )
     boundary = domain_polygon(mask, transform, md.simplify_m if md else 25.0)
     ring = [list(c) for c in boundary.exterior.coords[:-1]]
+
+    # Islands too big to fill as noise survived clean_mask as enclosed False
+    # regions, which domain_polygon's polygonize/union picked up as interior
+    # rings. Carve them out of the mesh rather than triangulating land that
+    # can never get wet -- domain_polygon returns only the exterior ring, so
+    # this is the one place that lever exists.
+    holes = []
+    for r in boundary.interiors:
+        p = Polygon(r)
+        if p.area / 1e6 >= min_island_hole_km2 and len(r.coords) >= 5:
+            holes.append([list(c) for c in r.coords[:-1]])
+    # Tag every hole segment "wall": an island is solid reflective land, the
+    # same physics as the shoreline. Leaving hole_tags unset makes ANUGA
+    # invent its own "interior" tag for these segments, which regimes.py's
+    # set_boundary({"ocean": ..., "wall": ...}) does not map -- that raises
+    # "Tag has not been bound to a boundary object" the moment a regime run
+    # calls set_boundary, well before evolve(). Verified directly against
+    # domain.set_boundary() with this fishery's real holes.
+    hole_tags = [{"wall": list(range(len(h)))} for h in holes] if holes else None
 
     regions = [
         [[list(c) for c in p.exterior.coords[:-1]], edge_to_area(cfg.jetty_edge_m)]
@@ -166,6 +209,8 @@ def build_mesh(slug: str, fishery: Fishery):
         boundary_tags={"ocean": ocean_idx, "wall": wall_idx},
         maximum_triangle_area=edge_to_area(cfg.base_edge_m),
         interior_regions=regions or None,
+        interior_holes=holes or None,
+        hole_tags=hole_tags,
         verbose=False,
     )
     # Elevation at VERTICES, not centroids. DE0 is a discontinuous-elevation

@@ -101,6 +101,9 @@ class ModelDomain(BaseModel):
     simplify_m: float = 25.0  # shoreline generalisation before meshing
     clean_cells: int = 3  # morphological close/open radius, in cells
     ocean_max_z_m: float = -2.0  # boundary segments below this bed level take the tide
+    # islands at least this large become mesh holes (interior_holes) instead of
+    # being meshed as land; smaller ones are filled as sub-mesh-scale noise.
+    min_island_hole_km2: float = 0.05
 
 
 class AnugaConfig(BaseModel):

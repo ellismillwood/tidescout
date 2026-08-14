@@ -21,6 +21,17 @@ def test_domain_mask_is_single_connected_component():
     assert n == 1, "mesh domain must be exactly one connected water body"
 
 
+def test_clean_mask_fills_small_hole_but_preserves_large_one():
+    mask = np.ones((200, 200), dtype=bool)
+    mask[20:25, 20:25] = False      # 25 cells = 2,500 m2 = 0.0025 km2, below threshold
+    mask[100:130, 100:130] = False  # 900 cells = 90,000 m2 = 0.09 km2, above threshold
+    # cells=1 makes the closing/opening structuring element a single pixel, a
+    # no-op, so only the hole-fill-threshold logic under test can move a pixel.
+    cleaned = mesh.clean_mask(mask, cells=1, min_island_hole_km2=0.05, pixel_area_m2=100.0)
+    assert cleaned[22, 22], "small island must be filled as sub-mesh-scale noise"
+    assert not cleaned[115, 115], "large island must be preserved as a mesh hole"
+
+
 def test_domain_polygon_simplifies_hard_but_keeps_area():
     z = np.full((200, 200), -5.0, dtype="float32")
     # rough up the shoreline so simplification has something to do
@@ -46,6 +57,32 @@ def test_build_mesh_sets_elevation_on_every_centroid(tmp_path, monkeypatch):
     assert len(elev) == len(d.triangles)
     assert np.isfinite(elev).all(), "no NaN may reach the solver"
     assert elev.min() < 0.0
+
+
+def test_build_mesh_carves_interior_holes_for_large_islands(tmp_path, monkeypatch):
+    z = np.full((300, 300), -5.0, dtype="float32")
+    z[120:180, 120:180] = 5.0  # 60x60 cells = 600x600 m = 0.36 km2, well interior
+    _fake_bathy(tmp_path, monkeypatch, z)
+    f = load_fishery("winyah-bay")
+    f.model_domain.polygon_utm_km = []
+    d = mesh.build_mesh("winyah-bay", f)
+
+    cx, cy = d.get_centroid_coordinates(absolute=True).T
+    cols, rows = ~synth.TRANSFORM * (cx, cy)
+    # Margin in from the raw 120..180 island bounds so ring-simplification at
+    # domain_polygon's 25 m simplify_m can't produce a false failure right at
+    # the edge -- only the deep interior needs to stay uncovered.
+    inside = (rows > 130) & (rows < 170) & (cols > 130) & (cols < 170)
+    assert not inside.any(), "no triangle centroid may fall inside a large island hole"
+
+    # Same raster, but the hole threshold is set high enough that this island
+    # gets filled instead of carved out -- the hole variant must mesh fewer
+    # triangles than the filled one.
+    f_filled = load_fishery("winyah-bay")
+    f_filled.model_domain.polygon_utm_km = []
+    f_filled.model_domain.min_island_hole_km2 = 1000.0
+    d_filled = mesh.build_mesh("winyah-bay", f_filled)
+    assert len(d.triangles) < len(d_filled.triangles)
 
 
 def test_classify_boundary_splits_ocean_from_wall():
