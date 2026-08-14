@@ -72,7 +72,9 @@ def run_regime(
     domain = mesh.build_mesh(slug, fishery)
     domain.set_name(name)
     domain.set_datadir(str(out_dir))
-    domain.set_quantity("friction", mesh.friction_field(domain, slug, fishery))
+    domain.set_quantity(
+        "friction", mesh.friction_field(domain, slug, fishery), location="centroids"
+    )
 
     elev = domain.get_quantity("elevation").get_values(location="centroids")
     tide = forcing.range_scaled_tide(
