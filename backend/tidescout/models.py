@@ -19,6 +19,9 @@ class Stations(BaseModel):
     tide: list[str] = []
     currents: list[str] = []
     water: list[WaterSensor] = []
+    # Added to CO-OPS predictions to convert MLLW -> NAVD88, the bathymetry
+    # datum. Resolved from the station's own datums endpoint, not assumed.
+    tide_datum_offset_m: float = 0.0
 
 
 class DischargeBuckets(BaseModel):
@@ -107,6 +110,7 @@ class AnugaConfig(BaseModel):
     snapshot_minutes: float = 30.0
     mass_tolerance: float = 1e-3  # measured residual is ~4e-4; 1e-6 fails healthy runs
     max_workers: int = 6  # performance cores only -- see Task 11
+    mean_range_m: float = 1.5  # amplitude base for range-regime boundary forcing
 
 
 class Fishery(BaseModel):

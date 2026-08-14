@@ -11,6 +11,14 @@ stations:
   # Winyah Bay entrance (33.2072, -79.1845) -- nearest the jetties/bay mouth,
   # per NOAA CO-OPS mdapi currentpredictions live lookup.
   currents: ["ACT6531"]
+  # Resolved 2026-08-13 from the station's own datums endpoint (station
+  # 8662549 does publish NAVD88):
+  #   curl -s https://api.tidesandcurrents.noaa.gov/mdapi/prod/webapi/stations/8662549/datums.json
+  #   MLLW 2.560 ft, NAVD88 4.730 ft (both station datum, feet)
+  #   offset = (MLLW - NAVD88) * 0.3048 = (2.560 - 4.730) * 0.3048 = -0.661 m
+  # Add this to CO-OPS MLLW predictions (ft*0.3048) to get NAVD88 metres, the
+  # bathymetry datum.
+  tide_datum_offset_m: -0.661
   water:
     # WACCAMAW RIVER NEAR PAWLEYS ISLAND, SC (33.5066, -79.1270) -- tidal
     # reach (site_tp_cd=ST-TS), live-reporting both params (temp 27.5-30.9
@@ -116,3 +124,15 @@ model_domain:
 anuga:
   base_edge_m: 60.0
   jetty_edge_m: 15.0
+  # Measured 2026-08-13 from 30 days of live tide_events() at station
+  # 8662549 (South Island Ferry): daily range = mean(highs) - mean(lows) per
+  # day, then averaged across n=30 days.
+  #   n=30 days  mean range 3.61 ft = 1.10 m
+  #   min 0.90 m  max 1.38 m
+  # Cross-check against RANGE_FACTORS (neap 0.72 / spring 1.28): observed
+  # min/mean = 0.90/1.10 = 0.82 > 0.72, observed max/mean = 1.38/1.10 = 1.25
+  # < 1.28 -- the configured factors bracket the observed 30-day range with
+  # margin (10% on the neap side, ~2% on the spring side; the spring margin
+  # is thin because 30 days is only ~2 spring-neap cycles and may not have
+  # captured true syzygy, but no bracket violation was observed).
+  mean_range_m: 1.10
