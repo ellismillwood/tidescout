@@ -121,46 +121,16 @@ def run_regime(
     # the tide on every boundary segment collapses the timestep -- see mesh.py.
     # A third tag, "open", marks boundary segments where the authored domain
     # polygon severs a flowing inland channel (river heads, ICW crossings) --
-    # neither ocean (imposing the coastal tide there drove a jet 40 km up the
-    # Pee Dee and destroyed two library builds) nor wall (damming a channel
-    # that must stay open). Transmissive_boundary copies the neighbouring
-    # cell's own stage AND momentum, so water passes freely with no level
-    # prescribed -- unlike Transmissive_stage_zero_momentum_boundary, which
-    # zeroes momentum and would act like a soft wall, or
-    # Transmissive_n_momentum_zero_t_momentum_set_stage_boundary, which still
-    # sets a stage function (the exact defect being fixed here).
+    # kept OUT of "ocean" because imposing the coastal tide there drove a jet
+    # 40 km up the Pee Dee and destroyed two library builds. See
+    # `_boundary_map` for what "open" maps to and why.
     # `set_boundary` raises if a tag is named that the mesh doesn't have, so
     # "wall" and "open" are only added when this mesh actually produced
     # segments carrying that tag (see mesh.build_mesh: each is omitted, not
     # empty-listed, when unused -- e.g. an all-deep-water synthetic test
     # basin has no "wall" segments at all). "ocean" is never optional: a mesh
     # with no ocean segments fails earlier, inside build_mesh itself.
-    tags_present = set(domain.boundary.values())
-    boundary_map = {
-        "ocean": anuga.Transmissive_momentum_set_stage_boundary(
-            domain=domain, function=tide
-        ),
-    }
-    if "wall" in tags_present:
-        boundary_map["wall"] = anuga.Reflective_boundary(domain)
-    if "open" in tags_present:
-        # RISK (recorded 2026-08-14, not yet mitigated): Transmissive_boundary
-        # is the right choice here -- it imposes neither level nor momentum, so
-        # it neither dams a flowing channel (like wall) nor forces a false tide
-        # (like ocean). But the Pee Dee Inlet_operator sits 2,456 m DOWNSTREAM
-        # of open segment 7 (the Pee Dee head, see winyah-bay.yaml
-        # ocean_boundary_utm_km's measured table), so some of the discharge
-        # injected there can leave through this upstream open boundary instead
-        # of flowing down-estuary toward the bay. This does not crash, and
-        # mass_residual correctly will not catch it (flux through "open" is
-        # legitimate outflow, not a closure error) -- it would instead show up
-        # as the low/med/high discharge regimes resembling each other more
-        # than they should. POST-BUILD CHECK: after any build_library run,
-        # compare snapshots across discharge buckets at matched range/phase
-        # and confirm they actually differ; if low/med/high converge, this is
-        # why.
-        boundary_map["open"] = anuga.Transmissive_boundary(domain)
-    domain.set_boundary(boundary_map)
+    domain.set_boundary(_boundary_map(domain, tide))
 
     inflows = forcing.river_inflow_m3s(fishery, discharge_bucket)
     _attach_river_inflows(domain, fishery, inflows)
@@ -199,6 +169,49 @@ def run_regime(
     }
     (out_dir / "regime.json").write_text(json.dumps(meta, indent=2))
     return out_dir
+
+
+def _boundary_map(domain, tide) -> dict[str, object]:
+    """Build the tag -> boundary object map for `domain.set_boundary`.
+
+    "wall" and "open" are only added when this mesh actually produced
+    segments carrying that tag (see mesh.build_mesh: each is omitted, not
+    empty-listed, when unused -- e.g. an all-deep-water synthetic test basin
+    has no "wall" segments at all). "ocean" is never optional: a mesh with no
+    ocean segments fails earlier, inside build_mesh itself.
+    """
+    tags_present = set(domain.boundary.values())
+    boundary_map: dict[str, object] = {
+        "ocean": anuga.Transmissive_momentum_set_stage_boundary(
+            domain=domain, function=tide
+        ),
+    }
+    if "wall" in tags_present:
+        boundary_map["wall"] = anuga.Reflective_boundary(domain)
+    if "open" in tags_present:
+        # `open` = inland channels the domain polygon severs (river heads, ICW
+        # crossings, the southern approach). Keeping them OUT of `ocean` is
+        # proven: it removed the Pee Dee-head hotspot that destroyed two
+        # library builds.
+        #
+        # Reflective, NOT Transmissive_boundary. Damming a channel head is
+        # physically imperfect -- but these are heads where river discharge is
+        # injected downstream by Inlet_operator anyway, so the cost is small.
+        # Transmissive_boundary was tried and REGRESSED badly (build #3,
+        # 2026-08-15): max dt 0.016-0.020 s vs ~0.2 s, 248,664 steps for
+        # 33,431 s of sim, per-regime wall time 2.7 h -> ~14 h, and the failure
+        # moved to the seaward boundary at (672405,3690284) / (672619,3679888)
+        # ~12,000 s earlier in sim time. It is zero-order extrapolation, weakly
+        # ill-posed for subcritical inflow and non-damping for reflections, and
+        # appears in no ANUGA validation or example script.
+        #
+        # `open` stays a tag distinct from `wall`, even though both map to
+        # Reflective_boundary today: the classification is real information
+        # (visible in domain.boundary's per-tag counts) and future work may
+        # want to treat river-head "open" segments differently from true
+        # shoreline "wall" segments.
+        boundary_map["open"] = anuga.Reflective_boundary(domain)
+    return boundary_map
 
 
 def _attach_river_inflows(domain, fishery: Fishery, inflows: dict[str, float]) -> None:

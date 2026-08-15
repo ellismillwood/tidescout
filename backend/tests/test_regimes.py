@@ -1,5 +1,6 @@
 import json
 
+import anuga
 import numpy as np
 import pytest
 
@@ -276,3 +277,41 @@ def test_attach_river_inflows_raises_on_land_only_region(fishery):
     )
     with pytest.raises(RuntimeError, match="no WET mesh centroids"):
         regimes._attach_river_inflows(domain, fishery, {})
+
+
+def test_boundary_map_open_uses_reflective_boundary(tmp_path, monkeypatch):
+    """Regression for the 2026-08-15 build #3 timestep collapse: `open` must
+    map to Reflective_boundary, not Transmissive_boundary (see
+    regimes._boundary_map for the measured history -- max dt 0.016-0.020 s vs
+    ~0.2 s, per-regime wall time 2.7 h -> ~14 h).
+
+    classify_boundary producing "open" from severed-channel geometry is
+    already covered in test_mesh.py's three-way split tests; this test
+    retags one real "wall" segment on an otherwise-normal built mesh so it
+    can exercise only what _boundary_map does once the tag exists, without
+    needing to author geometry that reproduces "open" from scratch and
+    without running any simulation (no `evolve()` call here)."""
+    from tidescout.config import load_fishery
+    from tidescout.pipeline import mesh
+
+    from .test_features_pipeline import _fake_bathy
+
+    z = np.full((300, 300), -1.0, dtype="float32")  # shallow basin -> wall by default
+    z[290:300, :] = -5.0                             # deep water along the south edge only
+    _fake_bathy(tmp_path, monkeypatch, z)
+    f = load_fishery("winyah-bay")
+    f.model_domain.polygon_utm_km = []
+    f.model_domain.ocean_boundary_utm_km = []  # see rationale in test_mesh.py's elevation test
+    domain = mesh.build_mesh("winyah-bay", f)
+
+    wall_key = next(k for k, v in domain.boundary.items() if v == "wall")
+    domain.boundary[wall_key] = "open"
+
+    boundary_map = regimes._boundary_map(domain, lambda t: 0.0)
+
+    assert isinstance(boundary_map["open"], anuga.Reflective_boundary)
+    assert isinstance(boundary_map["wall"], anuga.Reflective_boundary)
+    assert set(boundary_map) == {"ocean", "wall", "open"}, (
+        "wall and open must stay distinct dict keys even though both map to "
+        "Reflective_boundary today"
+    )
