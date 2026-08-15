@@ -411,5 +411,108 @@ def flow_run(
     console.print(table)
 
 
+@flow_app.command("validate")
+def flow_validate(
+    slug: str,
+    regime: str = typer.Option("mean_med", "--regime"),
+    radius_m: float = typer.Option(150.0, "--radius"),
+) -> None:
+    """Compare the flow library against Ellis's known spots (the spec's gate)."""
+    import numpy as np
+    from rasterio.warp import transform as warp_transform
+
+    from tidescout.config import load_fishery, load_known_spots
+    from tidescout.engine import flow
+    from tidescout.paths import fishery_data_dir
+    from tidescout.pipeline import flowlib
+
+    fishery = load_fishery(slug)
+    spots = load_known_spots(slug)
+    if not spots:
+        console.print(f"no spots in fisheries/{slug}.known-spots.yaml — add some!")
+        raise typer.Exit(1)
+
+    grid_path = fishery_data_dir(slug) / "flow" / regime / "grid" / "grid.json"
+    if not grid_path.exists():
+        console.print(
+            f"[red]no rasterised library for regime {regime!r}[/red] "
+            f"(expected {grid_path}).\nRun the build, then `flowlib.rasterise_regime`."
+        )
+        raise typer.Exit(1)
+    grid_meta = json.loads(grid_path.read_text())
+    phases = grid_meta["phases"]
+    states = flow.tide_states(grid_meta["stage_bc_m"])
+
+    spec = flowlib.grid_spec(slug, fishery)
+    xs, ys = warp_transform(
+        "EPSG:4326",
+        f"EPSG:{fishery.bathymetry.epsg}",
+        [s.lon for s in spots],
+        [s.lat for s in spots],
+    )
+
+    # Load each phase ONCE and evaluate every spot against it. The obvious
+    # loop order (spot, then phase) re-reads the whole grid file per spot.
+    near = {}
+    for spot, sx, sy in zip(spots, xs, ys, strict=True):
+        near[spot.name] = (spec.xs - sx) ** 2 + (spec.ys - sy) ** 2 <= radius_m**2
+    peak_speed = {s.name: [] for s in spots}
+    spread = {s.name: [] for s in spots}
+    for i in range(len(phases)):
+        st = flowlib.load_state(slug, regime, i)
+        sp, _ = flow.speed_direction(st["u"], st["v"])
+        for spot in spots:
+            sel = near[spot.name]
+            if not sel.any():
+                continue
+            here = sp[sel]
+            peak_speed[spot.name].append(float(np.nanmax(here)))
+            # Within-radius max minus min: a proxy for a seam. Deliberately NOT
+            # called shear -- that is the gradient `flowlib.shear_magnitude`
+            # computes, and conflating the two would hide which one was used.
+            spread[spot.name].append(float(np.nanmax(here) - np.nanmin(here)))
+
+    table = Table(title=f"{fishery.name} — known spots vs flow library ({regime})")
+    for col in ("spot", "expects", "peak speed", "at phase", "peak state",
+                "speed spread", "slack min", "agrees"):
+        table.add_column(col)
+
+    for spot in spots:
+        if not near[spot.name].any():
+            table.add_row(spot.name, spot.works_on or "-", "OUTSIDE DOMAIN",
+                          "-", "-", "-", "-", "-")
+            continue
+        speeds = peak_speed[spot.name]
+        peak_i = int(np.argmax(speeds))
+        peak_state = states[peak_i]
+        if not spot.works_on:
+            agrees = "[dim]no hint[/dim]"
+        elif spot.works_on == "slack":
+            # An eddy or current break is defined by CONTRAST, not by a peak:
+            # fast water beside a low-speed pocket. Judge it on the spread.
+            agrees = "[green]yes[/green]" if max(spread[spot.name]) > min(speeds) else "?"
+        else:
+            agrees = "[green]yes[/green]" if peak_state == spot.works_on else "[red]no[/red]"
+        table.add_row(
+            spot.name, spot.works_on or "-", f"{max(speeds):.2f} m/s",
+            f"{phases[peak_i]:.2f}", peak_state, f"{max(spread[spot.name]):.2f}",
+            f"{min(speeds):.2f}", agrees,
+        )
+    console.print(table)
+    console.print(
+        "\n[bold]This is a judgement call, not a pass/fail.[/bold] `agrees` only asks "
+        "whether the peak landed on the half of the cycle the notes describe.\n"
+        "Ebb/flood spots should peak on their stated half; a slack/eddy spot shows its "
+        "signature as a low minimum beside a high peak — the contrast, not the value.\n"
+        "Phase 0 is LOW water here (spin-up is 0.483 of a cycle), so flood runs "
+        "phase 0→0.5 and ebb 0.5→1.0.\n"
+        "[dim]Do not tune thresholds to make this pass. If the model does not "
+        "reproduce a spot, that is the finding.[/dim]"
+    )
+    for spot in spots:
+        if spot.notes:
+            console.print(f"  [dim]{spot.name}: {spot.notes}[/dim]")
+
+
 def main() -> None:
     app()

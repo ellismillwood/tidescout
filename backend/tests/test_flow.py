@@ -134,7 +134,9 @@ def test_known_spots_carry_a_machine_readable_phase_hint():
 
     spots = {s.name: s for s in load_known_spots("winyah-bay")}
     assert spots["Mud Bay Cut"].works_on == "ebb"
-    assert spots["Georgetown Lighthouse"].works_on == "slack"
+    # Ellis's call, 2026-08-15: the notes say "slack AND early incoming", and
+    # the early-incoming half is the part that matters to him.
+    assert spots["Georgetown Lighthouse"].works_on == "flood"
     assert spots["North Jetty"].works_on == "flood"
 
 
@@ -155,3 +157,55 @@ def test_known_spot_notes_are_left_intact_by_the_hint():
 
     spots = {s.name: s for s in load_known_spots("winyah-bay")}
     assert "early incoming" in spots["Georgetown Lighthouse"].notes
+
+
+def _real_stage_series(n=24):
+    """The stage series a real regime.json records, using the shipped config.
+
+    phase is measured from the END of spin-up, and spin_up_h / cycle_h is
+    0.4831 of a cycle -- so this deliberately does NOT start at high water.
+    """
+    import math
+
+    return [
+        0.55 * math.cos(2.0 * math.pi * (0.4831 + i / n)) for i in range(n)
+    ]
+
+
+def test_tide_states_finds_flood_on_the_rising_half():
+    """Phase 0 is LOW water in this project's convention, so the phases just
+    after it are flooding. Getting this backwards inverts the whole gate."""
+    states = flow.tide_states(_real_stage_series())
+    assert states[3] == "flood"   # a quarter of the way up
+    assert states[15] == "ebb"    # past high water, falling
+
+
+def test_tide_states_marks_the_turning_points_slack():
+    states = flow.tide_states(_real_stage_series())
+    assert states[0] == "slack"    # low water
+    assert states[12] == "slack"   # high water
+
+
+def test_tide_states_covers_both_halves_of_the_cycle():
+    states = flow.tide_states(_real_stage_series())
+    assert {"flood", "ebb", "slack"} == set(states)
+    # A full cycle spends comparable time flooding and ebbing.
+    assert abs(states.count("flood") - states.count("ebb")) <= 2
+
+
+def test_tide_states_is_derived_from_stage_not_from_phase_order():
+    """Reversing the stage series must swap flood and ebb, proving the label
+    comes from the water and not from the index."""
+    forward = flow.tide_states(_real_stage_series())
+    backward = flow.tide_states(list(reversed(_real_stage_series())))
+    assert forward.count("flood") == backward.count("ebb")
+
+
+def test_tide_states_rejects_an_empty_series():
+    with pytest.raises(ValueError, match="no boundary stage"):
+        flow.tide_states([])
+
+
+def test_tide_states_handles_a_flat_series():
+    """A regime whose boundary never moved is entirely slack, not a crash."""
+    assert flow.tide_states([1.0, 1.0, 1.0, 1.0]) == ["slack"] * 4

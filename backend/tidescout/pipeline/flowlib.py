@@ -143,6 +143,13 @@ def _grid_json(spec: GridSpec, snapshots: list[dict], transform6: list) -> dict:
         "n_cells": int(spec.flat_index.size),
         "flat_index_len": int(spec.flat_index.size),
         "phases": [s["phase"] for s in snapshots],
+        # Boundary stage at each phase, carried through from regime.json so a
+        # reader can tell ebb from flood WITHOUT re-deriving the tide's phase
+        # convention. Phase 0 is not high water here -- spin_up_h is not a whole
+        # number of cycles -- so anything that assumes it would silently invert
+        # ebb and flood. The sign of the change in this series is the empirical
+        # answer, and Task 13's gate depends on getting it right.
+        "stage_bc_m": [s["stage_bc_m"] for s in snapshots],
     }
 
 

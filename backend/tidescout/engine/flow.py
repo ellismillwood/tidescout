@@ -117,3 +117,38 @@ def interpolate_state(a: dict, b: dict, w: float) -> dict:
 
 def wet_mask(depth: np.ndarray, tol: float = 0.01) -> np.ndarray:
     return depth > tol
+
+
+def tide_states(stage_bc_m, slack_frac: float = 0.25) -> list[str]:
+    """Label every stored phase "flood", "ebb" or "slack" from boundary stage.
+
+    Derived from the recorded stage series rather than from the phase number,
+    because phase 0 is NOT high water: `phase` is measured from the end of
+    spin-up, and spin_up_h / cycle_h = 6.0 / 12.42 = 0.4831 of a cycle, so
+    phase 0 lands near LOW water (measured: -0.547 m, rising to +0.547 m at
+    phase 0.5). Anything that assumes phase 0 is high water inverts ebb and
+    flood -- which would make Task 13's gate confidently report the opposite of
+    the truth for every spot.
+
+    The series is periodic over one cycle, so the rate of change is a cyclic
+    central difference. "slack" is the turning region, where the stage is
+    changing slower than `slack_frac` of its peak rate -- an eddy or current
+    break is defined by that, not by an instantaneous zero crossing that no
+    stored snapshot may land on.
+    """
+    s = np.asarray(stage_bc_m, dtype=float)
+    if s.size == 0:
+        raise ValueError("no boundary stage recorded for this regime")
+    if s.size < 3:
+        return ["slack"] * int(s.size)
+    rate = 0.5 * (np.roll(s, -1) - np.roll(s, 1))
+    peak = float(np.abs(rate).max())
+    if peak == 0.0:
+        return ["slack"] * int(s.size)
+    out = []
+    for r in rate:
+        if abs(r) < slack_frac * peak:
+            out.append("slack")
+        else:
+            out.append("flood" if r > 0 else "ebb")
+    return out

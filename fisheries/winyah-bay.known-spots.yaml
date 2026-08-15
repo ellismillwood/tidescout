@@ -27,12 +27,12 @@ spots:
     lon: -79.186965
     lat: 33.222133
     kind_hint: eddy / dropoff
-    # ELLIS: the notes say "slack AND early incoming", which one value cannot
-    # hold. Recorded as `slack` because that is the discriminating claim the
-    # gate can test -- a current break should read as LOW speed at slack and
-    # must not read as a rip at peak flow. If the early-flood half is the part
-    # that actually matters to you, change this to `flood` and say so.
-    works_on: slack
+    # The notes say "slack AND early incoming", which one value cannot hold.
+    # ELLIS CHOSE `flood` (2026-08-15): the early-incoming half is the part
+    # that matters, not the slack water itself. So the gate should expect this
+    # spot to peak on the RISING half of the cycle, and the eddy/current-break
+    # contrast in the notes is context rather than the thing being tested.
+    works_on: flood
     notes: >-
       Works best as tide is slack and early incoming tides. The mouth of the bay
       creates a break in current which carries down the north bank. Works best

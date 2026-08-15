@@ -145,10 +145,16 @@ def test_grid_json_records_what_a_reader_needs(tmp_path, monkeypatch):
         xs=np.array([0.0, 1.0, 2.0]),
         ys=np.array([0.0, 1.0, 2.0]),
     )
-    payload = flowlib._grid_json(spec, [{"index": 0, "phase": 0.0}], transform6=[1, 0, 0, 0, 1, 0])
+    payload = flowlib._grid_json(
+        spec,
+        [{"index": 0, "phase": 0.0, "stage_bc_m": -0.55}],
+        transform6=[1, 0, 0, 0, 1, 0],
+    )
     got = json.loads(json.dumps(payload))
 
     assert got["shape"] == [4, 5]
     assert got["n_cells"] == 3
     assert got["flat_index_len"] == 3
     assert got["phases"] == [0.0]
+    # Without this the Task 13 gate cannot tell ebb from flood.
+    assert got["stage_bc_m"] == [-0.55]
