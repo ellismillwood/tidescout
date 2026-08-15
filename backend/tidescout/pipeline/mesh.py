@@ -157,6 +157,16 @@ def classify_boundary(
     ocean_poly = None
     if ocean_boundary_utm_km:
         ocean_poly = Polygon([(x * 1000.0, y * 1000.0) for x, y in ocean_boundary_utm_km])
+        if not ocean_poly.is_valid:
+            # A self-intersecting (bowtied) hand-authored ring makes
+            # .contains() below misclassify silently -- Shapely doesn't
+            # raise, it just gives an answer nobody authored.
+            raise ValueError(
+                "ocean_boundary_utm_km is not a valid polygon (self-"
+                "intersecting or otherwise malformed) -- fix the authored "
+                "vertices in the fishery YAML before classifying segments "
+                "against it"
+            )
 
     ocean_idx, wall_idx, open_idx = [], [], []
     for i in range(len(ring)):
@@ -217,7 +227,7 @@ def build_mesh(slug: str, fishery: Fishery):
     ]
     # Split the boundary. Tagging every segment alike and then imposing the
     # ocean tide on all of them puts a prescribed water level along the whole
-    # SHORELINE -- of Winyah's 485 polygon segments only 10 are genuinely
+    # SHORELINE -- of Winyah's 605 polygon segments only 10 are genuinely
     # seaward. Forcing stage at a drying land boundary produces a thin-layer
     # momentum blow-up (one cell reached 7.5e6 m/s) that collapses the global
     # timestep and aborts the run. Measured: shared tag -> unstable at
@@ -229,10 +239,28 @@ def build_mesh(slug: str, fishery: Fishery):
     )
     if not ocean_idx:
         raise ValueError(
-            f"no boundary segment has bed below {ocean_max_z_m} m -- the tide "
-            "would have nowhere to enter the domain"
+            f"no boundary segment has bed below {ocean_max_z_m} m AND lies "
+            "inside ocean_boundary_utm_km -- the tide would have nowhere to "
+            f"enter the domain. {len(open_idx)} segment(s) are deep enough "
+            "but fall outside the authored ocean_boundary_utm_km polygon "
+            "(widen the polygon if this count is nonzero -- it is excluding "
+            "real seaward segments); if it is 0, no segment anywhere on this "
+            f"boundary has bed below {ocean_max_z_m} m at all (lower "
+            "ocean_max_z_m or check the bathymetry)."
         )
-    boundary_tags = {"ocean": ocean_idx, "wall": wall_idx}
+    # "wall" and "open" are only added when non-empty, symmetrically. A
+    # domain whose entire boundary is deep water (no shoreline at all -- a
+    # legitimate shape, e.g. an all-open synthetic test basin) is not an
+    # error: ocean still has somewhere to enter. What IS a hazard is handing
+    # create_domain_from_regions a tag with zero segments and then having
+    # regimes.py's set_boundary reference that same tag name -- ANUGA dies
+    # there with an opaque "Tag has not been bound to a boundary object".
+    # Omitting the key here, and set_boundary building its map from
+    # set(domain.boundary.values()) in regimes.py, makes that impossible
+    # rather than merely rare.
+    boundary_tags = {"ocean": ocean_idx}
+    if wall_idx:
+        boundary_tags["wall"] = wall_idx
     if open_idx:
         boundary_tags["open"] = open_idx
     domain = anuga.create_domain_from_regions(

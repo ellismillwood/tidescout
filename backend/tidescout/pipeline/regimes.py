@@ -130,15 +130,35 @@ def run_regime(
     # Transmissive_n_momentum_zero_t_momentum_set_stage_boundary, which still
     # sets a stage function (the exact defect being fixed here).
     # `set_boundary` raises if a tag is named that the mesh doesn't have, so
-    # "open" is only added when this mesh actually produced open-tagged
-    # segments (see mesh.build_mesh: omitted, not empty-listed, when unused).
+    # "wall" and "open" are only added when this mesh actually produced
+    # segments carrying that tag (see mesh.build_mesh: each is omitted, not
+    # empty-listed, when unused -- e.g. an all-deep-water synthetic test
+    # basin has no "wall" segments at all). "ocean" is never optional: a mesh
+    # with no ocean segments fails earlier, inside build_mesh itself.
+    tags_present = set(domain.boundary.values())
     boundary_map = {
         "ocean": anuga.Transmissive_momentum_set_stage_boundary(
             domain=domain, function=tide
         ),
-        "wall": anuga.Reflective_boundary(domain),
     }
-    if "open" in set(domain.boundary.values()):
+    if "wall" in tags_present:
+        boundary_map["wall"] = anuga.Reflective_boundary(domain)
+    if "open" in tags_present:
+        # RISK (recorded 2026-08-14, not yet mitigated): Transmissive_boundary
+        # is the right choice here -- it imposes neither level nor momentum, so
+        # it neither dams a flowing channel (like wall) nor forces a false tide
+        # (like ocean). But the Pee Dee Inlet_operator sits 2,456 m DOWNSTREAM
+        # of open segment 7 (the Pee Dee head, see winyah-bay.yaml
+        # ocean_boundary_utm_km's measured table), so some of the discharge
+        # injected there can leave through this upstream open boundary instead
+        # of flowing down-estuary toward the bay. This does not crash, and
+        # mass_residual correctly will not catch it (flux through "open" is
+        # legitimate outflow, not a closure error) -- it would instead show up
+        # as the low/med/high discharge regimes resembling each other more
+        # than they should. POST-BUILD CHECK: after any build_library run,
+        # compare snapshots across discharge buckets at matched range/phase
+        # and confirm they actually differ; if low/med/high converge, this is
+        # why.
         boundary_map["open"] = anuga.Transmissive_boundary(domain)
     domain.set_boundary(boundary_map)
 

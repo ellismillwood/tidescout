@@ -151,14 +151,20 @@ def test_build_mesh_boundary_tags_are_ocean_and_wall_minority(tmp_path, monkeypa
 
 
 def test_build_mesh_raises_when_no_ocean_segment_qualifies(tmp_path, monkeypatch):
+    """Nothing is deep enough anywhere -- distinct from the polygon-excludes-
+    deep-segments case below. The error must say so: 0 segments are deep
+    enough (regardless of the polygon), not that the polygon is the problem."""
     z = np.full((300, 300), -1.0, dtype="float32")  # nowhere deep enough for the tide
     _fake_bathy(tmp_path, monkeypatch, z)
     f = load_fishery("winyah-bay")
     f.model_domain.polygon_utm_km = []
     f.model_domain.ocean_boundary_utm_km = []
     f.model_domain.ocean_max_z_m = -999.0
-    with pytest.raises(ValueError, match="no boundary segment"):
+    with pytest.raises(ValueError, match="no boundary segment") as excinfo:
         mesh.build_mesh("winyah-bay", f)
+    assert "0 segment(s) are deep enough" in str(excinfo.value), (
+        "message must name the 'nothing is deep enough' cause, not the polygon"
+    )
 
 
 def test_build_mesh_raises_when_ocean_boundary_polygon_excludes_all_deep_segments(
@@ -166,7 +172,10 @@ def test_build_mesh_raises_when_ocean_boundary_polygon_excludes_all_deep_segment
 ):
     """Even with a genuinely deep segment, an ocean_boundary_utm_km polygon
     that doesn't cover it must still raise -- the segment becomes `open`, not
-    `ocean`, and the tide would have nowhere authored to enter."""
+    `ocean`, and the tide would have nowhere authored to enter. Distinct from
+    the no-deep-segment-anywhere case above: the error must report a nonzero
+    count of segments that ARE deep enough but fall outside the polygon, so
+    it points at the polygon rather than the bathymetry."""
     z = np.full((300, 300), -1.0, dtype="float32")  # shallow basin
     z[290:300, :] = -5.0                             # deep water along the south edge only
     _fake_bathy(tmp_path, monkeypatch, z)
@@ -175,8 +184,14 @@ def test_build_mesh_raises_when_ocean_boundary_polygon_excludes_all_deep_segment
     # Real Winyah polygon -- nowhere near the synthetic raster's coordinates,
     # so it excludes every deep segment this raster can produce.
     f.model_domain.ocean_boundary_utm_km = [(665.0, 3669.0), (676.0, 3669.0), (676.0, 3695.0)]
-    with pytest.raises(ValueError, match="no boundary segment"):
+    with pytest.raises(ValueError, match="no boundary segment") as excinfo:
         mesh.build_mesh("winyah-bay", f)
+    msg = str(excinfo.value)
+    assert "segment(s) are deep enough" in msg
+    assert "0 segment(s) are deep enough" not in msg, (
+        "the deep south segment(s) exist and were excluded by the polygon, "
+        "not absent -- the message must not claim the zero-case"
+    )
 
 
 def test_friction_field_has_no_zero_values(tmp_path, monkeypatch):
