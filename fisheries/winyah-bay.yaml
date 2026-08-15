@@ -181,6 +181,16 @@ model_domain:
     - [655.5, 3692.0]  # W, up the Sampit
     - [658.0, 3686.0]  # SW down the west shore
     - [659.0, 3678.0]  # S along the ICW
+  # Only these segments may carry the ocean tide (see ocean_boundary_utm_km
+  # rationale in models.py). Validated 2026-08-14: excludes all 9 river-head
+  # segments (Pee Dee 4, Sampit 5) and retains 530 genuine seaward segments.
+  ocean_boundary_utm_km:
+    - [665.0, 3669.0]
+    - [676.0, 3669.0]
+    - [676.0, 3695.0]
+    - [669.5, 3695.0]
+    - [669.5, 3681.0]
+    - [663.0, 3671.5]
   # Capped at real high water, not the old blanket 1.5 m: mean_range_m 1.10 *
   # spring factor 1.28 / 2 = 0.70 m max simulated stage, plus ~0.2 m margin.
   # Do NOT "helpfully" raise this back toward 1.5 m -- that meshes land that

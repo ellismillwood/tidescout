@@ -101,6 +101,12 @@ class ModelDomain(BaseModel):
     simplify_m: float = 25.0  # shoreline generalisation before meshing
     clean_cells: int = 3  # morphological close/open radius, in cells
     ocean_max_z_m: float = -2.0  # boundary segments below this bed level take the tide
+    # Which boundary segments may carry the OCEAN tide. Authored, not inferred:
+    # bed depth alone cannot tell a seaward opening from a deep river channel
+    # 40 km inland, and inferring it drove the ocean tide into the Pee Dee head
+    # and destroyed two library builds. Same lesson as polygon_utm_km itself.
+    # (x_km, y_km) in the bathymetry EPSG, clockwise. Empty = no restriction.
+    ocean_boundary_utm_km: list[tuple[float, float]] = []
     # islands at least this large become mesh holes (interior_holes) instead of
     # being meshed as land; smaller ones are filled as sub-mesh-scale noise.
     # Lowered 0.05 -> 0.002 2026-08-14: measured against Winyah's real 149

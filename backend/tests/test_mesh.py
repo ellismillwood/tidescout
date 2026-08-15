@@ -52,6 +52,10 @@ def test_build_mesh_sets_elevation_on_every_centroid(tmp_path, monkeypatch):
     _fake_bathy(tmp_path, monkeypatch, z)
     f = load_fishery("winyah-bay")
     f.model_domain.polygon_utm_km = []      # empty => use the whole water mask
+    # Synthetic raster lives at unrelated coordinates from the real Winyah
+    # ocean_boundary_utm_km polygon, so clear it too -- otherwise no deep
+    # segment would ever fall inside it and build_mesh would raise.
+    f.model_domain.ocean_boundary_utm_km = []
     d = mesh.build_mesh("winyah-bay", f)
     elev = d.get_quantity("elevation").get_values(location="centroids")
     assert len(elev) == len(d.triangles)
@@ -65,6 +69,7 @@ def test_build_mesh_carves_interior_holes_for_large_islands(tmp_path, monkeypatc
     _fake_bathy(tmp_path, monkeypatch, z)
     f = load_fishery("winyah-bay")
     f.model_domain.polygon_utm_km = []
+    f.model_domain.ocean_boundary_utm_km = []  # see rationale in the elevation test above
     d = mesh.build_mesh("winyah-bay", f)
 
     cx, cy = d.get_centroid_coordinates(absolute=True).T
@@ -80,6 +85,7 @@ def test_build_mesh_carves_interior_holes_for_large_islands(tmp_path, monkeypatc
     # triangles than the filled one.
     f_filled = load_fishery("winyah-bay")
     f_filled.model_domain.polygon_utm_km = []
+    f_filled.model_domain.ocean_boundary_utm_km = []
     f_filled.model_domain.min_island_hole_km2 = 1000.0
     d_filled = mesh.build_mesh("winyah-bay", f_filled)
     assert len(d.triangles) < len(d_filled.triangles)
@@ -94,9 +100,39 @@ def test_classify_boundary_splits_ocean_from_wall():
         [500490.0, 3699995.0],  # NE, over the shallow strip
         [500000.0, 3699995.0],  # NW, over the shallow strip
     ]
-    ocean_idx, wall_idx = mesh.classify_boundary(ring, z, synth.TRANSFORM, ocean_max_z_m=-2.0)
+    ocean_idx, wall_idx, open_idx = mesh.classify_boundary(
+        ring, z, synth.TRANSFORM, ocean_max_z_m=-2.0
+    )
     assert 0 in ocean_idx, "south segment sits over deep water, must be ocean"
     assert 2 in wall_idx, "north segment sits over the shallow strip, must be wall"
+    assert open_idx == [], "empty ocean_boundary_utm_km must reproduce the old two-class split"
+
+
+def test_classify_boundary_with_ocean_polygon_splits_three_ways():
+    """A deep segment inside the authored ocean polygon is `ocean`; a deep
+    segment outside it is a severed inland channel (`open`), not ocean or
+    wall; a shallow segment is `wall` regardless of the polygon."""
+    z = np.full((50, 50), -5.0, dtype="float32")
+    z[0:5, :] = 2.0  # land/shallow strip along the north edge
+    ring = [
+        [500000.0, 3699510.0],  # SW -- deep, midpoint (500.245, 3699.510) km
+        [500490.0, 3699510.0],  # SE -- east edge, deep but off the polygon
+        [500490.0, 3699995.0],  # NE -- over the shallow strip
+        [500000.0, 3699995.0],  # NW -- west edge, deep but off the polygon
+    ]
+    # Encloses only the south segment's midpoint.
+    ocean_poly_km = [
+        (499.9, 3699.4), (500.6, 3699.4), (500.6, 3699.6), (499.9, 3699.6),
+    ]
+    ocean_idx, wall_idx, open_idx = mesh.classify_boundary(
+        ring, z, synth.TRANSFORM, ocean_max_z_m=-2.0, ocean_boundary_utm_km=ocean_poly_km
+    )
+    assert ocean_idx == [0], "south segment is deep and inside the ocean polygon"
+    assert set(open_idx) == {1, 3}, (
+        "east/west segments are deep but outside the ocean polygon -- a severed "
+        "inland channel, not the seaward opening"
+    )
+    assert wall_idx == [2], "north segment is shallow, must stay wall regardless of the polygon"
 
 
 def test_build_mesh_boundary_tags_are_ocean_and_wall_minority(tmp_path, monkeypatch):
@@ -105,6 +141,7 @@ def test_build_mesh_boundary_tags_are_ocean_and_wall_minority(tmp_path, monkeypa
     _fake_bathy(tmp_path, monkeypatch, z)
     f = load_fishery("winyah-bay")
     f.model_domain.polygon_utm_km = []
+    f.model_domain.ocean_boundary_utm_km = []  # see rationale in the elevation test above
     d = mesh.build_mesh("winyah-bay", f)
     tags = set(d.boundary.values())
     assert tags == {"ocean", "wall"}
@@ -118,7 +155,26 @@ def test_build_mesh_raises_when_no_ocean_segment_qualifies(tmp_path, monkeypatch
     _fake_bathy(tmp_path, monkeypatch, z)
     f = load_fishery("winyah-bay")
     f.model_domain.polygon_utm_km = []
+    f.model_domain.ocean_boundary_utm_km = []
     f.model_domain.ocean_max_z_m = -999.0
+    with pytest.raises(ValueError, match="no boundary segment"):
+        mesh.build_mesh("winyah-bay", f)
+
+
+def test_build_mesh_raises_when_ocean_boundary_polygon_excludes_all_deep_segments(
+    tmp_path, monkeypatch
+):
+    """Even with a genuinely deep segment, an ocean_boundary_utm_km polygon
+    that doesn't cover it must still raise -- the segment becomes `open`, not
+    `ocean`, and the tide would have nowhere authored to enter."""
+    z = np.full((300, 300), -1.0, dtype="float32")  # shallow basin
+    z[290:300, :] = -5.0                             # deep water along the south edge only
+    _fake_bathy(tmp_path, monkeypatch, z)
+    f = load_fishery("winyah-bay")
+    f.model_domain.polygon_utm_km = []
+    # Real Winyah polygon -- nowhere near the synthetic raster's coordinates,
+    # so it excludes every deep segment this raster can produce.
+    f.model_domain.ocean_boundary_utm_km = [(665.0, 3669.0), (676.0, 3669.0), (676.0, 3695.0)]
     with pytest.raises(ValueError, match="no boundary segment"):
         mesh.build_mesh("winyah-bay", f)
 
@@ -129,6 +185,7 @@ def test_friction_field_has_no_zero_values(tmp_path, monkeypatch):
     _fake_bathy(tmp_path, monkeypatch, z)
     f = load_fishery("winyah-bay")
     f.model_domain.polygon_utm_km = []
+    f.model_domain.ocean_boundary_utm_km = []  # see rationale in the elevation test above
     from tidescout.pipeline.derivatives import build_derivatives
     build_derivatives("winyah-bay", f)
     d = mesh.build_mesh("winyah-bay", f)

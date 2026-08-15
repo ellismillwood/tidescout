@@ -12,7 +12,7 @@ import numpy as np
 import rasterio.features
 from matplotlib.path import Path as MplPath
 from scipy import ndimage
-from shapely.geometry import LineString, Polygon, shape
+from shapely.geometry import LineString, Point, Polygon, shape
 from shapely.ops import unary_union
 
 from tidescout.models import Fishery
@@ -132,24 +132,49 @@ def sample_to_centroids(domain, arr: np.ndarray, transform) -> np.ndarray:
 
 
 def classify_boundary(
-    ring: list, z: np.ndarray, transform, ocean_max_z_m: float
-) -> tuple[list[int], list[int]]:
-    """Split bounding-polygon segments into seaward opening vs shoreline wall.
+    ring: list,
+    z: np.ndarray,
+    transform,
+    ocean_max_z_m: float,
+    ocean_boundary_utm_km: list[tuple[float, float]] | None = None,
+) -> tuple[list[int], list[int], list[int]]:
+    """Split bounding-polygon segments into seaward opening, shoreline wall,
+    and severed inland channel.
 
-    A segment whose midpoint sits over deep water is where the authored domain
-    polygon cuts across open water -- that is the tide's way in. Everything
-    else follows the shoreline and must be a reflective wall.
+    Bed depth alone distinguishes wet from dry, not ocean from a river channel
+    40 km inland -- both sit below `ocean_max_z_m` and are indistinguishable on
+    depth alone. That confusion put the ocean tide 40 km up the Pee Dee through
+    a ~150 m gap in an otherwise solid wall and destroyed two library builds.
+
+    `ocean_boundary_utm_km` is the authored answer: a segment whose midpoint is
+    deep AND inside that polygon is the true seaward opening (`ocean`); deep
+    but outside it means the domain polygon happens to sever a flowing channel
+    here, which is neither ocean nor wall (`open` -- transmissive, no imposed
+    level). A shallow segment is always shoreline (`wall`) regardless of the
+    polygon. Empty `ocean_boundary_utm_km` reproduces the old two-class
+    behaviour: deep -> ocean, shallow -> wall, `open` always empty.
     """
-    ocean_idx, wall_idx = [], []
+    ocean_poly = None
+    if ocean_boundary_utm_km:
+        ocean_poly = Polygon([(x * 1000.0, y * 1000.0) for x, y in ocean_boundary_utm_km])
+
+    ocean_idx, wall_idx, open_idx = [], [], []
     for i in range(len(ring)):
         ax, ay = ring[i]
         bx, by = ring[(i + 1) % len(ring)]
-        col, row = ~transform * (0.5 * (ax + bx), 0.5 * (ay + by))
+        mx, my = 0.5 * (ax + bx), 0.5 * (ay + by)
+        col, row = ~transform * (mx, my)
         row = int(np.clip(row, 0, z.shape[0] - 1))
         col = int(np.clip(col, 0, z.shape[1] - 1))
         zb = z[row, col]
-        (ocean_idx if (np.isfinite(zb) and zb < ocean_max_z_m) else wall_idx).append(i)
-    return ocean_idx, wall_idx
+        deep = np.isfinite(zb) and zb < ocean_max_z_m
+        if not deep:
+            wall_idx.append(i)
+        elif ocean_poly is None or ocean_poly.contains(Point(mx, my)):
+            ocean_idx.append(i)
+        else:
+            open_idx.append(i)
+    return ocean_idx, wall_idx, open_idx
 
 
 def build_mesh(slug: str, fishery: Fishery):
@@ -198,15 +223,21 @@ def build_mesh(slug: str, fishery: Fishery):
     # timestep and aborts the run. Measured: shared tag -> unstable at
     # t~1900 s; split -> stable through the full window.
     ocean_max_z_m = md.ocean_max_z_m if md else -2.0
-    ocean_idx, wall_idx = classify_boundary(ring, z, transform, ocean_max_z_m)
+    ocean_boundary_utm_km = md.ocean_boundary_utm_km if md else []
+    ocean_idx, wall_idx, open_idx = classify_boundary(
+        ring, z, transform, ocean_max_z_m, ocean_boundary_utm_km
+    )
     if not ocean_idx:
         raise ValueError(
             f"no boundary segment has bed below {ocean_max_z_m} m -- the tide "
             "would have nowhere to enter the domain"
         )
+    boundary_tags = {"ocean": ocean_idx, "wall": wall_idx}
+    if open_idx:
+        boundary_tags["open"] = open_idx
     domain = anuga.create_domain_from_regions(
         ring,
-        boundary_tags={"ocean": ocean_idx, "wall": wall_idx},
+        boundary_tags=boundary_tags,
         maximum_triangle_area=edge_to_area(cfg.base_edge_m),
         interior_regions=regions or None,
         interior_holes=holes or None,

@@ -119,12 +119,28 @@ def run_regime(
     )
     # Tide enters ONLY at the seaward opening; the shoreline is a wall. Imposing
     # the tide on every boundary segment collapses the timestep -- see mesh.py.
-    domain.set_boundary({
+    # A third tag, "open", marks boundary segments where the authored domain
+    # polygon severs a flowing inland channel (river heads, ICW crossings) --
+    # neither ocean (imposing the coastal tide there drove a jet 40 km up the
+    # Pee Dee and destroyed two library builds) nor wall (damming a channel
+    # that must stay open). Transmissive_boundary copies the neighbouring
+    # cell's own stage AND momentum, so water passes freely with no level
+    # prescribed -- unlike Transmissive_stage_zero_momentum_boundary, which
+    # zeroes momentum and would act like a soft wall, or
+    # Transmissive_n_momentum_zero_t_momentum_set_stage_boundary, which still
+    # sets a stage function (the exact defect being fixed here).
+    # `set_boundary` raises if a tag is named that the mesh doesn't have, so
+    # "open" is only added when this mesh actually produced open-tagged
+    # segments (see mesh.build_mesh: omitted, not empty-listed, when unused).
+    boundary_map = {
         "ocean": anuga.Transmissive_momentum_set_stage_boundary(
             domain=domain, function=tide
         ),
         "wall": anuga.Reflective_boundary(domain),
-    })
+    }
+    if "open" in set(domain.boundary.values()):
+        boundary_map["open"] = anuga.Transmissive_boundary(domain)
+    domain.set_boundary(boundary_map)
 
     inflows = forcing.river_inflow_m3s(fishery, discharge_bucket)
     _attach_river_inflows(domain, fishery, inflows)
