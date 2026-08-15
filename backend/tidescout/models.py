@@ -86,6 +86,15 @@ class KnownSpot(BaseModel):
     lat: float
     kind_hint: str = ""
     notes: str = ""
+    # Machine-readable version of the tide phase the prose notes describe, so
+    # the Task 13 validation gate can ASSERT rather than merely display. The
+    # notes stay authoritative -- they carry detail this enum cannot, and the
+    # gate quotes them when it reports.
+    #
+    # "" means unspecified, and the gate reports such a spot without passing or
+    # failing it: silently treating an unfilled hint as "no expectation met" is
+    # how a go/no-go gate turns into a rubber stamp.
+    works_on: Literal["ebb", "flood", "slack", ""] = ""
 
 
 class ModelDomain(BaseModel):

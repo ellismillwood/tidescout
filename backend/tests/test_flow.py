@@ -124,3 +124,34 @@ def test_interpolation_does_not_mutate_its_inputs():
 def test_wet_mask_excludes_the_numerically_dry():
     depth = np.array([0.0, 0.005, 0.5])
     assert list(flow.wet_mask(depth)) == [False, False, True]
+
+
+def test_known_spots_carry_a_machine_readable_phase_hint():
+    """Task 13's gate asserts against `works_on`, so the shipped ground truth
+    must actually have it filled -- an unfilled hint makes the go/no-go gate
+    silently untestable for that spot."""
+    from tidescout.config import load_known_spots
+
+    spots = {s.name: s for s in load_known_spots("winyah-bay")}
+    assert spots["Mud Bay Cut"].works_on == "ebb"
+    assert spots["Georgetown Lighthouse"].works_on == "slack"
+    assert spots["North Jetty"].works_on == "flood"
+
+
+def test_known_spot_rejects_an_unrecognised_phase_hint():
+    """A typo must fail loudly rather than degrade to 'unspecified', which the
+    gate treats as 'no expectation to check'."""
+    import pydantic
+
+    from tidescout.models import KnownSpot
+
+    with pytest.raises(pydantic.ValidationError):
+        KnownSpot(name="x", lon=0.0, lat=0.0, works_on="outgoing")
+
+
+def test_known_spot_notes_are_left_intact_by_the_hint():
+    """The prose stays authoritative -- it carries detail the enum cannot."""
+    from tidescout.config import load_known_spots
+
+    spots = {s.name: s for s in load_known_spots("winyah-bay")}
+    assert "early incoming" in spots["Georgetown Lighthouse"].notes

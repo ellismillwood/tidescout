@@ -16,6 +16,8 @@ spots:
     lon: -79.221461
     lat: 33.278208
     kind_hint: dropoff
+    # "outgoing tide ... flow headed toward the mouth" -> unambiguously ebb.
+    works_on: ebb
     notes: >-
       A dropoff carved by current into mud bay that is channeled by islands.
       Holds bull redfish. Effective on an outgoing tide or when flow is headed
@@ -25,6 +27,12 @@ spots:
     lon: -79.186965
     lat: 33.222133
     kind_hint: eddy / dropoff
+    # ELLIS: the notes say "slack AND early incoming", which one value cannot
+    # hold. Recorded as `slack` because that is the discriminating claim the
+    # gate can test -- a current break should read as LOW speed at slack and
+    # must not read as a rip at peak flow. If the early-flood half is the part
+    # that actually matters to you, change this to `flood` and say so.
+    works_on: slack
     notes: >-
       Works best as tide is slack and early incoming tides. The mouth of the bay
       creates a break in current which carries down the north bank. Works best
@@ -34,6 +42,8 @@ spots:
     lon: -79.166104
     lat: 33.205355
     kind_hint: other
+    # "Works best on an incoming tide" -> unambiguously flood.
+    works_on: flood
     notes: >-
       Works best on an incoming tide for a variety of species. An incoming tide
       will push bait against the jetty. Predators tend to sit north of the wall
