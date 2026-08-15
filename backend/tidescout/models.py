@@ -130,6 +130,14 @@ class AnugaConfig(BaseModel):
     mass_tolerance: float = 1e-3  # measured residual is ~4e-4; 1e-6 fails healthy runs
     max_workers: int = 6  # performance cores only -- see Task 11
     mean_range_m: float = 1.5  # amplitude base for range-regime boundary forcing
+    # Cell size of the stored flow-state library. Deliberately coarser than
+    # bathymetry.cell_m (10 m): the naive full-grid float32 layout is ~52 GB
+    # for nine regimes x 25 phases x 3 arrays, and 20 m masked to the domain
+    # brings that to ~1.8 GB. Still inside the spec's "~10-20 m", and finer
+    # than a 60 m base mesh can actually resolve, so nothing real is lost.
+    # Matches anuga.jetty_edge_m = 20.0 by intent -- mesh structure finer than
+    # the library grid cannot survive into the output.
+    library_cell_m: float = 20.0
 
 
 class Fishery(BaseModel):
