@@ -44,6 +44,19 @@ ATTRIBUTE_FIELD = "Wetlands.ATTRIBUTE"
 # distinguishes a marsh island from open water.
 DEFAULT_WETLAND_TYPE = "Estuarine and Marine Wetland"
 PAGE_SIZE = 1000  # matches the live service's maxRecordCount
+# The layer is a join (see WETLAND_TYPE_FIELD/ATTRIBUTE_FIELD above), so the
+# service's default ObjectID ordering is not guaranteed stable across pages --
+# without an explicit sort, a resultOffset-based page boundary can land
+# mid-reshuffle and silently duplicate or drop features between calls.
+# ATTRIBUTE_FIELD is already a selected outField and present on every row, so
+# ordering by it costs nothing extra and makes paging deterministic.
+ORDER_BY_FIELD = ATTRIBUTE_FIELD
+# Guard against a service that reports exceededTransferLimit=True forever
+# (e.g. a server-side bug, or a where-clause that matches far more than
+# expected): 200 pages * PAGE_SIZE is 200,000 features, an order of magnitude
+# past the ~1,070-feature Winyah bbox count observed live, so legitimate
+# fetches never come close while a runaway loop is still stopped.
+MAX_PAGES = 200
 
 
 def _page_params(
@@ -53,6 +66,7 @@ def _page_params(
     return {
         "where": f"{WETLAND_TYPE_FIELD}='{wetland_type}'",
         "outFields": f"{WETLAND_TYPE_FIELD},{ATTRIBUTE_FIELD}",
+        "orderByFields": ORDER_BY_FIELD,
         "geometry": f"{west},{south},{east},{north}",
         "geometryType": "esriGeometryEnvelope",
         "inSR": "4326",
@@ -111,10 +125,14 @@ def fetch_wetlands(
     exceededTransferLimit False/absent, which ends the loop -- relying on that
     flag rather than `len(features) == page_size` correctly stops on a page
     that happens to be exactly full without truly having more behind it.
+    Pages are ordered by ORDER_BY_FIELD so resultOffset boundaries are
+    deterministic across calls (see ORDER_BY_FIELD's docstring). Capped at
+    MAX_PAGES so a service stuck always reporting exceededTransferLimit=True
+    cannot loop forever.
     """
     features: list[dict] = []
     offset = 0
-    while True:
+    for _ in range(MAX_PAGES):
         page = fetch_page(fishery.bbox, offset, cache, wetland_type, page_size)
         page_features = page.get("features", [])
         for f in page_features:
@@ -128,6 +146,13 @@ def fetch_wetlands(
         if not page_features or not page.get("exceededTransferLimit"):
             break
         offset += len(page_features)
+    else:
+        raise SourceUnavailable(
+            "nwi",
+            f"exceeded MAX_PAGES={MAX_PAGES} without exceededTransferLimit "
+            "clearing -- the service may be stuck reporting "
+            "exceededTransferLimit=True indefinitely",
+        )
     fc = {"type": "FeatureCollection", "features": features}
     write_wetlands(fishery.slug, fc)
     return fc

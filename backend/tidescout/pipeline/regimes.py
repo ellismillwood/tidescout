@@ -270,6 +270,11 @@ def _collect_result(name: str, out_dir: Path, results: dict[str, dict]) -> None:
     results[name] = meta
 
 
+def _write_manifest(slug: str, results: dict[str, dict]) -> None:
+    manifest = regime_dir(slug) / "library.json"
+    manifest.write_text(json.dumps({"regimes": results}, indent=2))
+
+
 def build_library(
     slug: str, max_workers: int | None = None, sim_hours: float | None = None
 ) -> dict[str, dict]:
@@ -278,6 +283,12 @@ def build_library(
     Deliberately NOT MPI. The nine runs share nothing, so a process pool gets
     the same wall time as domain decomposition with none of the toolchain --
     see the Plan 3 spike findings for the measured comparison.
+
+    The manifest is written after every individual result, not once at the
+    end: nine small writes instead of one, so a killed process (the pool
+    path can be killed between any two `as_completed` results, and the
+    serial path between any two iterations) leaves `library.json` reflecting
+    every regime that finished so far instead of losing all of them.
     """
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -294,10 +305,10 @@ def build_library(
                 out_dir = run_regime(slug, r, d, sim_hours)
             except Exception as exc:
                 results[name] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+                _write_manifest(slug, results)
                 continue
             _collect_result(name, out_dir, results)
-        manifest = regime_dir(slug) / "library.json"
-        manifest.write_text(json.dumps({"regimes": results}, indent=2))
+            _write_manifest(slug, results)
         return results
 
     with ProcessPoolExecutor(max_workers=workers) as pool:
@@ -311,10 +322,10 @@ def build_library(
                 out_dir = fut.result()
             except Exception as exc:  # one bad regime must not lose the other eight
                 results[name] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
+                _write_manifest(slug, results)
                 continue
             _collect_result(name, out_dir, results)
-    manifest = regime_dir(slug) / "library.json"
-    manifest.write_text(json.dumps({"regimes": results}, indent=2))
+            _write_manifest(slug, results)
     return results
 
 
