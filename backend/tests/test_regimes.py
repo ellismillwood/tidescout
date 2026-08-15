@@ -315,3 +315,63 @@ def test_boundary_map_open_uses_reflective_boundary(tmp_path, monkeypatch):
         "wall and open must stay distinct dict keys even though both map to "
         "Reflective_boundary today"
     )
+
+
+def test_build_library_reports_each_regime_as_it_finishes(monkeypatch, tmp_path):
+    """A nine-regime build is a five-to-six-hour job. Reporting only at the
+    end is how build #1 sat with six dead regimes for over an hour before
+    anyone noticed, so `build_library` must hand each result to a callback the
+    moment it is recorded -- successes and failures alike, and always the same
+    dict that goes into the manifest.
+    """
+    from tidescout import paths
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+
+    def fake_run(slug, r, d, sim_hours=None):
+        if (r, d) == ("spring", "high"):
+            raise RuntimeError("solver blew up")
+        out = regimes.regime_dir(slug) / regimes.regime_name(r, d)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "regime.json").write_text(
+            json.dumps({"regime": regimes.regime_name(r, d), "snapshots": []})
+        )
+        return out
+
+    monkeypatch.setattr(regimes, "run_regime", fake_run)
+    monkeypatch.setattr(regimes, "reversal_check", lambda d: {"reversed": True})
+
+    seen = []
+    results = regimes.build_library(
+        "winyah-bay", max_workers=1, on_result=lambda n, m: seen.append((n, m))
+    )
+
+    assert len(seen) == 9, "every regime must be reported, not just the good ones"
+    # Order is completion order (matrix order on the serial path, whichever
+    # finishes first in the pool), so compare as sets rather than sequences.
+    assert sorted(n for n, _ in seen) == sorted(results)
+    assert dict(seen)["spring_high"]["status"] == "failed"
+    # The callback must receive the recorded entry itself, so a caller cannot
+    # print one thing while the manifest records another.
+    for name, meta in seen:
+        assert meta is results[name]
+
+
+def test_build_library_without_a_callback_still_runs(monkeypatch, tmp_path):
+    """`on_result` is optional -- omitting it must not change behaviour."""
+    from tidescout import paths
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+
+    def fake_run(slug, r, d, sim_hours=None):
+        out = regimes.regime_dir(slug) / regimes.regime_name(r, d)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "regime.json").write_text(
+            json.dumps({"regime": regimes.regime_name(r, d), "snapshots": []})
+        )
+        return out
+
+    monkeypatch.setattr(regimes, "run_regime", fake_run)
+    monkeypatch.setattr(regimes, "reversal_check", lambda d: {"reversed": True})
+
+    results = regimes.build_library("winyah-bay", max_workers=1)
+
+    assert sum(v["status"] == "ok" for v in results.values()) == 9

@@ -1,4 +1,5 @@
 import json
+import time
 
 import typer
 from rich.console import Console
@@ -365,8 +366,34 @@ def flow_run(
     """Run the full regime matrix as parallel processes."""
     from tidescout.pipeline.regimes import build_library
 
+    # A nine-regime build is five to six hours. Print each regime the moment
+    # it lands rather than only the table at the end -- build #1 sat with six
+    # dead regimes for over an hour because the first output of any kind came
+    # after all nine had finished.
+    started = time.monotonic()
+
+    def report(name: str, meta: dict) -> None:
+        ok = meta.get("status") == "ok"
+        mins = (time.monotonic() - started) / 60.0
+        if ok:
+            console.print(
+                f"[green]ok[/green]   {name:12s} "
+                f"{meta.get('wall_seconds', 0) / 60.0:6.1f} min  "
+                f"resid {meta.get('mass_residual', float('nan')):.1e}  "
+                f"reversed={meta.get('reversal', {}).get('reversed', '-')}  "
+                f"[dim](+{mins:.0f} min elapsed)[/dim]"
+            )
+        else:
+            console.print(
+                f"[red]FAIL[/red] {name:12s} {meta.get('error', '?')}  "
+                f"[dim](+{mins:.0f} min elapsed)[/dim]"
+            )
+
     results = build_library(
-        slug, max_workers=workers or None, sim_hours=sim_hours or None
+        slug,
+        max_workers=workers or None,
+        sim_hours=sim_hours or None,
+        on_result=report,
     )
     table = Table(title=f"{slug} — regime library")
     for col in ("regime", "status", "triangles", "wall s", "mass resid", "reversed"):

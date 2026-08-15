@@ -7,6 +7,7 @@ them as parallel OS processes rather than reaching for MPI.
 
 import json
 import time
+from collections.abc import Callable
 from pathlib import Path
 
 import anuga
@@ -283,13 +284,38 @@ def _collect_result(name: str, out_dir: Path, results: dict[str, dict]) -> None:
     results[name] = meta
 
 
+def _report(
+    on_result: Callable[[str, dict], None] | None,
+    name: str,
+    results: dict[str, dict],
+) -> None:
+    """Hand one recorded result to the caller's progress callback.
+
+    Called only after `_write_manifest`, so anything the callback reports has
+    already been persisted: a build killed during the callback still leaves a
+    manifest agreeing with what was printed. A callback that raises must not
+    take the build down -- progress reporting is never worth losing eight good
+    regimes over -- so it is swallowed, and deliberately not re-raised even in
+    tests.
+    """
+    if on_result is None:
+        return
+    try:
+        on_result(name, results[name])
+    except Exception:
+        pass
+
+
 def _write_manifest(slug: str, results: dict[str, dict]) -> None:
     manifest = regime_dir(slug) / "library.json"
     manifest.write_text(json.dumps({"regimes": results}, indent=2))
 
 
 def build_library(
-    slug: str, max_workers: int | None = None, sim_hours: float | None = None
+    slug: str,
+    max_workers: int | None = None,
+    sim_hours: float | None = None,
+    on_result: Callable[[str, dict], None] | None = None,
 ) -> dict[str, dict]:
     """Run every regime, as independent processes.
 
@@ -302,6 +328,14 @@ def build_library(
     path can be killed between any two `as_completed` results, and the
     serial path between any two iterations) leaves `library.json` reflecting
     every regime that finished so far instead of losing all of them.
+
+    `on_result(name, entry)` is called as each regime is recorded, with the
+    entry that just went into the manifest. This is a five-to-six-hour job:
+    reporting only on return is how build #1 sat with six dead regimes for
+    over an hour before anyone noticed. Failures are reported the same way as
+    successes, so a caller that prints this sees a regime die at the moment
+    it dies. Kept a callback rather than a print so this module stays free of
+    console dependencies and the behaviour is directly testable.
     """
     from concurrent.futures import ProcessPoolExecutor, as_completed
 
@@ -319,9 +353,11 @@ def build_library(
             except Exception as exc:
                 results[name] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
                 _write_manifest(slug, results)
+                _report(on_result, name, results)
                 continue
             _collect_result(name, out_dir, results)
             _write_manifest(slug, results)
+            _report(on_result, name, results)
         return results
 
     with ProcessPoolExecutor(max_workers=workers) as pool:
@@ -336,9 +372,11 @@ def build_library(
             except Exception as exc:  # one bad regime must not lose the other eight
                 results[name] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
                 _write_manifest(slug, results)
+                _report(on_result, name, results)
                 continue
             _collect_result(name, out_dir, results)
             _write_manifest(slug, results)
+            _report(on_result, name, results)
     return results
 
 
