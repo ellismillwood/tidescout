@@ -1012,6 +1012,19 @@ git commit -m "feat: convergence field for draining creek mouths"
 
 The one derived signal that is **not** instantaneous: a flat's value is *when* it floods and drains, which only exists across a whole cycle. Cheap to precompute (26 phases × one boolean per cell) and small enough to store as a table rather than a raster stack.
 
+> **CORRECTION, 2026-08-17 (found during execution).** The `first_phase` helper below is
+> **defective** and was fixed during Task 7's implementation. It computes `flood_phase`
+> and `drain_phase` *independently*, each as "first crossing walking from index 0". Some
+> cells hold a shallow residual pool at the recorded low-water snapshot that finishes
+> draining a phase or two later; that early dry-out is the first `goes_dry` in array
+> order, but it is not the drain that closes the cell's wet window. Measured on the
+> shipped library it affects 3.0% of intertidal cells at neap and 4.0% at spring, and it
+> put `spring_high`'s median drain phase at **0.403** — in the flooding half.
+> `flood_phase` was never wrong (0.443 median, identically, across all three regimes).
+> **The shipped code pairs them:** drain is the first dry transition at a cyclic index
+> *after* the flood. Read `backend/tidescout/pipeline/schedule.py` for the real
+> algorithm; the snippet below is retained as the historical argument only.
+
 **Files:**
 - Create: `backend/tidescout/pipeline/schedule.py`
 - Create: `backend/tests/test_schedule.py`

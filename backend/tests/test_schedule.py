@@ -52,3 +52,28 @@ def test_schedule_wraps_cyclically_across_the_end_of_the_series():
     assert s.flood_phase[0] == pytest.approx(0.75)
     assert s.drain_phase[0] == pytest.approx(0.25)
     assert s.wet_fraction[0] == pytest.approx(0.5)
+
+
+def test_a_residual_puddle_at_low_water_does_not_become_the_drain_phase():
+    """Pins the bug found by Step 5 of Task 7: a shallow residual pool still
+    sitting in a cell at the recorded low-water snapshot -- matching real
+    ANUGA output, e.g. spring_high cell 373: 0.10 m at phase 0, dry within a
+    phase or two -- finishes draining long before the cell's real flood/drain
+    cycle happens. An independent 'first crossing from phase 0' search for
+    drain_phase picked that early puddle dry-out instead of the drain that
+    actually closes the wet window the flood opens, which dragged
+    spring_high's median drain phase to 0.403 -- into the flooding half.
+    drain_phase must be paired with its flood: the first dry crossing walking
+    the cycle forward FROM the flood, not the first dry crossing from phase 0.
+
+    Here the cell is wet at phase 0 (the puddle), dry by phase 0.1, stays dry
+    through the early rising half, floods for real at phase 0.4, and drains
+    for real at phase 0.6 -- well after the flood, not before it.
+    """
+    depths = _series(
+        [[0.1], [0.0], [0.0], [0.0], [0.3], [0.6], [0.0], [0.0], [0.0], [0.1]]
+    )
+    phases = [0.0, 0.1, 0.2, 0.3, 0.4, 0.5, 0.6, 0.7, 0.8, 0.9]
+    s = schedule.schedule_from_depths(depths, phases=phases)
+    assert s.flood_phase[0] == pytest.approx(0.4)
+    assert s.drain_phase[0] == pytest.approx(0.6)
