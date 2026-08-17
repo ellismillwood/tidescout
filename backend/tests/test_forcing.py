@@ -91,3 +91,41 @@ def test_inflow_shares_are_rejected_when_they_do_not_sum_to_one():
     f.rivers[0].inflow_share = 0.5  # now sums to ~0.72
     with pytest.raises(ValueError, match="inflow_share"):
         forcing.river_inflow_m3s(f, "med")
+
+
+def test_unauthored_shares_fall_back_to_equal_split():
+    """A fishery with no inflow_share authored yet must still run.
+
+    This is the state a brand-new fishery (Charleston, Awendaw, Murrells Inlet)
+    starts in before anyone measures its per-river split. Equal thirds is a
+    known-wrong approximation for Winyah, but it is the documented fallback,
+    not an error -- a regression that turned this branch into a raise would
+    break every fishery that hasn't been calibrated yet.
+    """
+    f = load_fishery("winyah-bay")
+    for r in f.rivers:
+        r.inflow_share = None
+    inflows = forcing.river_inflow_m3s(f, "med")
+
+    values = list(inflows.values())
+    assert values[0] == pytest.approx(values[1])
+    assert values[1] == pytest.approx(values[2])
+    expected_total = 0.5 * (
+        f.discharge_buckets.low_below_cfs + f.discharge_buckets.high_above_cfs
+    ) * forcing.CFS_TO_M3S
+    assert sum(values) == pytest.approx(expected_total, rel=1e-9)
+
+
+def test_partial_shares_raise_naming_the_missing_river():
+    """Half-authoring a split must fail loudly, not half-guess it.
+
+    A regression that changed the `elif any(s is None ...)` branch to fall
+    back to equal shares instead of raising would silently reintroduce the
+    original bug for whichever river someone forgot to author -- this pins
+    the guard and, specifically, that its message names the culprit.
+    """
+    f = load_fishery("winyah-bay")
+    f.rivers[1].inflow_share = None  # Waccamaw left unauthored
+    with pytest.raises(ValueError) as exc_info:
+        forcing.river_inflow_m3s(f, "med")
+    assert "Waccamaw" in str(exc_info.value)
