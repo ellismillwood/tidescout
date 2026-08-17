@@ -59,6 +59,14 @@ rivers:
   - name: Pee Dee
     usgs_site: "02131000"
     weight: 1.0
+    # inflow_share added 2026-08-16. Derived from the same 365-day per-gauge
+    # daily means that calibrated discharge_buckets: Pee Dee 3745, Waccamaw
+    # 642, Black 397 cfs, total 4784 -> 0.783 / 0.134 / 0.083. Before this,
+    # `weight: 1.0` on all three made river_inflow_m3s split the composite
+    # into equal thirds, injecting 4x the Black's share and 42% of the Pee
+    # Dee's. `weight` is deliberately left at 1.0: it means something else
+    # (include this gauge in the composite sum) and is correct as it stands.
+    inflow_share: 0.783
     # Moved 2476 m 2026-08-14. Was on domain polygon vertex v8 (0.4 m from the
     # reflective wall), which caused the corner-injection instability that
     # killed 6 of 9 regimes. Now 2422 m from the domain polygon vertex, bed
@@ -88,6 +96,7 @@ rivers:
   - name: Waccamaw
     usgs_site: "02110500"
     weight: 1.0
+    inflow_share: 0.134
     # Moved 2469 m 2026-08-14; was 35 m from the reflective wall. Now 1246 m
     # from the authored domain polygon, bed -2.10 m, 626 wet 10 m raster
     # cells in the inlet box.
@@ -107,6 +116,7 @@ rivers:
   - name: Black
     usgs_site: "02136000"
     weight: 1.0
+    inflow_share: 0.083
     # Vertex 9 (658.0, 3696.0) -- "NW, west of Georgetown", the westernmost
     # of the three -- matches the Black River joining the Pee Dee well
     # upstream (near Kingstree) from the west/inland side before the

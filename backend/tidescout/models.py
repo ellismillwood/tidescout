@@ -11,6 +11,14 @@ class RiverGauge(BaseModel):
     # anuga.Inlet_operator's injection region. None => inflow is not attached
     # for this river (see pipeline/regimes.py::_attach_river_inflows).
     inflow_lonlat: tuple[float, float] | None = None
+    # Fraction of the composite discharge that enters the domain at THIS
+    # river's inlet. Distinct from `weight`, which says how this gauge
+    # contributes to the composite TOTAL (1.0 = include it in the sum). The
+    # two were conflated until 2026-08-16, which split the composite into
+    # equal thirds across three rivers whose measured split is 78/13/8.
+    # None on every river reproduces the old equal-share behaviour, so a
+    # fishery that has not authored shares still runs.
+    inflow_share: float | None = None
 
 
 class WaterSensor(BaseModel):

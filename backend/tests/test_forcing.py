@@ -2,6 +2,7 @@ from datetime import UTC, datetime, timedelta
 
 import pytest
 
+from tidescout.config import load_fishery
 from tidescout.engine.tides import TideEvent
 from tidescout.pipeline import forcing
 
@@ -52,3 +53,41 @@ def test_river_inflow_scales_with_discharge_bucket(fishery):
     assert set(lo) == {r.name for r in fishery.rivers}
     assert sum(hi.values()) > sum(lo.values())
     assert all(v >= 0 for v in lo.values())
+
+
+def test_inflow_split_follows_inflow_share_not_gauge_weight():
+    """A river's share of the composite is its own long-term flow fraction.
+
+    `weight` means "how this gauge contributes to the composite total" (1.0 =
+    include it in the sum). `inflow_share` means "what fraction of that total
+    enters here". Conflating them injected equal thirds into three rivers whose
+    real split is 78/13/8.
+    """
+    f = load_fishery("winyah-bay")
+    inflows = forcing.river_inflow_m3s(f, "med")
+    total = sum(inflows.values())
+
+    assert inflows["Pee Dee"] / total == pytest.approx(0.783, abs=0.01)
+    assert inflows["Waccamaw"] / total == pytest.approx(0.134, abs=0.01)
+    assert inflows["Black"] / total == pytest.approx(0.083, abs=0.01)
+    # The Pee Dee must dominate; equal thirds is the bug this test pins.
+    assert inflows["Pee Dee"] > 4 * inflows["Black"]
+
+
+def test_inflow_total_still_matches_the_composite_bucket():
+    """Redistributing shares must not change how much water enters overall."""
+    f = load_fishery("winyah-bay")
+    for bucket, cfs in (
+        ("low", f.discharge_buckets.low_below_cfs),
+        ("high", f.discharge_buckets.high_above_cfs),
+    ):
+        total = sum(forcing.river_inflow_m3s(f, bucket).values())
+        assert total == pytest.approx(cfs * forcing.CFS_TO_M3S, rel=1e-9)
+
+
+def test_inflow_shares_are_rejected_when_they_do_not_sum_to_one():
+    """A silent renormalisation would hide an authoring mistake."""
+    f = load_fishery("winyah-bay")
+    f.rivers[0].inflow_share = 0.5  # now sums to ~0.72
+    with pytest.raises(ValueError, match="inflow_share"):
+        forcing.river_inflow_m3s(f, "med")

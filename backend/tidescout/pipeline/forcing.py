@@ -74,9 +74,13 @@ def range_scaled_tide(
 def river_inflow_m3s(fishery: Fishery, bucket: str) -> dict[str, float]:
     """Steady inflow per river for a discharge regime, in m^3/s.
 
-    The composite bucket boundaries are the calibrated percentiles from Task 1.
-    'low' and 'high' sit at those boundaries; 'med' at their midpoint. Each
-    river takes its configured share of the composite.
+    Inflow is steady across a run by design: the tidal cycle is 12.42 h and
+    river discharge changes over days, so a time-varying inlet would model a
+    process the simulation window cannot resolve.
+
+    The composite bucket boundaries are the calibrated percentiles from Plan 3
+    Task 1. Each river takes its `inflow_share` of that composite -- NOT its
+    gauge `weight`, which serves the different job of building the composite.
     """
     b = fishery.discharge_buckets
     composite_cfs = {
@@ -84,8 +88,25 @@ def river_inflow_m3s(fishery: Fishery, bucket: str) -> dict[str, float]:
         "med": 0.5 * (b.low_below_cfs + b.high_above_cfs),
         "high": b.high_above_cfs,
     }[bucket]
-    total_weight = sum(r.weight for r in fishery.rivers) or 1.0
+
+    shares = [r.inflow_share for r in fishery.rivers]
+    if all(s is None for s in shares):
+        # Unauthored fishery: fall back to equal shares rather than failing.
+        n = len(fishery.rivers) or 1
+        shares = [1.0 / n] * len(fishery.rivers)
+    elif any(s is None for s in shares):
+        missing = [r.name for r in fishery.rivers if r.inflow_share is None]
+        raise ValueError(
+            f"inflow_share is set on some rivers but missing on {missing} -- "
+            "author it on all of them or none, so the split is never half-guessed"
+        )
+    total_share = sum(shares)
+    if abs(total_share - 1.0) > 1e-6:
+        raise ValueError(
+            f"inflow_share values sum to {total_share:.4f}, not 1.0 -- "
+            "renormalising silently would hide an authoring mistake"
+        )
     return {
-        r.name: composite_cfs * CFS_TO_M3S * (r.weight / total_weight)
-        for r in fishery.rivers
+        r.name: composite_cfs * CFS_TO_M3S * s
+        for r, s in zip(fishery.rivers, shares, strict=True)
     }
