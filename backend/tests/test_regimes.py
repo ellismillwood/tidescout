@@ -375,3 +375,10 @@ def test_build_library_without_a_callback_still_runs(monkeypatch, tmp_path):
     results = regimes.build_library("winyah-bay", max_workers=1)
 
     assert sum(v["status"] == "ok" for v in results.values()) == 9
+
+
+def test_store_sww_knob_defaults_on_and_can_be_disabled():
+    from tidescout.models import AnugaConfig
+
+    assert AnugaConfig().store_sww is True
+    assert AnugaConfig(store_sww=False).store_sww is False

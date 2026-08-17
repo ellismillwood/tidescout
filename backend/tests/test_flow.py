@@ -134,9 +134,9 @@ def test_known_spots_carry_a_machine_readable_phase_hint():
 
     spots = {s.name: s for s in load_known_spots("winyah-bay")}
     assert spots["Mud Bay Cut"].works_on == "ebb"
-    # Ellis's call, 2026-08-15: the notes say "slack AND early incoming", and
-    # the early-incoming half is the part that matters to him.
-    assert spots["Georgetown Lighthouse"].works_on == "flood"
+    # RESOLVED 2026-08-16: was flood. Notes describe a contrast mechanism
+    # (hiding from current), not a peak-current one, so slack branch applies.
+    assert spots["Georgetown Lighthouse"].works_on == "slack"
     assert spots["North Jetty"].works_on == "flood"
 
 

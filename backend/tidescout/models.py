@@ -147,6 +147,12 @@ class AnugaConfig(BaseModel):
     # Matches anuga.jetty_edge_m = 20.0 by intent -- mesh structure finer than
     # the library grid cannot survive into the output.
     library_cell_m: float = 20.0
+    # ANUGA writes a full .sww per regime (~170 MB each, 1.5 GB per build)
+    # alongside our snap_*.npz. The pipeline consumes only the npz files, so
+    # this is pure surplus -- but it is the only full-resolution record of the
+    # run, and the frontend will likely want it for flow visualisation that a
+    # 20 m masked grid cannot reconstruct. Kept ON, made switchable.
+    store_sww: bool = True
 
 
 class Fishery(BaseModel):

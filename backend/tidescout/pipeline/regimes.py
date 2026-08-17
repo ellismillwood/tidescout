@@ -106,6 +106,8 @@ def run_regime(
     domain = mesh.build_mesh(slug, fishery)
     domain.set_name(name)
     domain.set_datadir(str(out_dir))
+    if not cfg.store_sww:
+        domain.set_quantities_to_be_stored(None)
     domain.set_quantity(
         "friction", mesh.friction_field(domain, slug, fishery), location="centroids"
     )

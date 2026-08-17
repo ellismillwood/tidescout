@@ -223,13 +223,30 @@ model_domain:
   # produces multi-km segments across open water. Segment 214 is 3.6 km long and
   # ~1 km of it already lies inside this polygon; nudging the SW edge ~700 m
   # flips all 3.6 km between full tidal forcing and zero-gradient in one step.
+  # CORRECTED 2026-08-16 (carryover open item 3). The SW corner was
+  # (663.0, 3671.5), which left ring segment 214 -- 3,608 m of genuinely open
+  # back-barrier water on the southern approach -- outside the ocean polygon
+  # and therefore tagged `open`, which maps to Reflective_boundary: a wall
+  # across open water. Nudging the corner to (662.0, 3672.0) promotes exactly
+  # that one segment (ocean 27.59 -> 31.20 km) and leaves the four river-head
+  # and ICW `open` segments and all 595 `wall` segments untouched -- verified
+  # against production classify_boundary before the change.
+  #
+  # MEASURED, full mean_med variant run 2026-08-16: STABLE (mass residual
+  # 1.46e-14, 26/26 snapshots, 2.61 h wall) and NEGLIGIBLE -- pooled p99 speed
+  # delta is 0.77% of p99 speed over 5.47M wet-centroid samples, and within
+  # 150 m of the known spots the mean delta is 0.00018 (Mud Bay), 0.00059
+  # (Georgetown) and 0.00026 m/s (North Jetty) against flows of 0.5-1 m/s.
+  # The shipped library was therefore NOT rebuilt for this. It is correct for
+  # the next rebuild to inherit, and it independently clears the boundary as
+  # an explanation for Georgetown's ebb lean.
   ocean_boundary_utm_km:
     - [665.0, 3669.0]
     - [676.0, 3669.0]
     - [676.0, 3695.0]
     - [669.5, 3695.0]
     - [669.5, 3681.0]
-    - [663.0, 3671.5]
+    - [662.0, 3672.0]
   # Capped at real high water, not the old blanket 1.5 m: mean_range_m 1.10 *
   # spring factor 1.28 / 2 = 0.70 m max simulated stage, plus ~0.2 m margin.
   # Do NOT "helpfully" raise this back toward 1.5 m -- that meshes land that
