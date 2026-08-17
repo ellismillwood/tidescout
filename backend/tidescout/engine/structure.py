@@ -118,3 +118,24 @@ def classify_structure(t: GradientTensor, quiet: float = 1e-5) -> np.ndarray:
     out[w > quiet] = 1
     out[w < -quiet] = -1
     return out
+
+
+def divergence(t: GradientTensor) -> np.ndarray:
+    """du_dx + dv_dy. Positive where water spreads, negative where it closes.
+
+    Differs from the stretching term du_dx - dv_dy by one sign, and the
+    np.gradient row-orientation trap turns one into the other silently -- which
+    is why `xy_gradients` negates the row derivative once, centrally, and
+    nothing else in this module touches np.gradient.
+    """
+    return t.du_dx + t.dv_dy
+
+
+def convergence(t: GradientTensor) -> np.ndarray:
+    """-divergence: water closing on itself, which pins bait.
+
+    Sign-flipped so that larger is more fish-relevant, the same convention every
+    other field here follows. The scoring engine maps each structure field
+    through a monotone response curve and would need a special case otherwise.
+    """
+    return -divergence(t)

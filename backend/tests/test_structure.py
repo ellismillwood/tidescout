@@ -133,3 +133,38 @@ def test_classify_structure_calls_uniform_flow_quiet_not_seam():
     x, y, cell = _xy()
     t = structure.gradient_tensor(np.full_like(x, 1.2), np.full_like(x, -0.4), cell)
     assert np.all(structure.classify_structure(t)[1:-1, 1:-1] == 0)
+
+
+def test_divergence_is_positive_for_a_source_and_negative_for_a_sink():
+    x, y, cell = _xy()
+    k = 0.003
+    src = structure.gradient_tensor(k * x, k * y, cell)
+    snk = structure.gradient_tensor(-k * x, -k * y, cell)
+    assert np.allclose(structure.divergence(src)[1:-1, 1:-1], 2 * k)
+    assert np.allclose(structure.divergence(snk)[1:-1, 1:-1], -2 * k)
+
+
+def test_convergence_is_positive_where_water_closes_on_itself():
+    """Convergence is what pins bait; the sign is flipped so 'more is better'
+    holds for every structure field, which the scoring engine relies on."""
+    x, y, cell = _xy()
+    k = 0.003
+    snk = structure.gradient_tensor(-k * x, -k * y, cell)
+    assert np.allclose(structure.convergence(snk)[1:-1, 1:-1], 2 * k)
+
+
+def test_divergence_is_not_the_stretching_term():
+    """The np.gradient row-orientation trap: du_dx - dv_dy and du_dx + dv_dy
+    are different fields, and a sign error silently swaps them. This field
+    separates them -- stretching is zero, divergence is not."""
+    x, y, cell = _xy()
+    k = 0.003
+    t = structure.gradient_tensor(k * x, k * y, cell)
+    assert np.allclose(structure.divergence(t)[1:-1, 1:-1], 2 * k)
+    assert np.allclose((t.du_dx - t.dv_dy)[1:-1, 1:-1], 0.0, atol=1e-12)
+
+
+def test_convergence_is_zero_in_solid_body_rotation():
+    x, y, cell = _xy()
+    t = structure.gradient_tensor(-0.002 * y, 0.002 * x, cell)
+    assert np.nanmax(np.abs(structure.convergence(t)[1:-1, 1:-1])) < 1e-9
