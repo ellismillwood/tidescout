@@ -90,44 +90,6 @@ def speed_direction(u: np.ndarray, v: np.ndarray):
     return speed, direction
 
 
-def _xy_gradients(a: np.ndarray, cell_m: float):
-    """d/dx (east) and d/dy (north) of a grid-shaped field.
-
-    `np.gradient` returns the ROW derivative first, and on a north-up raster
-    rows run SOUTH while u/v are true east/north. So the row derivative is
-    -d/dy, not d/dy. Getting this wrong is not cosmetic: it turns the
-    stretching term `du_dx - dv_dy` into the divergence `du_dx + dv_dy`, which
-    is a completely different field.
-    """
-    d_drow, d_dcol = np.gradient(a, cell_m)
-    return d_dcol, -d_drow
-
-
-def shear_magnitude(u: np.ndarray, v: np.ndarray, cell_m: float) -> np.ndarray:
-    """Strain-rate magnitude -- the spec's 'seams' signal.
-
-    Fish hold on the boundary between fast and slow water, so what matters is
-    neighbouring parcels sliding past one another, not the speed itself and
-    not the raw size of the velocity gradient.
-
-    This is the total deformation rate,
-        sqrt((du_dx - dv_dy)^2 + (du_dy + dv_dx)^2),
-    the standard stretching/shearing pair. Deliberately NOT
-    sqrt(du_dy^2 + dv_dx^2 + ...): that returns 1.41*omega for solid-body
-    rotation, which has no seam anywhere in it -- neighbouring parcels in a
-    rigidly turning eddy never slide past one another -- and would light up
-    the interior of every eddy in the bay as holding water. The strain rate is
-    also Galilean invariant, so a seam reads the same whether the whole body of
-    water is drifting past it or not; isotropic expansion likewise deforms no
-    parcel's shape and correctly returns zero.
-    """
-    du_dx, du_dy = _xy_gradients(u, cell_m)
-    dv_dx, dv_dy = _xy_gradients(v, cell_m)
-    stretching = du_dx - dv_dy
-    shearing = du_dy + dv_dx
-    return np.sqrt(stretching**2 + shearing**2)
-
-
 def _grid_json(spec: GridSpec, snapshots: list[dict], transform6: list) -> dict:
     """The sidecar describing the flat array layout.
 
