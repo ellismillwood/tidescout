@@ -5,6 +5,7 @@ out on paper, so a failure localises to the formula rather than to the data.
 """
 
 import numpy as np
+import pytest
 
 from tidescout.engine import structure
 
@@ -168,3 +169,44 @@ def test_convergence_is_zero_in_solid_body_rotation():
     x, y, cell = _xy()
     t = structure.gradient_tensor(-0.002 * y, 0.002 * x, cell)
     assert np.nanmax(np.abs(structure.convergence(t)[1:-1, 1:-1])) < 1e-9
+
+
+def test_ambush_contrast_peaks_in_a_slow_pocket_beside_a_fast_conveyor():
+    """The Georgetown shape: a stagnant pocket adjacent to the fastest water."""
+    speed = np.full((64, 64), 0.05)
+    speed[:, 32:] = 1.0          # a fast conveyor filling the east half
+    speed[28:36, 24:32] = 0.0    # a dead pocket hard against its west edge
+
+    c = structure.ambush_contrast(speed, cell_m=20.0, radius_m=150.0)
+
+    assert c[31, 28] == pytest.approx(1.0)   # in the pocket, conveyor in reach
+    assert c[31, 40] == pytest.approx(0.0)   # inside the conveyor: nothing faster
+    assert c[5, 5] < 0.01                    # far slack water: no fast neighbour
+
+
+def test_ambush_contrast_is_zero_in_uniform_flow_however_fast():
+    """Speed alone is not the signal. A uniform 2 m/s river has no ambush."""
+    c = structure.ambush_contrast(np.full((32, 32), 2.0), cell_m=20.0, radius_m=150.0)
+    assert np.allclose(c, 0.0)
+
+
+def test_ambush_contrast_reach_is_set_by_radius_not_cell_count():
+    """A pocket 200 m from fast water is out of reach at R=100 m, in reach at
+    R=300 m. The radius must be interpreted in metres via cell_m."""
+    speed = np.full((64, 64), 0.0)
+    speed[:, 42:] = 1.0
+    at_100 = structure.ambush_contrast(speed, cell_m=20.0, radius_m=100.0)
+    at_300 = structure.ambush_contrast(speed, cell_m=20.0, radius_m=300.0)
+    assert at_100[32, 32] == pytest.approx(0.0)
+    assert at_300[32, 32] == pytest.approx(1.0)
+
+
+def test_ambush_contrast_ignores_out_of_domain_neighbours():
+    """NaN marks land. A pocket beside dry marsh must not inherit its NaN, and
+    must not be credited with a fast neighbour that does not exist."""
+    speed = np.full((32, 32), 0.1)
+    speed[:, 20:] = np.nan
+    c = structure.ambush_contrast(speed, cell_m=20.0, radius_m=150.0)
+    assert np.isfinite(c[16, 16])
+    assert c[16, 16] == pytest.approx(0.0)
+    assert np.isnan(c[16, 25])

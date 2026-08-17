@@ -11,6 +11,7 @@ differentiates works on 2-D grids; `to_grid` and `from_grid` are the bridge.
 from dataclasses import dataclass
 
 import numpy as np
+from scipy import ndimage
 
 
 def to_grid(
@@ -139,3 +140,39 @@ def convergence(t: GradientTensor) -> np.ndarray:
     through a monotone response curve and would need a special case otherwise.
     """
     return -divergence(t)
+
+
+def _disk(radius_m: float, cell_m: float) -> np.ndarray:
+    """Circular footprint. A square window would reach 1.41x further on the
+    diagonals, so a pocket would light up from fast water that is out of reach
+    in one direction but not another -- an artefact of the grid, not the flow.
+    """
+    r = max(int(round(radius_m / cell_m)), 1)
+    yy, xx = np.ogrid[-r : r + 1, -r : r + 1]
+    return (xx**2 + yy**2) <= r**2
+
+
+def ambush_contrast(
+    speed: np.ndarray, cell_m: float, radius_m: float = 150.0
+) -> np.ndarray:
+    """How much faster the nearby water is than this cell, in m/s.
+
+    The spec's "slow pockets adjacent to fast conveyors", and the mechanism
+    Ellis describes at Georgetown Lighthouse: the spot works because it hides
+    FROM the main channel current. Being slow is not enough and being fast is
+    not enough -- what matters is a low-speed cell with a high-speed neighbour
+    within a short dart, so a fish can hold out of the flow and feed in it.
+
+    NaN marks out-of-domain. `maximum_filter` would propagate it across the
+    whole footprint, so the max is taken over a NaN-to--inf copy and the mask
+    is reapplied afterwards; a cell beside land is credited with no neighbour
+    rather than an infinitely fast one.
+    """
+    invalid = ~np.isfinite(speed)
+    filled = np.where(invalid, -np.inf, speed)
+    local_max = ndimage.maximum_filter(
+        filled, footprint=_disk(radius_m, cell_m), mode="nearest"
+    )
+    out = local_max - np.where(invalid, np.nan, speed)
+    out[invalid] = np.nan
+    return np.maximum(out, 0.0, where=np.isfinite(out), out=out)

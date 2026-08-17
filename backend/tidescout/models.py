@@ -83,6 +83,23 @@ class FeatureThresholds(BaseModel):
     hole_max_area_m2: float = 200_000.0    # 0.2 km2
 
 
+class StructureThresholds(BaseModel):
+    """Derived-structure knobs. Tunable per fishery during validation."""
+
+    # Radius a fish will move to intercept bait. Matches the radius the
+    # known-spots validation gate already uses, so a spot that reads as an
+    # ambush point in the gate reads as one here too.
+    ambush_radius_m: float = 150.0
+    # Dead band on |Okubo-Weiss| below which water is "quiet" rather than
+    # seam or eddy. Not tuned to make anything pass -- it exists because
+    # uniform flow sits at W = 0 and floating-point noise would otherwise
+    # sign every cell of a featureless channel at random.
+    quiet_w: float = 1e-5
+    # Minimum convergence (negative divergence) counted as a bait-pinning
+    # front, in s^-1. 1e-4 is ~0.002 m/s of closing speed across a 20 m cell.
+    convergence_min: float = 1e-4
+
+
 class JettySeed(BaseModel):
     name: str
     coords: list[tuple[float, float]]  # lon, lat vertices, >=2
@@ -176,6 +193,7 @@ class Fishery(BaseModel):
     climatology: Climatology
     bathymetry: BathymetryConfig = BathymetryConfig()
     features: FeatureThresholds = FeatureThresholds()
+    structure: StructureThresholds = StructureThresholds()
     jetties: list[JettySeed] = []
     model_domain: ModelDomain | None = None
     anuga: AnugaConfig = AnugaConfig()
