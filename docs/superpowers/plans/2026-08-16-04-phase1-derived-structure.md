@@ -1012,18 +1012,27 @@ git commit -m "feat: convergence field for draining creek mouths"
 
 The one derived signal that is **not** instantaneous: a flat's value is *when* it floods and drains, which only exists across a whole cycle. Cheap to precompute (26 phases × one boolean per cell) and small enough to store as a table rather than a raster stack.
 
-> **CORRECTION, 2026-08-17 (found during execution).** The `first_phase` helper below is
-> **defective** and was fixed during Task 7's implementation. It computes `flood_phase`
-> and `drain_phase` *independently*, each as "first crossing walking from index 0". Some
-> cells hold a shallow residual pool at the recorded low-water snapshot that finishes
-> draining a phase or two later; that early dry-out is the first `goes_dry` in array
-> order, but it is not the drain that closes the cell's wet window. Measured on the
-> shipped library it affects 3.0% of intertidal cells at neap and 4.0% at spring, and it
-> put `spring_high`'s median drain phase at **0.403** — in the flooding half.
+> **CORRECTION, 2026-08-17 (found during execution). Step 5's third expectation below is
+> WRONG — the algorithm is not.** Step 5 asks that the median drain phase land in
+> 0.5–1.0. **Phase is a circular quantity and an ordinary median of one is meaningless.**
+> Measured on the shipped library: **33.8% of neap and 35.7% of spring intertidal cells
+> drain in phase 0.0–0.2** — slow-draining high marsh that holds water past low water,
+> which is physically expected and grows with tidal range. The wrap-safe statistic is
+> stable and sensible: wet-window length `(drain − flood) mod 1` has p50 **0.523 in both
+> regimes** (a flat is wet for about half a cycle), and the early-draining cells have
+> median windows of 0.60–0.64. Only the *median phase* moves across the wrap — 0.765 at
+> neap, 0.403 at spring — which is an artifact of the statistic, not the model.
+>
 > `flood_phase` was never wrong (0.443 median, identically, across all three regimes).
-> **The shipped code pairs them:** drain is the first dry transition at a cyclic index
-> *after* the flood. Read `backend/tidescout/pipeline/schedule.py` for the real
-> algorithm; the snippet below is retained as the historical argument only.
+>
+> One real refinement did land: `drain_phase` is now the first dry transition at a cyclic
+> index *after* the flood, so the two describe one wet window rather than being
+> independent first-crossings. On the shipped library this changed **zero** cells — it is
+> a correctness guard for multi-window cells, verified by a synthetic regression test, not
+> a fix for the numbers above. A first controller ruling misattributed the 0.403 to this
+> and was wrong; the pairing was kept because it is right, not because it helped.
+>
+> **Use `(drain − flood) mod 1` to verify this task, never a raw median of drain phase.**
 
 **Files:**
 - Create: `backend/tidescout/pipeline/schedule.py`

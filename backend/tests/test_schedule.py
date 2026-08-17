@@ -77,3 +77,22 @@ def test_a_residual_puddle_at_low_water_does_not_become_the_drain_phase():
     s = schedule.schedule_from_depths(depths, phases=phases)
     assert s.flood_phase[0] == pytest.approx(0.4)
     assert s.drain_phase[0] == pytest.approx(0.6)
+
+
+def test_wet_window_length_is_wrap_safe_when_the_window_spans_the_wrap():
+    """A cell whose wet window straddles the phase-0 seam: wet at the last
+    two phases and the first two, dry in the middle. It floods at phase 0.75
+    and drains at phase 0.25 -- drain_phase is numerically SMALLER than
+    flood_phase, so a raw `drain_phase - flood_phase` would read -0.5, as if
+    the cell drained before it ever flooded. Phase is circular, so the
+    wet-window length must be read off `(drain_phase - flood_phase) % 1.0`,
+    which gives the true 0.5 (four of the eight phase steps) instead of a
+    nonsensical negative duration.
+    """
+    depths = _series([[0.4], [0.4], [0.0], [0.0], [0.0], [0.0], [0.4], [0.4]])
+    phases = [0.0, 0.125, 0.25, 0.375, 0.5, 0.625, 0.75, 0.875]
+    s = schedule.schedule_from_depths(depths, phases=phases)
+    assert s.flood_phase[0] == pytest.approx(0.75)
+    assert s.drain_phase[0] == pytest.approx(0.25)
+    window = (s.drain_phase[0] - s.flood_phase[0]) % 1.0
+    assert window == pytest.approx(0.5)
