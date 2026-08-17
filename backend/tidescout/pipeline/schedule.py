@@ -14,25 +14,36 @@ is the wet-window length -- how long the cell holds water -- and it is the
 right thing to check: it is invariant to where on the circle the window sits,
 so it cannot land on the wrong side of an arbitrary cut point the way a raw
 median of `drain_phase` can. Measured on the shipped `winyah-bay` library,
-that window length has p50 = 0.523 in BOTH `neap_low` and `spring_high` -- a
-flat is wet for about half a cycle regardless of tidal range, which is the
-physically expected, stable answer.
+that window length has p50 = 0.523 in all nine shipped regimes -- a flat is
+wet for about half a cycle regardless of tidal range, which is the physically
+expected, stable answer. These figures, and the ones below, are reproducible
+via `backend/tools/schedule_stats.py <slug>`; do not take them on faith.
 
 An earlier check used `np.nanmedian(drain_phase)` directly and read 0.403 for
 `spring_high` against 0.765 for `neap_low`, which looked like an inversion.
 It wasn't: roughly a third of intertidal cells (33.8% at neap, 35.7% at
-spring) drain in phase 0.0-0.2, just past the low-water snapshot -- these are
-slow-draining high-marsh cells that hold water past low water, and that
-population grows with tidal range because a bigger tide wets more high marsh.
-With a third of the distribution sitting just past the wrap, an ordinary
-median of `drain_phase` alone lands on whichever side of 0.5 that cluster
-happens to fall, which is an artifact of the cut point, not of the physics.
+spring) drain in phase 0.0-0.2, just past the low-water snapshot -- most of
+these are slow-draining high-marsh cells that hold water past low water, and
+that population grows with tidal range because a bigger tide wets more high
+marsh. With a third of the distribution sitting just past the wrap, an
+ordinary median of `drain_phase` alone lands on whichever side of 0.5 that
+cluster happens to fall, which is an artifact of the cut point, not of the
+physics.
 
 Separately: ~7% of `spring_high`'s intertidal cells report `flood_phase ==
 0.0` exactly. This is a snapshot-resolution effect, not a logic error: at
 30-minute snapshots on a 12.42 h cycle, a cell whose previous-cycle tail is
 dry and which is wet at the phase-0 snapshot genuinely does flood within that
 bin. It is not evidence that flood and drain are miscomputed.
+
+These two populations are NOT independent: 2,697 of `spring_high`'s 4,037
+`flood_phase == 0.0` cells (66.8%) also fall in the 0.0-0.2 early-drain
+bucket above, and those 2,697 cells are 13.1% of that bucket's full 20,617.
+For that overlapping subset, `drain_phase` most likely reports the SAME
+residual puddle's own quick dry-out that gives it `flood_phase == 0.0`, not
+genuine slow-marsh drainage -- read it under the snapshot-resolution caveat,
+not as physics. The "slow-draining high marsh" explanation still stands for
+the other ~87% of the early-drain cluster, whose `flood_phase` is unremarkable.
 """
 
 import json
@@ -77,14 +88,21 @@ def schedule_from_depths(depths: list[np.ndarray], phases: list[float]) -> CellS
     flood_idx = goes_wet.argmax(axis=0)
 
     # Drain is the first dry transition AFTER the flood, walking the cycle
-    # forward from it -- NOT an independent first crossing from index 0.
-    # Some cells hold a shallow residual pool at the recorded low-water
-    # snapshot that finishes draining a phase or two later; that early dry-out
-    # is the first `goes_dry` in array order, but it is not the drain that
-    # closes the cell's wet window. Measured on the shipped library it affects
-    # 3.0% of intertidal cells at neap and 4.0% at spring, and it dragged
-    # spring_high's median drain phase to 0.403 -- into the flooding half --
-    # before flood and drain were paired.
+    # forward from it -- NOT an independent first crossing from index 0. Some
+    # cells hold a shallow residual pool at the recorded low-water snapshot
+    # that finishes draining a phase or two later; without pairing, that
+    # early dry-out (the first `goes_dry` in array order) could be picked
+    # over the drain that actually closes the wet window the flood opens.
+    # This is a correctness guard for cells with more than one wet/dry cycle
+    # in the record -- see test_schedule.py's residual-puddle regression
+    # test, which goes RED against the unpaired version. On the shipped
+    # library it changes ZERO cells: it neither caused nor
+    # fixed the 0.403 median-drain-phase reading discussed in this module's
+    # docstring above, which was an artifact of an unsafe verification
+    # statistic, not of this computation.
+    #
+    # offset = forward steps from the flood to a given index, cyclically;
+    # n + 1 marks non-`goes_dry` indices so they always lose the min() below.
     offsets = (np.arange(n)[:, None] - flood_idx[None, :]) % n
     ranked = np.where(goes_dry, offsets, n + 1)
     drain_off = ranked.min(axis=0)

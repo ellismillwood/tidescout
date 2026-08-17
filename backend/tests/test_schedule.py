@@ -55,16 +55,21 @@ def test_schedule_wraps_cyclically_across_the_end_of_the_series():
 
 
 def test_a_residual_puddle_at_low_water_does_not_become_the_drain_phase():
-    """Pins the bug found by Step 5 of Task 7: a shallow residual pool still
-    sitting in a cell at the recorded low-water snapshot -- matching real
-    ANUGA output, e.g. spring_high cell 373: 0.10 m at phase 0, dry within a
-    phase or two -- finishes draining long before the cell's real flood/drain
-    cycle happens. An independent 'first crossing from phase 0' search for
-    drain_phase picked that early puddle dry-out instead of the drain that
-    actually closes the wet window the flood opens, which dragged
-    spring_high's median drain phase to 0.403 -- into the flooding half.
+    """Pins a correctness guard found while investigating Task 7's Step 5: a
+    shallow residual pool still sitting in a cell at the recorded low-water
+    snapshot -- matching real ANUGA output, e.g. spring_high cell 373: 0.10 m
+    at phase 0, dry within a phase or two -- finishes draining long before the
+    cell's real flood/drain cycle happens. An independent 'first crossing from
+    phase 0' search for drain_phase would pick that early puddle dry-out
+    instead of the drain that actually closes the wet window the flood opens.
     drain_phase must be paired with its flood: the first dry crossing walking
     the cycle forward FROM the flood, not the first dry crossing from phase 0.
+
+    On the shipped library this pairing changes zero cells' drain_phase -- it
+    guards a multi-window pattern that turns out not to occur there, and is
+    NOT what caused the median-drain-phase reading investigated separately
+    (see schedule.py's module docstring: that was an unsafe statistic on a
+    circular quantity, not this).
 
     Here the cell is wet at phase 0 (the puddle), dry by phase 0.1, stays dry
     through the early rising half, floods for real at phase 0.4, and drains
