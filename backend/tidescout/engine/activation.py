@@ -62,6 +62,22 @@ def structure_fields(
     the inputs to every derivative below -- so the NaN it introduces
     propagates through the gradients and through `ambush_contrast`'s own
     NaN-aware max filter the same way out-of-domain NaN already does.
+
+    That propagation is NOT enough on its own for strain/okubo_w/convergence.
+    `np.gradient`'s central difference at index i is (a[i+1] - a[i-1]) / 2h --
+    it never reads a[i] itself. A dry cell that is only one cell wide along
+    the differencing axis therefore has its gradient bridged straight across
+    from its two wet neighbours, landing on a finite, plausible-looking value
+    instead of NaN (confirmed against a real run: an isolated dry cell on a
+    shear line returned strain=0.03, okubo_w=0.0009, convergence=-0.03, all
+    finite, while speed and ambush correctly read NaN there). Since those
+    three fields are MAX-reduced per feature, one such cell inside a 150 m
+    disc can set a feature's entire reported seam or convergence score from
+    unfishable dry land. `dry_g` is re-applied explicitly to each of them
+    after the tensor is computed, exactly as `ambush_contrast` already does
+    internally for its own NaN-aware max filter -- the two masking passes
+    (inputs, then outputs) close different gaps and neither one alone is
+    sufficient.
     """
     t = thresholds or StructureThresholds()
     ug = structure.to_grid(u, spec.flat_index, spec.shape)
@@ -78,9 +94,9 @@ def structure_fields(
     fields_2d = {
         "speed": speed_g,
         "ambush": structure.ambush_contrast(speed_g, spec.cell_m, t.ambush_radius_m),
-        "strain": structure.strain_rate(tensor),
-        "okubo_w": structure.okubo_weiss(tensor),
-        "convergence": structure.convergence(tensor),
+        "strain": np.where(dry_g, np.nan, structure.strain_rate(tensor)),
+        "okubo_w": np.where(dry_g, np.nan, structure.okubo_weiss(tensor)),
+        "convergence": np.where(dry_g, np.nan, structure.convergence(tensor)),
     }
     return {k: structure.from_grid(g, spec.flat_index) for k, g in fields_2d.items()}
 
