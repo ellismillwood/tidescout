@@ -1,3 +1,4 @@
+import hashlib
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -21,6 +22,32 @@ class Feature:
     type: str
     geometry: object
     attrs: dict = field(default_factory=dict)
+
+
+def feature_key(feature: Feature, quantise_m: float = 1.0) -> str:
+    """Stable identifier: type plus quantised centroid, hashed.
+
+    Feature ids were a per-type running counter, so `bar-78` became a different
+    bar whenever detection reran and the ordering shifted. Nothing persisted a
+    feature reference, so nothing broke -- but Phase 3 scoring and the frontend's
+    user pins both key off these, and a renumbering would silently reassign
+    every one of them.
+
+    The centroid is quantised to `quantise_m` (1 m, a tenth of the 10 m analysis
+    cell) before hashing. Detector output moves by centimetres between runs from
+    floating-point ordering alone; without quantisation that jitter would mint a
+    new id every rebuild, which is the exact bug this replaces. One metre is
+    coarse enough to absorb the jitter and far finer than the spacing between
+    two genuinely distinct features.
+
+    UTM metres in, so the quantisation is isotropic and in real units -- never
+    call this with lon/lat, where 1.0 would be ~100 km.
+    """
+    c = feature.geometry.centroid
+    qx = round(c.x / quantise_m)
+    qy = round(c.y / quantise_m)
+    digest = hashlib.sha256(f"{feature.type}|{qx}|{qy}".encode()).hexdigest()[:12]
+    return f"{feature.type}-{digest}"
 
 
 def orientation_deg(geometry) -> float:

@@ -1,8 +1,9 @@
 import numpy as np
-from shapely.geometry import Point
+from shapely.geometry import LineString, Point
 
 from tidescout.config import load_fishery
 from tidescout.engine import detect
+from tidescout.engine.detect import Feature, feature_key
 from tidescout.engine.terrain import slope_deg
 
 from . import synth
@@ -161,3 +162,39 @@ def test_bar_touching_array_edge_not_boundary_biased():
     feats = detect.detect_bars(z, _thresholds(), synth.CELL, synth.TRANSFORM)
     assert feats, "ridge touching the array edge must still be detected as a bar"
     assert all(f.attrs["pct_deep_boundary"] >= 0.99 for f in feats)
+
+
+def test_feature_key_is_stable_across_rebuilds():
+    a = Feature("dropoff", LineString([(100.0, 200.0), (140.0, 260.0)]))
+    b = Feature("dropoff", LineString([(100.0, 200.0), (140.0, 260.0)]))
+    assert feature_key(a) == feature_key(b)
+
+
+def test_feature_key_is_independent_of_detection_order():
+    """The bug this replaces: ids came from a running counter, so inserting one
+    feature renumbered every later feature of that type."""
+    feats = [
+        Feature("hole", Point(10.0, 20.0)),
+        Feature("hole", Point(30.0, 40.0)),
+    ]
+    keys_forward = [feature_key(f) for f in feats]
+    keys_reversed = [feature_key(f) for f in reversed(feats)]
+    assert set(keys_forward) == set(keys_reversed)
+
+
+def test_feature_key_separates_types_at_the_same_place():
+    p = Point(10.0, 20.0)
+    assert feature_key(Feature("hole", p)) != feature_key(Feature("bar", p))
+
+
+def test_feature_key_absorbs_sub_metre_detector_jitter():
+    """A re-run that moves a centroid by 20 cm must not mint a new feature."""
+    a = Feature("bar", Point(1000.0, 2000.0))
+    b = Feature("bar", Point(1000.2, 1999.8))
+    assert feature_key(a) == feature_key(b)
+
+
+def test_feature_key_distinguishes_features_a_few_metres_apart():
+    a = Feature("bar", Point(1000.0, 2000.0))
+    b = Feature("bar", Point(1010.0, 2000.0))
+    assert feature_key(a) != feature_key(b)

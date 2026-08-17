@@ -56,17 +56,18 @@ def build_features(slug: str, fishery: Fishery) -> Path:
         + detect.detect_bars(z, t, cell, transform)
         + detect.seed_jetties(fishery, lonlat_to_grid)
     )
-    counters: dict[str, int] = {}
     out = []
     for f in feats:
-        counters[f.type] = counters.get(f.type, 0) + 1
         props = {"type": f.type}
         for k, v in f.attrs.items():
             props[k] = round(v, 2) if isinstance(v, float) else v
         out.append(
             {
                 "type": "Feature",
-                "id": f"{f.type}-{counters[f.type]}",
+                # Hash of type + quantised UTM centroid, computed BEFORE
+                # reprojection: _to4326 would put the centroid in degrees,
+                # where a 1 m quantum is ~100 km.
+                "id": detect.feature_key(f),
                 "properties": props,
                 "geometry": mapping(_to4326(f.geometry, epsg)),
             }

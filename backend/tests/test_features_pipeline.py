@@ -51,7 +51,8 @@ def test_build_features_on_synthetic(tmp_path, monkeypatch):
 
 
 def test_feature_ids_unique_and_prefixed_by_type(tmp_path, monkeypatch):
-    """Interface contract from the brief: id is "<type>-<n>", 1-indexed per type."""
+    """Interface contract: id is "<type>-<12 hex chars>", a hash of the type
+    plus quantised centroid, stable across rebuilds."""
     z = synth.creek_mouth_dem()
     _fake_bathy(tmp_path, monkeypatch, z)
     f = load_fishery("winyah-bay")
@@ -82,6 +83,21 @@ def test_load_features_reads_back_what_build_wrote(tmp_path, monkeypatch):
     out = build_features("winyah-bay", f)
     on_disk = json.loads(out.read_text())
     assert load_features("winyah-bay") == on_disk
+
+
+def test_rebuilt_features_keep_their_ids(tmp_path, monkeypatch):
+    """The carryover's trap (c): `bar-78` renumbered on every rebuild."""
+    z = synth.creek_mouth_dem()
+    _fake_bathy(tmp_path, monkeypatch, z)
+    f = load_fishery("winyah-bay")
+
+    first = json.loads(build_features("winyah-bay", f).read_text())
+    second = json.loads(build_features("winyah-bay", f).read_text())
+
+    ids_first = sorted(feat["id"] for feat in first["features"])
+    ids_second = sorted(feat["id"] for feat in second["features"])
+    assert ids_first == ids_second
+    assert len(set(ids_first)) == len(ids_first), "feature ids must be unique"
 
 
 def _independent_to_utm(poly4326, epsg):
