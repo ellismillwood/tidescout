@@ -80,3 +80,41 @@ def strain_rate(t: GradientTensor) -> np.ndarray:
     stretching = t.du_dx - t.dv_dy
     shearing = t.du_dy + t.dv_dx
     return np.sqrt(stretching**2 + shearing**2)
+
+
+def vorticity(t: GradientTensor) -> np.ndarray:
+    """Local rotation rate, dv_dx - du_dy. Positive is anticlockwise."""
+    return t.dv_dx - t.du_dy
+
+
+def okubo_weiss(t: GradientTensor) -> np.ndarray:
+    """Strain-vs-rotation discriminant, W = S^2 - omega^2.
+
+    Strain rate alone cannot find an eddy -- it is exactly zero for solid-body
+    rotation, which is the whole point of the formula Task 3 chose. Vorticity
+    alone cannot find a seam, since a shear line and a vortex both spin. The
+    difference of their squares separates them, and it is the standard
+    oceanographic test:
+
+      W > 0  strain-dominated -- a seam: fast water sliding past slow
+      W < 0  rotation-dominated -- an eddy core, the lee behind a point or bar
+
+    Pure parallel shear sits exactly at W = 0, being half of each.
+    """
+    return strain_rate(t) ** 2 - vorticity(t) ** 2
+
+
+def classify_structure(t: GradientTensor, quiet: float = 1e-5) -> np.ndarray:
+    """+1 seam, -1 eddy, 0 quiet water. int8, grid-shaped.
+
+    `quiet` is a floor on |W| in s^-2, not a tuned threshold: uniform flow has
+    W = 0 up to floating-point noise, and without a dead band that noise would
+    sign every cell of a featureless channel at random. 1e-5 s^-2 corresponds
+    to velocity gradients around 3e-3 s^-1 -- roughly 0.06 m/s across a 20 m
+    cell, which is below what the mesh resolves anyway.
+    """
+    w = okubo_weiss(t)
+    out = np.zeros(w.shape, dtype="int8")
+    out[w > quiet] = 1
+    out[w < -quiet] = -1
+    return out

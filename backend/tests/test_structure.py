@@ -86,3 +86,50 @@ def test_strain_rate_is_galilean_invariant():
         structure.gradient_tensor(a * y + 0.7, np.full_like(y, -0.3), cell)
     )
     assert np.allclose(still[1:-1, 1:-1], drift[1:-1, 1:-1])
+
+
+def test_vorticity_recovers_twice_the_rotation_rate():
+    x, y, cell = _xy()
+    omega = 0.002
+    t = structure.gradient_tensor(-omega * y, omega * x, cell)
+    assert np.allclose(structure.vorticity(t)[1:-1, 1:-1], 2 * omega)
+
+
+def test_okubo_weiss_is_negative_inside_a_rotating_eddy():
+    """The signal Task 3's strain rate is blind to, by construction."""
+    x, y, cell = _xy()
+    omega = 0.002
+    t = structure.gradient_tensor(-omega * y, omega * x, cell)
+    w = structure.okubo_weiss(t)[1:-1, 1:-1]
+    assert np.all(w < 0)
+    assert np.allclose(w, -((2 * omega) ** 2))
+
+
+def test_okubo_weiss_is_positive_in_a_pure_shear_seam():
+    x, y, cell = _xy()
+    a = 0.004
+    t = structure.gradient_tensor(a * y, np.zeros_like(y), cell)
+    # Pure shear is half strain, half rotation: S = a, omega = -a, so W = 0.
+    # Tilting it toward stretching must push W positive.
+    w = structure.okubo_weiss(structure.gradient_tensor(a * x, -a * y, cell))[1:-1, 1:-1]
+    assert np.all(w > 0)
+    assert np.allclose(structure.okubo_weiss(t)[1:-1, 1:-1], 0.0, atol=1e-12)
+
+
+def test_classify_structure_labels_eddy_seam_and_quiet_water():
+    x, y, cell = _xy()
+    eddy = structure.gradient_tensor(-0.002 * y, 0.002 * x, cell)
+    seam = structure.gradient_tensor(0.004 * x, -0.004 * y, cell)
+    still = structure.gradient_tensor(np.full_like(x, 0.3), np.zeros_like(x), cell)
+
+    assert np.all(structure.classify_structure(eddy)[1:-1, 1:-1] == -1)
+    assert np.all(structure.classify_structure(seam)[1:-1, 1:-1] == 1)
+    assert np.all(structure.classify_structure(still)[1:-1, 1:-1] == 0)
+
+
+def test_classify_structure_calls_uniform_flow_quiet_not_seam():
+    """Water moving fast in a straight line holds no fish. Without the quiet
+    band, floating-point noise in a uniform field would sign W arbitrarily."""
+    x, y, cell = _xy()
+    t = structure.gradient_tensor(np.full_like(x, 1.2), np.full_like(x, -0.4), cell)
+    assert np.all(structure.classify_structure(t)[1:-1, 1:-1] == 0)
