@@ -1,0 +1,54 @@
+"""Flood/drain timing from a synthetic depth series.
+
+Phase 0 is LOW water here -- spin-up is 0.4831 of a cycle -- so a flat that
+floods on the rising half floods in phase 0.0-0.5. Getting that backwards
+inverts every flat in the bay, so these fixtures pin it explicitly.
+"""
+
+import numpy as np
+import pytest
+
+from tidescout.pipeline import schedule
+
+
+def _series(depths_by_phase):
+    """depths_by_phase: (n_phases, n_cells) -> the shape load_state returns."""
+    return [np.asarray(row, dtype="float32") for row in depths_by_phase]
+
+
+def test_wet_fraction_counts_the_share_of_the_cycle_a_cell_holds_water():
+    depths = _series([[1.0, 0.0], [1.0, 0.0], [1.0, 0.5], [1.0, 0.0]])
+    s = schedule.schedule_from_depths(depths, phases=[0.0, 0.25, 0.5, 0.75])
+    assert s.wet_fraction[0] == pytest.approx(1.0)
+    assert s.wet_fraction[1] == pytest.approx(0.25)
+
+
+def test_flood_phase_is_when_the_cell_first_goes_wet_on_the_rising_half():
+    """Cell floods at phase 0.25 (rising) and drains at 0.75 (falling)."""
+    depths = _series([[0.0], [0.4], [0.6], [0.0]])
+    s = schedule.schedule_from_depths(depths, phases=[0.0, 0.25, 0.5, 0.75])
+    assert s.flood_phase[0] == pytest.approx(0.25)
+    assert s.drain_phase[0] == pytest.approx(0.75)
+
+
+def test_always_wet_and_never_wet_cells_have_no_schedule():
+    """A channel has no flood time and a marsh hummock has no drain time.
+    NaN says 'this question does not apply here' -- 0.0 would be a lie that
+    reads as 'floods at low water'."""
+    depths = _series([[2.0, 0.0], [2.0, 0.0], [2.0, 0.0], [2.0, 0.0]])
+    s = schedule.schedule_from_depths(depths, phases=[0.0, 0.25, 0.5, 0.75])
+    assert s.wet_fraction[0] == pytest.approx(1.0)
+    assert np.isnan(s.flood_phase[0]) and np.isnan(s.drain_phase[0])
+    assert s.wet_fraction[1] == pytest.approx(0.0)
+    assert np.isnan(s.flood_phase[1]) and np.isnan(s.drain_phase[1])
+
+
+def test_schedule_wraps_cyclically_across_the_end_of_the_series():
+    """A cell wet at the end and start of the record floods before phase 0.
+    Treating the series as a line rather than a cycle would report it as
+    never flooding."""
+    depths = _series([[0.5], [0.0], [0.0], [0.5]])
+    s = schedule.schedule_from_depths(depths, phases=[0.0, 0.25, 0.5, 0.75])
+    assert s.flood_phase[0] == pytest.approx(0.75)
+    assert s.drain_phase[0] == pytest.approx(0.25)
+    assert s.wet_fraction[0] == pytest.approx(0.5)
