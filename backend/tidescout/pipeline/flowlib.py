@@ -29,6 +29,10 @@ class GridSpec:
     flat_index: np.ndarray  # indices into the flattened grid that are in-domain
     xs: np.ndarray  # in-domain cell-centre eastings
     ys: np.ndarray  # in-domain cell-centre northings
+    # EPSG code of xs/ys, e.g. "EPSG:26917". Defaulted (not required) so the
+    # existing positional/keyword constructions in tests that predate this
+    # field keep working; production always sets it via `grid_spec`.
+    crs: str = ""
 
 
 def grid_spec(slug: str, fishery: Fishery) -> GridSpec:
@@ -69,6 +73,7 @@ def grid_spec(slug: str, fishery: Fishery) -> GridSpec:
         np.ravel_multi_index((rows, cols), mask.shape),
         xs,
         ys,
+        crs=f"EPSG:{fishery.bathymetry.epsg}",
     )
 
 
