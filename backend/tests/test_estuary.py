@@ -80,3 +80,52 @@ def test_diagonal_steps_cost_more_than_orthogonal_ones():
 
     d = estuary.along_estuary_km(spec, seed_mask=seeds)
     assert np.nanmax(d) == pytest.approx(9 * 100.0 * np.sqrt(2) / 1000.0, rel=0.02)
+
+
+# A polygon covering the whole 20x20 grid (spans 0-2 km on each axis in the
+# _Spec fixture's transform), so `ocean_seed_mask`'s polygon-containment test
+# always passes -- these two tests isolate the edge and depth criteria on
+# top of it.
+_WHOLE_GRID_POLYGON_KM = [(0.0, 0.0), (0.0, 2.0), (2.0, 2.0), (2.0, 0.0)]
+
+
+def test_ocean_seed_mask_excludes_interior_water_inside_the_polygon():
+    """Polygon-containment alone is not enough: a block of open, deep water
+    entirely inside the authored polygon is not itself 'the sea' unless it
+    also touches the domain's outer edge. This is the defect that made
+    Georgetown Lighthouse read 0.00 km -- containment alone swallowed
+    interior estuary, not just the true mouth."""
+    mask = np.zeros((20, 20), bool)
+    mask[5:10, 5:10] = True  # a solid 5x5 block of open water
+    spec = _Spec(mask)
+    rows, cols = np.unravel_index(spec.flat_index, spec.shape)
+    bed_elev_m = np.full(spec.flat_index.size, -5.0)  # uniformly deep
+
+    seeds = estuary.ocean_seed_mask(
+        spec, _WHOLE_GRID_POLYGON_KM, bed_elev_m, ocean_max_z_m=-2.0
+    )
+
+    interior = (rows == 7) & (cols == 7)  # centre cell, all 4 neighbours wet
+    edge = (rows == 5) & (cols == 7)  # top row of the block, has a dry neighbour
+    assert not seeds[interior][0], "interior water must not seed even inside the polygon"
+    assert seeds[edge][0], "a deep edge cell inside the polygon must seed"
+
+
+def test_ocean_seed_mask_excludes_shallow_edge_cells_inside_the_polygon():
+    """Depth is also necessary, not just edge-and-polygon: a shallow edge
+    cell is a shoreline touch point, not open sea, even where the domain
+    boundary and the polygon agree."""
+    mask = np.zeros((20, 20), bool)
+    mask[10, 5:10] = True  # a channel one cell wide -- every cell is an edge cell
+    spec = _Spec(mask)
+    rows, cols = np.unravel_index(spec.flat_index, spec.shape)
+    bed_elev_m = np.where(cols <= 6, -5.0, -1.0)  # west half deep, east half shallow
+
+    seeds = estuary.ocean_seed_mask(
+        spec, _WHOLE_GRID_POLYGON_KM, bed_elev_m, ocean_max_z_m=-2.0
+    )
+
+    deep_edge = cols == 5
+    shallow_edge = cols == 9
+    assert seeds[deep_edge][0], "a deep edge cell inside the polygon must seed"
+    assert not seeds[shallow_edge][0], "a shallow edge cell must not seed even on the edge"

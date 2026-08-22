@@ -16,6 +16,7 @@ from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import dijkstra
 from shapely.geometry import Point, Polygon
 
+from tidescout.engine.structure import from_grid, to_grid
 from tidescout.models import Fishery
 from tidescout.paths import fishery_data_dir
 
@@ -70,13 +71,54 @@ def along_estuary_km(spec, seed_mask: np.ndarray) -> np.ndarray:
     return d
 
 
-def ocean_seed_mask(spec, ocean_boundary_utm_km: list) -> np.ndarray:
-    """In-domain cells lying inside the authored ocean polygon: the sea itself.
+def _domain_edge_mask(spec) -> np.ndarray:
+    """In-domain cells with at least one 4-neighbour outside the domain.
 
-    Reuses `model_domain.ocean_boundary_utm_km` rather than inferring the mouth
-    from depth. Plan 3 established twice over that depth cannot classify
-    geography -- it put the ocean tide 40 km up the Pee Dee -- and the seaward
-    opening is already authored, so there is nothing to infer.
+    The domain's outer boundary, one cell wide. Scatters the flat mask to 2-D
+    and back via `engine.structure.to_grid`/`from_grid` -- the established
+    bridge for any neighbour computation over the library's masked layout
+    (see that module's docstring). Needed by `ocean_seed_mask`: an authored
+    polygon says which AREA the sea may occupy, not which cells are actually
+    the boundary between that area and open water.
+    """
+    domain = to_grid(np.ones(spec.flat_index.size), spec.flat_index, spec.shape, fill=0.0) > 0.5
+    padded = np.pad(domain, 1, constant_values=False)
+    interior = padded[:-2, 1:-1] & padded[2:, 1:-1] & padded[1:-1, :-2] & padded[1:-1, 2:]
+    edge = domain & ~interior
+    return from_grid(edge, spec.flat_index)
+
+
+def ocean_seed_mask(
+    spec,
+    ocean_boundary_utm_km: list,
+    bed_elev_m: np.ndarray,
+    ocean_max_z_m: float,
+) -> np.ndarray:
+    """In-domain cells that are the sea itself: on the domain's outer edge,
+    below `ocean_max_z_m`, and inside the authored ocean polygon.
+
+    All three, matching `mesh.classify_boundary`'s own criterion exactly --
+    "a segment whose midpoint is deep AND inside that polygon is the true
+    seaward opening" -- carried over from ring segments to library cells.
+    `ocean_boundary_utm_km` alone is NOT a "this area is the sea" test: it is
+    `classify_boundary`'s ring-segment filter, authored generously (a box
+    spanning much of the bay's mouth) so a HANDFUL of boundary-ring midpoints
+    near the true coast fall inside it regardless of exactly how the
+    shoreline was traced -- 10 of Winyah's 605 ring segments pass it. Testing
+    polygon-containment alone against every in-domain CELL instead of every
+    boundary SEGMENT made 40.5% of this fishery's domain (238,106 of 587,325
+    cells) read as "at the sea": Georgetown Lighthouse, a few km up-estuary
+    by every other measure, landed at 0.00 km, tied with the jetty itself.
+    Restricting to edge cells that are also deep reproduces
+    `classify_boundary`'s real criterion and independently matches Phase 1's
+    measurement of the same opening: 1,323 such cells at 20 m is 26.5 km of
+    coastline, against the 31.20 km Phase 1's ring-segment classifier
+    measured for Winyah's seaward boundary by a completely different method.
+
+    `bed_elev_m` is bed elevation in metres, one value per `spec.flat_index`
+    cell, sampled the same way `flowlib.grid_spec` decimates the domain mask
+    (see `_bed_elevation_m`) so "in domain" and "how deep" agree pixel for
+    pixel.
     """
     if not ocean_boundary_utm_km:
         raise ValueError(
@@ -86,18 +128,42 @@ def ocean_seed_mask(spec, ocean_boundary_utm_km: list) -> np.ndarray:
     poly = Polygon([(x * 1000.0, y * 1000.0) for x, y in ocean_boundary_utm_km])
     if not poly.is_valid:
         raise ValueError("ocean_boundary_utm_km is not a valid polygon")
-    return np.fromiter(
+    inside = np.fromiter(
         (poly.contains(Point(x, y)) for x, y in zip(spec.xs, spec.ys, strict=True)),
         dtype=bool,
         count=spec.xs.size,
     )
+    deep = np.isfinite(bed_elev_m) & (bed_elev_m < ocean_max_z_m)
+    return inside & _domain_edge_mask(spec) & deep
+
+
+def _bed_elevation_m(slug: str, fishery: Fishery, spec) -> np.ndarray:
+    """Bed elevation at each library cell, one value per `spec.flat_index`.
+
+    Decimated exactly the way `flowlib.grid_spec` decimates the domain mask
+    -- same `z[::step, ::step]`, same `step` -- so a cell's elevation here is
+    read from the identical source pixel that decided whether the mask put
+    that cell in-domain. A nearest-pixel-centre lookup via the inverted
+    affine transform was tried and rejected: near a decimation boundary it
+    can pick a different source pixel than the mask used, silently
+    misaligning "in domain" from "how deep" by up to half a library cell.
+    """
+    from tidescout.pipeline.bathy import read_bathy
+
+    z, _, _ = read_bathy(slug)
+    step = int(round(fishery.anuga.library_cell_m / fishery.bathymetry.cell_m))
+    z_lib = z[::step, ::step]
+    rows, cols = np.unravel_index(spec.flat_index, spec.shape)
+    return z_lib[rows, cols].astype("float64")
 
 
 def build_distance_field(slug: str, fishery: Fishery) -> Path:
     from tidescout.pipeline.flowlib import grid_spec
 
     spec = grid_spec(slug, fishery)
-    seeds = ocean_seed_mask(spec, fishery.model_domain.ocean_boundary_utm_km)
+    md = fishery.model_domain
+    bed_elev_m = _bed_elevation_m(slug, fishery, spec)
+    seeds = ocean_seed_mask(spec, md.ocean_boundary_utm_km, bed_elev_m, md.ocean_max_z_m)
     d = along_estuary_km(spec, seeds)
     path = fishery_data_dir(slug) / "estuary_km.npy"
     np.save(path, d.astype("float32"))
