@@ -129,3 +129,23 @@ def test_ocean_seed_mask_excludes_shallow_edge_cells_inside_the_polygon():
     shallow_edge = cols == 9
     assert seeds[deep_edge][0], "a deep edge cell inside the polygon must seed"
     assert not seeds[shallow_edge][0], "a shallow edge cell must not seed even on the edge"
+
+
+def test_ocean_seed_mask_keeps_only_the_largest_contiguous_run():
+    """Edge-and-deep-and-inside-the-polygon still admits scattered shoreline
+    fragments alongside the true mouth -- a small detached run must not
+    seed even though it individually passes every other test, because the
+    real seaward opening is one contiguous stretch of coast, not several."""
+    mask = np.zeros((20, 20), bool)
+    mask[2, 0:15] = True  # a long 15-cell run: the true mouth
+    mask[15, 0:4] = True  # a separate 4-cell run, far away: a shoreline fragment
+    spec = _Spec(mask)
+    rows, _ = np.unravel_index(spec.flat_index, spec.shape)
+    bed_elev_m = np.full(spec.flat_index.size, -5.0)  # uniformly deep
+
+    seeds = estuary.ocean_seed_mask(
+        spec, _WHOLE_GRID_POLYGON_KM, bed_elev_m, ocean_max_z_m=-2.0
+    )
+
+    assert seeds[rows == 2].all(), "the large run is the true mouth and must all seed"
+    assert not seeds[rows == 15].any(), "the small detached run must not seed"

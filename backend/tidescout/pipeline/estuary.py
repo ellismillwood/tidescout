@@ -12,6 +12,7 @@ Built once per fishery. The result is static -- geometry, not state.
 from pathlib import Path
 
 import numpy as np
+from scipy import ndimage
 from scipy.sparse import coo_matrix
 from scipy.sparse.csgraph import dijkstra
 from shapely.geometry import Point, Polygon
@@ -88,32 +89,71 @@ def _domain_edge_mask(spec) -> np.ndarray:
     return from_grid(edge, spec.flat_index)
 
 
+def _largest_component(mask: np.ndarray, spec) -> np.ndarray:
+    """Keep only the largest 8-connected component of a 1-D masked boolean
+    array; drop everything else.
+
+    The true seaward opening is contiguous by construction -- one stretch of
+    coastline. Edge-and-deep-and-inside-the-polygon does not by itself
+    guarantee that: a shoreline fragment deep inside the bay, or an isolated
+    deep pocket that happens to touch the domain edge inside the polygon,
+    passes all three tests without being part of the mouth. On Winyah at
+    `ocean_max_z_m = -2.0` the raw edge-and-deep-and-inside set fragments
+    into 8 separate 8-connected components; the largest holds 950 of 1,317
+    candidate cells, and the other ~370 are scattered noise -- including the
+    single near-threshold cell 1.14 km from Georgetown Lighthouse that made
+    its distance swing by 5 km across a physically-arbitrary choice of
+    `ocean_max_z_m` (0.50 to 5.51 km over -1.6 to -3.0 m). Restricted to the
+    largest component alone, that swing disappears: Georgetown holds at
+    5.51 km and North Jetty at 2.58 km across the same sweep.
+
+    ASSUMES exactly one seaward opening. Winyah Bay has one. A fishery with
+    two genuinely disconnected true mouths would silently lose the smaller
+    one to this filter -- worth checking explicitly the first time this runs
+    against a new fishery, since the Phase 2 stamp-out list (Charleston,
+    Awendaw, Murrells Inlet) means new fisheries arrive here unauthored, and
+    nothing else in this module would catch a dropped second mouth.
+    """
+    grid = to_grid(mask.astype("float64"), spec.flat_index, spec.shape, fill=0.0) > 0.5
+    labels, n = ndimage.label(grid, structure=np.ones((3, 3), dtype=bool))
+    if n == 0:
+        return mask
+    counts = np.bincount(labels.ravel())
+    counts[0] = 0  # background is never the "largest component"
+    largest = int(np.argmax(counts))
+    return from_grid(labels == largest, spec.flat_index)
+
+
 def ocean_seed_mask(
     spec,
     ocean_boundary_utm_km: list,
     bed_elev_m: np.ndarray,
     ocean_max_z_m: float,
 ) -> np.ndarray:
-    """In-domain cells that are the sea itself: on the domain's outer edge,
-    below `ocean_max_z_m`, and inside the authored ocean polygon.
+    """In-domain cells that are the sea itself: the largest contiguous run of
+    cells that are on the domain's outer edge, below `ocean_max_z_m`, AND
+    inside the authored ocean polygon.
 
-    All three, matching `mesh.classify_boundary`'s own criterion exactly --
-    "a segment whose midpoint is deep AND inside that polygon is the true
-    seaward opening" -- carried over from ring segments to library cells.
-    `ocean_boundary_utm_km` alone is NOT a "this area is the sea" test: it is
-    `classify_boundary`'s ring-segment filter, authored generously (a box
-    spanning much of the bay's mouth) so a HANDFUL of boundary-ring midpoints
-    near the true coast fall inside it regardless of exactly how the
-    shoreline was traced -- 10 of Winyah's 605 ring segments pass it. Testing
-    polygon-containment alone against every in-domain CELL instead of every
-    boundary SEGMENT made 40.5% of this fishery's domain (238,106 of 587,325
-    cells) read as "at the sea": Georgetown Lighthouse, a few km up-estuary
-    by every other measure, landed at 0.00 km, tied with the jetty itself.
-    Restricting to edge cells that are also deep reproduces
-    `classify_boundary`'s real criterion and independently matches Phase 1's
-    measurement of the same opening: 1,323 such cells at 20 m is 26.5 km of
-    coastline, against the 31.20 km Phase 1's ring-segment classifier
-    measured for Winyah's seaward boundary by a completely different method.
+    The edge/depth/polygon triple matches `mesh.classify_boundary`'s own
+    criterion exactly -- "a segment whose midpoint is deep AND inside that
+    polygon is the true seaward opening" -- carried over from ring segments
+    to library cells. `ocean_boundary_utm_km` alone is NOT a "this area is
+    the sea" test: it is `classify_boundary`'s ring-segment filter, authored
+    generously (a box spanning much of the bay's mouth) so a HANDFUL of
+    boundary-ring midpoints near the true coast fall inside it regardless of
+    exactly how the shoreline was traced -- 10 of Winyah's 605 ring segments
+    pass it. Testing polygon-containment alone against every in-domain CELL
+    instead of every boundary SEGMENT made 40.5% of this fishery's domain
+    (238,106 of 587,325 cells) read as "at the sea": Georgetown Lighthouse,
+    a few km up-estuary by every other measure, landed at 0.00 km, tied with
+    the jetty itself.
+
+    The edge/depth/polygon triple alone is still not enough: it passes
+    scattered shoreline fragments deep inside the bay along with the true
+    mouth, and which fragments pass is sensitive to exactly where
+    `ocean_max_z_m` falls -- see `_largest_component`, which this function
+    applies as a final step to keep only the one contiguous run that is
+    actually the coast.
 
     `bed_elev_m` is bed elevation in metres, one value per `spec.flat_index`
     cell, sampled the same way `flowlib.grid_spec` decimates the domain mask
@@ -134,7 +174,8 @@ def ocean_seed_mask(
         count=spec.xs.size,
     )
     deep = np.isfinite(bed_elev_m) & (bed_elev_m < ocean_max_z_m)
-    return inside & _domain_edge_mask(spec) & deep
+    candidates = inside & _domain_edge_mask(spec) & deep
+    return _largest_component(candidates, spec)
 
 
 def _bed_elevation_m(slug: str, fishery: Fishery, spec) -> np.ndarray:
