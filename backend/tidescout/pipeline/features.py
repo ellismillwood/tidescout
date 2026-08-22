@@ -21,6 +21,25 @@ from tidescout.pipeline.oysters import (
     reef_density_within,
 )
 
+# Float properties are rounded before they are written, to keep the GeoJSON
+# compact and to stop float64 noise in the last digits from churning the file
+# between rebuilds. Two decimals suits every property measured in metres or
+# square metres; `oyster_density` is the exception and needs its own entry.
+#
+# `oyster_density` is a DIMENSIONLESS FRACTION of the buffered search area
+# (see `oysters.reef_density_within`), with a real range of roughly
+# 0.001-0.14 on the shipped inventory. At 2 dp, 25 of the 146 reef-carrying
+# features (17%) rounded to exactly 0.0 -- indistinguishable from "no reef at
+# all" -- and the whole 2,162-feature inventory held only 13 distinct values.
+# The field exists solely so Phase 3 can normalise away the extent confound in
+# `oyster_area_m2` (oysters.py's module docstring has the full argument), and
+# it cannot do that job at 2 dp. Six decimals resolves ~0.02 m2 of reef inside
+# a Point feature's 75 m buffer -- far finer than the SCDNR layer's own 24 m2
+# median reef polygon -- while still costing at most six characters per
+# feature in the file.
+_PROP_DECIMALS = {"oyster_density": 6}
+_DEFAULT_DECIMALS = 2
+
 
 def _to4326(geom, epsg: int):
     src = f"EPSG:{epsg}"
@@ -102,7 +121,7 @@ def build_features(slug: str, fishery: Fishery) -> Path:
                 # null here.
                 props[k] = None
             elif isinstance(v, float):
-                props[k] = round(v, 2)
+                props[k] = round(v, _PROP_DECIMALS.get(k, _DEFAULT_DECIMALS))
             else:
                 props[k] = v
         out.append(

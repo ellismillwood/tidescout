@@ -132,6 +132,57 @@ def test_build_features_attaches_positive_oyster_area_when_reef_layer_present(
         assert feat["properties"]["oyster_nearest_m"] == pytest.approx(0.0)
 
 
+def test_a_small_oyster_density_survives_the_props_rounding(tmp_path, monkeypatch):
+    """The regression this pins: `oyster_density` used to go through the same
+    blanket 2 dp rounding as every other float property, and 25 of the 146
+    reef-carrying features in the real inventory (17%) landed on exactly 0.0 --
+    "no reef at all" -- while the whole 2,162-feature inventory collapsed to 13
+    distinct values. The field exists only so Phase 3 can divide out the extent
+    confound in `oyster_area_m2`; a value that reads 0.0 for a feature with reef
+    on it cannot do that.
+
+    A ~2 m reef square on each jetty vertex gives a density far below 0.005, so
+    `round(density, 2)` is exactly 0.0 and the assertion below fails outright
+    if the exemption is removed."""
+    from tidescout import paths
+
+    z = synth.creek_mouth_dem()
+    _fake_bathy(tmp_path, monkeypatch, z)
+    f = load_fishery("winyah-bay")
+
+    def _tiny_square(clon, clat, side_deg=0.00002):
+        h = side_deg / 2.0
+        return Polygon(
+            [
+                (clon - h, clat - h),
+                (clon + h, clat - h),
+                (clon + h, clat + h),
+                (clon - h, clat + h),
+            ]
+        )
+
+    (paths.fishery_data_dir("winyah-bay") / "oyster_reefs.geojson").write_text(
+        json.dumps({
+            "type": "FeatureCollection",
+            "features": [
+                {"type": "Feature", "properties": {},
+                 "geometry": mapping(_tiny_square(*jetty.coords[0]))}
+                for jetty in f.jetties
+            ],
+        })
+    )
+
+    build_features("winyah-bay", f)
+    fc = load_features("winyah-bay")
+    jetties = [feat for feat in fc["features"] if feat["properties"]["type"] == "jetty"]
+    assert jetties
+    for feat in jetties:
+        density = feat["properties"]["oyster_density"]
+        assert feat["properties"]["oyster_area_m2"] > 0.0
+        assert round(density, 2) == 0.0, "fixture must sit below the 2 dp floor"
+        assert density > 0.0, "2 dp rounding would have erased this reef entirely"
+
+
 def test_feature_ids_unique_and_prefixed_by_type(tmp_path, monkeypatch):
     """Interface contract: id is "<type>-<12 hex chars>", a hash of the type
     plus quantised centroid, stable across rebuilds."""
@@ -146,15 +197,26 @@ def test_feature_ids_unique_and_prefixed_by_type(tmp_path, monkeypatch):
         assert feat["id"].rsplit("-", 1)[0] == feat["properties"]["type"]
 
 
-def test_build_features_rounds_float_attrs_to_2dp(tmp_path, monkeypatch):
+def test_build_features_rounds_float_attrs_to_2dp_except_oyster_density(tmp_path, monkeypatch):
+    """Metre and square-metre properties round to 2 dp; `oyster_density` is
+    exempt because it is a dimensionless fraction whose whole useful range
+    (~0.001-0.14 on the real inventory) sits inside the first two decimals --
+    see `features._PROP_DECIMALS`. The exemption is asserted here rather than
+    contradicted: the previous version of this test required *every* float to
+    equal round(v, 2), which pinned the destruction of `oyster_density` as
+    intended behaviour."""
     z = synth.creek_mouth_dem()
     _fake_bathy(tmp_path, monkeypatch, z)
     f = load_fishery("winyah-bay")
     build_features("winyah-bay", f)
     fc = load_features("winyah-bay")
     for feat in fc["features"]:
-        for v in feat["properties"].values():
-            if isinstance(v, float):
+        for k, v in feat["properties"].items():
+            if not isinstance(v, float):
+                continue
+            if k == "oyster_density":
+                assert v == round(v, 6)
+            else:
                 assert v == round(v, 2)
 
 
