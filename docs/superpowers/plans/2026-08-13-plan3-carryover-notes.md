@@ -265,13 +265,36 @@ unthresholded `nanmin(okubo_w)` goes negative for **520 of the 526** features (9
 in the cycle — because `okubo_w` scatters within a few units of zero as ordinary floating-point/
 dead-band noise in slack or otherwise featureless water, the same noise `classify_structure`'s
 `quiet_w` dead band exists to absorb at the cell level (see that function's own docstring). Only the
-104-feature eddy-containing subset above reflects genuine rotation-dominated content. **This is a
-Phase 2 opening item, not something Task 11 adjusted**: a correct per-feature eddy field needs
-`nanmin(okubo_w)` compared against `-quiet_w`, not against zero — the same dead band already applied
-at the cell level, reapplied at the feature level — alongside the existing max-reduced `okubo_w`,
-which remains the right reducer for detecting seams. Building an unthresholded `nanmin` field alone
-would report "most features are eddies" just as wrongly as the current `nanmax` field reports "none
-are."
+104-feature eddy-containing subset above reflects genuine rotation-dominated content.
+
+> **SHIPPED — this is no longer a Phase 3 item.** The final whole-branch review reversed the
+> deferral: `classify_structure` had zero production callers even though the plan's Task 4 interface
+> block specifies "Task 9 samples both `okubo_weiss` and `classify_structure` at feature geometry",
+> and Phase 3's plan already constructs a test `FeatureMetrics(okubo_w=-1e-5)` that production cannot
+> produce. So `engine/activation.py` now returns an **`eddy_share`** field from `structure_fields`
+> and carries it on `FeatureMetrics`: a per-cell 0/1 indicator from
+> `classify_structure(tensor, quiet_w)`, mean-reduced per feature. That IS the `-quiet_w` dead band
+> reapplied at the feature level, so the prescription above is implemented, not outstanding.
+> `okubo_w` is unchanged and remains the max-reduced SEAM channel.
+>
+> **Phase 3 consumes `eddy_share`, not a negative `okubo_w`.** The `_metrics` helper in
+> `2026-08-16-04-phase3-bite-score.md` (around line 1074) predates the field and will need it added;
+> `okubo_w = -1e-5` is not a value production produces.
+>
+> Measured after the change, same library and same 26 phases: **106 of the 527** evaluated features
+> record `eddy_share > 0` at some phase — the same population the 104-of-526 count above identified,
+> shifted by the sampling-anchor fix described below. Peak `eddy_share` anywhere in the inventory is
+> 0.25. The reducer is the only thing that changed: of 13,614 finite per-feature `okubo_w` samples,
+> still zero ever cross `-quiet_w`.
+>
+> **Denominator, stated once so it cannot be misread again:** `eddy_share` is eddy cells over the
+> disc's **WET** cells, because a dry cell carries ANUGA's u = v = 0.0 and is not slack water — it is
+> not water. The known-spot table above uses eddy-over-**DISC** (dry cells scoring False), which is a
+> different statistic wherever a disc is partly dry. They agree on a fully wet disc. Georgetown's
+> peak is 7.6% over the disc and 8.6% over its wet cells. `creek_mouth-97b7b83992ef` at phase 24, the
+> example an earlier fix round retracted for calling 9/42 wet cells a disc fraction, reads
+> `eddy_share = 0.214` under the shipped definition — the 21.4% figure was the right number wearing
+> the wrong label.
 
 Sanity check on jetty ranking (Step 2, `tidescout flow structure winyah-bay --regime mean_med`)
 passed cleanly: both `jetty`-type features rank in the top 10% of the 531 in-domain features by
@@ -298,8 +321,71 @@ physically expected:
 
 **Oyster reef attachment (Task 10, for completeness).** 146 of 2,162 features (6.75%) carry mapped
 SC oyster reef within 75 m — a clear minority, as expected (neither "nearly all" nor "none").
-Reef *density* (`reef_area_m2_within / feature_area_m2`) ranks the inventory differently from raw
+Reef *density* (`oyster_density` = `reef_area_m2_within / buffer_area_m2`, where the denominator is
+the area of the feature's own 75 m buffer — **not** the feature's own area, which is what an earlier
+version of this line said. That would be undefined for 136 of the 2,162 features: the 134 creek
+mouths are Points and the 2 jetties are LineStrings, all with zero area. `oysters.py:106-107` states
+the real formula correctly; this line did not) ranks the inventory differently from raw
 reef *area*: the area-ranked top 5 is entirely large flats/holes (17,000–89,000 m²) with modest
 density (0.01–0.07) that merely graze reef at their edges, while the density-ranked top 5 is a
 different set of much smaller holes/flats (3,000–7,000 m²) at meaningfully higher density
 (0.09–0.14) — area alone is confounded by feature footprint, and density is the scale-free signal.
+
+### What the final fix wave moved in the figures above
+
+The merge-gate fix wave changed two things that feed these numbers, so the figures above are stated
+as they were measured at Task 11 and are **not** rewritten in place. This block is the before/after.
+
+1. **The sampling anchor.** `sample_features` used to centre each feature's 150 m disc on an
+   unweighted mean of its exterior ring's vertices (counting the duplicated closing vertex twice),
+   while `detect.feature_key` hashes the geometry's true centroid — so a feature's id and its metrics
+   described different places, by a median 7.6 m and up to 726 m. Both are now the centroid.
+2. **`oyster_density` precision.** It was rounded to 2 dp with every other float property, which put
+   25 of the 146 reef-carrying features at exactly 0.0 and left the inventory with 13 distinct
+   values. It is now written at 6 dp; nothing else about the computation changed.
+
+**The known-spot table did NOT move.** Re-measured after both fixes, over the same regime and the
+same 26 phases: Georgetown Lighthouse 0.868 max ambush / 7.6% max eddy share / 19 of 26 phases /
+9.7% max seam; North Jetty 0.454 / 0.0% / 0 of 26 / 32.6%; Mud Bay Cut 0.160 / 0.0% / 0 of 26 /
+0.0%. Identical to the digit. Known spots are sampled from their own lon/lat, not from feature
+geometry, so the anchor fix cannot reach them — and the Georgetown conclusion stands untouched.
+
+**What did move, all of it feature-level:**
+
+| figure | Task 11 | after the fix wave |
+|---|---|---|
+| features with any in-domain cell | 531 | 529 |
+| features with any finite `okubo_w` | 526 | 527 |
+| features ever containing an eddy cell | 104 (19.8%) | 106 (20.1%) |
+| median ambush, `jetty` | 0.556 | 0.464 |
+| median ambush, `hole` / `wall` / `bar` | 0.104 / 0.093 / 0.084 | 0.111 / 0.100 / 0.100 |
+| median ambush, `flat` | 0.037 | 0.034 |
+| jetty ranks by ambush | 7th and 47th of 531 | 23rd and 50th of 529 |
+| `oyster_density`-ranked top 5, reef area | 3,134–7,340 m² | 3,689–14,812 m² |
+
+`creek_mouth` (0.116) and `dropoff` (0.044) are unchanged, and the qualitative claims all survive:
+jetties still hold the highest median ambush of any type by a factor of four, both jetty features are
+still inside the top 10% (the cut is rank 52 of 529), and flats and dropoffs still sit last.
+
+The jetty median is the single largest move and it has a specific cause worth recording: North
+Jetty's LineString has five unevenly spaced vertices over 3.2 km, so its vertex mean sat **538.9 m**
+from its length-weighted centroid — the disc was being sampled most of a kilometre from the point its
+id names. Its ambush reads 0.720 under the old anchor and 0.536 under the new one. The other jetty's
+anchor moved 56.4 m and its ambush is unchanged at 0.392.
+
+Two features (`flat-2f450ef65593`, 27 cells, and `bar-6c7aacb7308d`, 3 cells) had their centroid fall
+outside the flow domain and now report `n_cells = 0`; both were marginal edge features. Of the 529
+evaluated under both anchors, the best-phase metric changed at all for 368 (`speed`), 101 (`ambush`),
+111 (`strain`), 113 (`okubo_w`) and 93 (`convergence`).
+
+The `oyster_density` top-5 change is a tie-breaking artifact, not a ranking change: at 2 dp the
+fourth and fifth places were tied at 0.09 and were ordered by file position. At full precision
+`flat-1387858bbedf` (0.092272) beats `hole-3584c46792e2`. The "0.09–0.14" band and the
+"large flats top the area ranking, small holes top the density ranking" conclusion both hold.
+
+**A third fix, `flood_phase`, has no figure above to move.** `sample_features` reduced it with an
+ordinary median of a circular quantity; it is now a circular mean. Of the 301 features carrying a
+finite `flood_phase`, 261 move at all, 19 by more than 0.05 of a cycle and 3 by more than 0.1. The
+largest is `flat-b6a1aec2d79d`, whose median read 0.0 — "floods exactly at low water" — for a cluster
+whose circular centre is 0.884, late on the ebb half.
+
