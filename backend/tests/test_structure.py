@@ -136,6 +136,35 @@ def test_classify_structure_calls_uniform_flow_quiet_not_seam():
     assert np.all(structure.classify_structure(t)[1:-1, 1:-1] == 0)
 
 
+def test_the_quiet_band_absorbs_a_small_but_genuinely_nonzero_w_on_both_signs():
+    """The test above cannot actually exercise the dead band: a constant u/v
+    field has EXACTLY zero gradients, so it passes just as well against
+    `quiet = 0`. The band exists for the near-zero-but-nonzero case, which
+    needs a field with a real, analytically known W straddling the threshold.
+
+    u = b*x, v = -b*y is pure strain with W = +4b^2; u = -b*y, v = b*x is solid
+    body rotation with W = -4b^2. Against the default quiet = 1e-5, b = 1e-3
+    puts |W| = 4e-6 inside the band and b = 3e-3 puts |W| = 3.6e-5 outside it,
+    so this pins a real threshold rather than a stand-in for zero -- and
+    `quiet_w` is load-bearing in production now that
+    `activation.structure_fields` classifies every cell of the library with it
+    to build `eddy_share`."""
+    x, y, cell = _xy()
+    inside, outside = 1e-3, 3e-3
+
+    quiet_seam = structure.gradient_tensor(inside * x, -inside * y, cell)
+    quiet_eddy = structure.gradient_tensor(-inside * y, inside * x, cell)
+    assert np.allclose(structure.okubo_weiss(quiet_seam)[1:-1, 1:-1], 4 * inside**2)
+    assert np.allclose(structure.okubo_weiss(quiet_eddy)[1:-1, 1:-1], -4 * inside**2)
+    assert np.all(structure.classify_structure(quiet_seam)[1:-1, 1:-1] == 0)
+    assert np.all(structure.classify_structure(quiet_eddy)[1:-1, 1:-1] == 0)
+
+    loud_seam = structure.gradient_tensor(outside * x, -outside * y, cell)
+    loud_eddy = structure.gradient_tensor(-outside * y, outside * x, cell)
+    assert np.all(structure.classify_structure(loud_seam)[1:-1, 1:-1] == 1)
+    assert np.all(structure.classify_structure(loud_eddy)[1:-1, 1:-1] == -1)
+
+
 def test_divergence_is_positive_for_a_source_and_negative_for_a_sink():
     x, y, cell = _xy()
     k = 0.003

@@ -18,12 +18,47 @@ from tidescout.models import StructureThresholds
 # a seam and a convergence front are all defined by their strongest cell -- a
 # 150 m disc over a 20 m grid holds ~175 cells, and averaging would dilute a
 # real pocket into the channel around it. Speed and depth-derived quantities
-# describe the feature as a whole, so those take the mean.
+# describe the feature as a whole, so those take the mean, and `eddy_share` is
+# a mean BY DEFINITION: it is the disc-average of a 0/1 indicator.
 _MAX_FIELDS = frozenset({"ambush", "strain", "okubo_w", "convergence"})
+
+# Every field `sample_features` reduces, in the order the table reads.
+_SAMPLED_FIELDS = ("speed", "ambush", "strain", "okubo_w", "convergence", "eddy_share")
 
 
 @dataclass
 class FeatureMetrics:
+    """One feature's derived structure at one flow state.
+
+    `okubo_w` is MAX-reduced over the disc. Since W > 0 is a seam and W < 0 is
+    an eddy, that makes it a SEAM detector and nothing else: a max returns the
+    most seam-like cell present, so it structurally cannot report an eddy
+    unless the entire disc rotates. Measured over the shipped winyah-bay
+    `mean_med` library, all 26 phases: of 13,588 finite per-feature `okubo_w`
+    samples exactly 2 were negative, at -8.2e-7 and -4.5e-9 -- both more than
+    ten times inside the `quiet_w = 1e-5` dead band, i.e. not eddies at all.
+    Zero samples ever crossed -quiet_w.
+
+    `eddy_share` is the eddy channel that leaves `okubo_w` alone: the fraction
+    of the feature's disc that `structure.classify_structure` labels an eddy
+    (W < -quiet_w), applying at the feature level the same dead band that
+    function applies at the cell level. Without that band the obvious
+    alternative -- an unthresholded `nanmin(okubo_w) < 0` -- flags 520 of the
+    526 evaluated features on floating-point noise, against 104 that genuinely
+    contain a rotation-dominated cell.
+
+    THE DENOMINATOR IS THE WET IN-DOMAIN CELLS OF THE DISC, not every cell of
+    it. Dry cells are excluded rather than counted as "not an eddy", for the
+    same reason `structure_fields` masks them twice: ANUGA writes u = v = 0.0
+    on dry ground, and letting that stand in as valid still water is the exact
+    artifact the double mask exists to remove. So `eddy_share` answers "of the
+    water that is here, how much of it is rotating", and a half-dry disc is
+    judged on its water, not on its mud. `n_cells` and `wet_fraction` are
+    reported alongside for callers that need the other denominator.
+
+    `flood_phase` is a CIRCULAR mean -- see `_circular_mean_phase`.
+    """
+
     key: str
     type: str
     speed: float
@@ -31,6 +66,7 @@ class FeatureMetrics:
     strain: float
     okubo_w: float
     convergence: float
+    eddy_share: float
     wet_fraction: float
     flood_phase: float
     n_cells: int
@@ -93,12 +129,32 @@ def structure_fields(
     speed_g = np.hypot(ug, vg)
 
     tensor = structure.gradient_tensor(ug, vg, spec.cell_m)
+    okubo_w = np.where(dry_g, np.nan, structure.okubo_weiss(tensor))
+    # A 0/1 indicator per cell; `sample_features` MEAN-reduces it, so the
+    # per-feature value is the eddy share of the feature's wet disc -- see
+    # FeatureMetrics for why "wet" is the honest denominator.
+    #
+    # `classify_structure` returns int8, so NaN cannot survive it: a cell whose
+    # gradient is undefined comes back 0, "quiet water", which is a claim
+    # rather than a gap. That covers more than the dry cells themselves -- a
+    # WET cell one in from a dry edge also has an undefined gradient, because
+    # np.gradient's central difference reads its NaN neighbour. Masking on
+    # `dry_g` alone would count every one of those as "definitely not an eddy"
+    # and quietly deflate the share along exactly the shorelines this signal
+    # lives on. Re-masking against the already-NaN-carrying `okubo_w` drops
+    # them from the denominator instead.
+    eddy = np.where(
+        np.isfinite(okubo_w),
+        (structure.classify_structure(tensor, t.quiet_w) == -1).astype("float64"),
+        np.nan,
+    )
     fields_2d = {
         "speed": speed_g,
         "ambush": structure.ambush_contrast(speed_g, spec.cell_m, t.ambush_radius_m),
         "strain": np.where(dry_g, np.nan, structure.strain_rate(tensor)),
-        "okubo_w": np.where(dry_g, np.nan, structure.okubo_weiss(tensor)),
+        "okubo_w": okubo_w,
         "convergence": np.where(dry_g, np.nan, structure.convergence(tensor)),
+        "eddy_share": eddy,
     }
     return {k: structure.from_grid(g, spec.flat_index) for k, g in fields_2d.items()}
 
@@ -125,7 +181,7 @@ def sample_features(
         sel = (spec.xs - fx) ** 2 + (spec.ys - fy) ** 2 <= r2
         n = int(sel.sum())
         vals = {}
-        for name in ("speed", "ambush", "strain", "okubo_w", "convergence"):
+        for name in _SAMPLED_FIELDS:
             arr = fields.get(name)
             if arr is None or n == 0:
                 vals[name] = float("nan")

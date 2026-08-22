@@ -167,10 +167,88 @@ def test_structure_fields_returns_masked_1d_arrays_on_the_library_layout():
     v = np.zeros(n)
     depth = np.full(n, 2.0)
     fields = activation.structure_fields(u, v, depth, spec)
-    for name in ("speed", "ambush", "strain", "okubo_w", "convergence"):
+    for name in activation._SAMPLED_FIELDS:
         assert fields[name].shape == (n,), name
     assert np.allclose(fields["speed"], 0.4)
     assert np.allclose(fields["ambush"], 0.0)  # uniform flow: no contrast
+
+
+def _rotation_and_strain_grid(n=32, cell=20.0, strain=0.01, omega=0.004):
+    """A pure-strain background with a solid-body rotation patch cut into it.
+
+    Analytic: strain gives W = +4*strain^2 = +4e-4 everywhere outside the patch,
+    rotation gives W = -4*omega^2 = -6.4e-5 inside it, and the splice between
+    the two carries a much larger positive W than either. So the patch is a
+    genuine eddy and the disc's strongest cell is a seam -- which is exactly
+    the situation a max reducer cannot describe.
+    """
+    c = (np.arange(n) - n / 2) * cell
+    x = np.tile(c, (n, 1))
+    y = np.tile(-c[:, None], (1, n))  # rows run south
+    u = strain * x
+    v = -strain * y
+    patch = (slice(8, 20), slice(8, 20))
+    u[patch] = -omega * y[patch]
+    v[patch] = omega * x[patch]
+    xs, ys = np.meshgrid(c, -c)
+    spec = SimpleNamespace(
+        shape=(n, n), cell_m=cell, flat_index=np.arange(n * n),
+        xs=xs.ravel(), ys=ys.ravel(), crs="EPSG:26917",
+    )
+    return u, v, spec, (float(x[14, 14]), float(y[14, 14]))
+
+
+def test_eddy_share_reports_the_rotation_that_max_reduced_okubo_w_hides():
+    """W > 0 is a seam and W < 0 is an eddy, so a MAX over the disc returns the
+    most seam-like cell in it and structurally cannot report an eddy. That is
+    not a hypothetical: over the shipped winyah-bay `mean_med` library, all 26
+    phases, exactly 2 of 13,588 finite per-feature `okubo_w` samples were
+    negative (-8.2e-7 and -4.5e-9), both more than ten times inside the
+    `quiet_w = 1e-5` dead band -- none ever crossed -quiet_w. The feature-level
+    eddy channel was dead by construction.
+
+    `eddy_share` is that channel. Here the disc is two-thirds rotation, and
+    `okubo_w` still reads strongly positive off the splice between the patch
+    and the strained background -- both numbers are right, and only one of
+    them can find the eddy."""
+    u, v, spec, centre = _rotation_and_strain_grid()
+    depth = np.full(u.size, 2.0)
+    fields = activation.structure_fields(u.ravel(), v.ravel(), depth, spec)
+
+    feats = [_feature("hole-eddy", "hole", centre)]
+    m = activation.sample_features(
+        feats, spec, fields, radius_m=140.0, already_projected=True
+    )[0]
+    assert m.okubo_w > 0.0, "the max reducer keeps reporting the strongest seam"
+    assert m.eddy_share == pytest.approx(0.664, abs=0.01)
+
+
+def test_eddy_share_excludes_dry_cells_from_its_denominator():
+    """The share is eddy-over-WET, not eddy-over-disc. Counting dry cells as
+    "not an eddy" would be the same mistake `structure_fields` masks twice to
+    avoid -- ANUGA writes u = v = 0.0 on dry ground, and that is not still
+    water, it is not water. Here every wet cell rotates and half the disc is
+    dry: the honest answer is 1.0, and a disc denominator would say ~0.5."""
+    n, cell, omega = 32, 20.0, 0.004
+    c = (np.arange(n) - n / 2) * cell
+    x = np.tile(c, (n, 1))
+    y = np.tile(-c[:, None], (1, n))
+    u = -omega * y
+    v = omega * x
+    depth = np.full((n, n), 2.0)
+    depth[n // 2 :, :] = 0.0
+    xs, ys = np.meshgrid(c, -c)
+    spec = SimpleNamespace(
+        shape=(n, n), cell_m=cell, flat_index=np.arange(n * n),
+        xs=xs.ravel(), ys=ys.ravel(), crs="EPSG:26917",
+    )
+    fields = activation.structure_fields(u.ravel(), v.ravel(), depth.ravel(), spec)
+    feats = [_feature("flat-halfdry", "flat", (float(x[15, 15]), float(y[15, 15])))]
+    m = activation.sample_features(
+        feats, spec, fields, radius_m=140.0, already_projected=True
+    )[0]
+    assert m.n_cells > 100, "the disc must straddle the waterline for this to bite"
+    assert m.eddy_share == pytest.approx(1.0)
 
 
 def test_structure_fields_masks_dry_cells_out_of_every_field():
