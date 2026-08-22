@@ -7,6 +7,8 @@ the library state and the GeoJSON and hands both in.
 from dataclasses import dataclass
 
 import numpy as np
+import shapely
+from shapely.geometry import shape
 
 from tidescout.engine import structure
 from tidescout.engine.flow import wet_mask
@@ -112,18 +114,10 @@ def sample_features(
     """Per-feature summary of every field, over the cells within `radius_m`.
 
     `already_projected` is for tests that build coordinates directly in the
-    grid CRS; production passes GeoJSON in EPSG:4326 and this reprojects.
+    grid CRS; production passes GeoJSON in EPSG:4326 and `_sampling_anchors`
+    reprojects.
     """
-    pts = [_centroid_lonlat(f) for f in features]
-    if already_projected:
-        xs = [p[0] for p in pts]
-        ys = [p[1] for p in pts]
-    else:
-        from rasterio.warp import transform as warp_transform
-
-        xs, ys = warp_transform(
-            "EPSG:4326", spec.crs, [p[0] for p in pts], [p[1] for p in pts]
-        )
+    xs, ys = _sampling_anchors(features, spec, already_projected)
 
     out = []
     r2 = radius_m**2
@@ -162,19 +156,62 @@ def sample_features(
     return out
 
 
-def _centroid_lonlat(feature: dict) -> tuple[float, float]:
-    """Representative point of a GeoJSON geometry, without a shapely round trip."""
-    geom = feature["geometry"]
-    coords = geom["coordinates"]
-    kind = geom["type"]
-    if kind == "Point":
-        return float(coords[0]), float(coords[1])
-    if kind == "LineString":
-        pts = coords
-    elif kind == "Polygon":
-        pts = coords[0]
-    else:
-        raise TypeError(f"unsupported feature geometry: {kind}")
-    xs = [float(p[0]) for p in pts]
-    ys = [float(p[1]) for p in pts]
-    return sum(xs) / len(xs), sum(ys) / len(ys)
+def _sampling_anchors(
+    features: list[dict], spec, already_projected: bool
+) -> tuple[list[float], list[float]]:
+    """Where each feature is sampled: its geometry's centroid, in the grid CRS.
+
+    THIS MUST BE THE SAME POINT `detect.feature_key` HASHES INTO THE ID.
+    Phase 3 keys scoring off `FeatureMetrics.key` and reads the metrics beside
+    it, so an id that says "this place" while the metrics describe a disc
+    centred somewhere else is a silent mismatch nothing downstream can detect.
+    `feature_key` hashes `geometry.centroid`, so the sampling anchor is
+    `geometry.centroid` — verified end to end against the shipped inventory:
+    feeding these projected geometries back through `feature_key` reproduces
+    all 2,162 ids exactly.
+
+    This replaced an unweighted mean of the exterior ring's vertices (which
+    also counted the duplicated closing vertex twice). That is not any named
+    point of a polygon: measured against the true centroid over the real
+    2,162-feature inventory it sat p50 7.6 m / p90 47.7 m / p99 183.5 m / max
+    726.2 m away, put 471 of the 2,026 polygon features' anchors OUTSIDE their
+    own polygon, and moved 33 of them further than the whole 150 m sampling
+    radius.
+
+    `representative_point()` was considered and measured too. It is guaranteed
+    to lie inside the geometry (2,026 of 2,026 polygons, against 1,645 for the
+    centroid), but it is a scanline construction, not a centre: its offset from
+    the id anchor is p50 11.5 m / p99 376.8 m / max 2,228.1 m, WORSE than the
+    ring-mean it would have replaced, and 110 features would sample beyond
+    their own 150 m radius. Inside-ness buys nothing here anyway — the disc is
+    never clipped to the polygon, it is only centred on it — while agreeing
+    with the id is the entire point. Of the 381 polygons whose centroid falls
+    outside their own ring (concave shapes and bar donuts), 73.5% have it
+    within 20 m of the polygon and 97.9% within the sampling radius.
+
+    The geometry is reprojected and THEN the centroid taken, not the other way
+    round: a degree of longitude is ~0.83 of a degree of latitude in metres
+    here, so an area- or length-weighted centroid computed in lon/lat is not
+    the projected centroid. On the shipped inventory that shortcut is within
+    0.21 m for every polygon but drifts up to 11.5 m on the long multi-vertex
+    jetty lines, and the point of this function is to match `feature_key`
+    exactly rather than nearly. `shapely.transform` hands the callable every
+    vertex of every geometry in ONE batched call (188,003 vertices for
+    winyah-bay), which costs 0.03 s against the ~2 s `sample_features` already
+    spends per phase on 587,325-cell boolean masks.
+    """
+    if not features:
+        return [], []
+    geoms = [shape(f["geometry"]) for f in features]
+    if not already_projected:
+        from rasterio.warp import transform as warp_transform
+
+        def to_grid_crs(coords: np.ndarray) -> np.ndarray:
+            xs, ys = warp_transform(
+                "EPSG:4326", spec.crs, coords[:, 0].tolist(), coords[:, 1].tolist()
+            )
+            return np.column_stack([xs, ys])
+
+        geoms = shapely.transform(geoms, to_grid_crs)
+    centroids = [g.centroid for g in geoms]
+    return [c.x for c in centroids], [c.y for c in centroids]

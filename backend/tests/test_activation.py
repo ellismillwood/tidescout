@@ -9,17 +9,26 @@ from types import SimpleNamespace
 import numpy as np
 import pytest
 from affine import Affine
+from rasterio.warp import transform as warp_transform
+from shapely.geometry import Polygon
 
-from tidescout.engine import activation
+from tidescout.engine import activation, detect
 
 
 class _Spec:
-    """Minimal stand-in for flowlib.GridSpec: an 8x8 grid of 20 m cells."""
+    """Minimal stand-in for flowlib.GridSpec: an 8x8 grid of 20 m cells.
 
-    def __init__(self):
+    `origin` is the grid's north-west corner in `crs`. It defaults to the
+    arbitrary (0, 160) most of these tests use, which is fine while everything
+    stays in grid coordinates; the reprojection test moves it to a real
+    EPSG:26917 easting/northing so a lon/lat round trip means something.
+    """
+
+    def __init__(self, origin=(0.0, 160.0), crs="EPSG:26917"):
         self.shape = (8, 8)
         self.cell_m = 20.0
-        self.transform = Affine(20.0, 0.0, 0.0, 0.0, -20.0, 160.0)
+        self.crs = crs
+        self.transform = Affine(20.0, 0.0, origin[0], 0.0, -20.0, origin[1])
         self.flat_index = np.arange(64)
         cols, rows = np.meshgrid(np.arange(8), np.arange(8))
         self.xs, self.ys = self.transform * (cols.ravel() + 0.5, rows.ravel() + 0.5)
@@ -82,6 +91,72 @@ def test_features_with_no_cells_in_the_domain_are_returned_with_nan_not_dropped(
     assert len(out) == 1
     assert out[0].n_cells == 0
     assert np.isnan(out[0].speed)
+
+
+def _polygon_feature(key, ftype, ring):
+    return {
+        "id": key,
+        "properties": {"type": ftype},
+        "geometry": {"type": "Polygon", "coordinates": [[list(pt) for pt in ring]]},
+    }
+
+
+def test_the_sampling_anchor_is_the_centroid_the_feature_id_is_hashed_from():
+    """A feature's id and its metrics have to describe the same place.
+    `detect.feature_key` hashes `geometry.centroid`; Phase 3 keys scoring off
+    that id and reads the `FeatureMetrics` beside it, so sampling anywhere else
+    means the id says "this place" while the numbers describe another.
+
+    The anchor used to be an unweighted mean of the exterior ring's vertices,
+    counting the duplicated closing vertex twice -- which is not any named
+    point of a polygon. On the real 2,162-feature inventory that sat a median
+    7.6 m and a maximum 726 m from the centroid.
+
+    This triangle separates the two candidates by 31.9 m, more than a cell:
+    its centroid is (63.3, 56.7) and the old ring-mean was (85.0, 80.0). The
+    12 m sample radius selects exactly one cell, so the assertion below reads
+    5.0 under the centroid and 1.0 under the ring-mean -- it cannot pass by
+    accident."""
+    spec = _Spec()
+    ring = [(150.0, 150.0), (10.0, 10.0), (30.0, 10.0), (150.0, 150.0)]
+    poly = Polygon(ring)
+    key = detect.feature_key(detect.Feature("bar", poly))
+
+    speed = np.zeros(64)
+    speed[43] = 5.0                 # the cell holding the true centroid
+    speed[36] = speed[28] = 1.0     # the cells the old ring-mean would sample
+
+    feats = [_polygon_feature(key, "bar", ring)]
+    xs, ys = activation._sampling_anchors(feats, spec, already_projected=True)
+    assert (xs[0], ys[0]) == pytest.approx((poly.centroid.x, poly.centroid.y))
+
+    out = activation.sample_features(
+        feats, spec, {"speed": speed}, radius_m=12.0, already_projected=True
+    )
+    assert out[0].key == key
+    assert out[0].n_cells == 1
+    assert out[0].speed == pytest.approx(5.0)
+
+
+def test_sample_features_reprojects_lonlat_geojson_onto_the_grid():
+    """The `already_projected=False` branch is what production actually runs --
+    `build_features` writes EPSG:4326 GeoJSON and the library grid is in UTM --
+    and it had no test anywhere; every other test in this file short-circuits
+    it. The grid sits at real EPSG:26917 coordinates here so the round trip is
+    a genuine reprojection, and the 5 m radius selects a single cell, so
+    landing one 20 m cell away already fails."""
+    spec = _Spec(origin=(662000.0, 3690000.0))
+    target = 27
+    speed = np.zeros(64)
+    speed[target] = 3.0
+    lons, lats = warp_transform(
+        spec.crs, "EPSG:4326", [float(spec.xs[target])], [float(spec.ys[target])]
+    )
+
+    feats = [_feature("hole-utm", "hole", (lons[0], lats[0]))]
+    out = activation.sample_features(feats, spec, {"speed": speed}, radius_m=5.0)
+    assert out[0].n_cells == 1
+    assert out[0].speed == pytest.approx(3.0)
 
 
 def test_structure_fields_returns_masked_1d_arrays_on_the_library_layout():
