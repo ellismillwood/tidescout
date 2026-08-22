@@ -40,12 +40,13 @@ class FeatureMetrics:
     Zero samples ever crossed -quiet_w.
 
     `eddy_share` is the eddy channel that leaves `okubo_w` alone: the fraction
-    of the feature's disc that `structure.classify_structure` labels an eddy
-    (W < -quiet_w), applying at the feature level the same dead band that
-    function applies at the cell level. Without that band the obvious
+    of the feature's WET disc cells that `structure.classify_structure` labels
+    an eddy (W < -quiet_w), applying at the feature level the same dead band
+    that function applies at the cell level. Without that band the obvious
     alternative -- an unthresholded `nanmin(okubo_w) < 0` -- flags 520 of the
-    526 evaluated features on floating-point noise, against 104 that genuinely
-    contain a rotation-dominated cell.
+    526 then-evaluated features on floating-point noise, against 104 that
+    genuinely contain a rotation-dominated cell. (Those two counts predate the
+    sampling-anchor fix; on the shipped anchors it is 106 of 527.)
 
     THE DENOMINATOR IS THE WET IN-DOMAIN CELLS OF THE DISC, not every cell of
     it. Dry cells are excluded rather than counted as "not an eddy", for the
