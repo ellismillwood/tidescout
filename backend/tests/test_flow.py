@@ -266,3 +266,42 @@ def test_weights_are_never_negative():
         mix, _ = blend_regimes("mean", cfs, BUCKETS, ALL)
         assert all(w >= 0.0 for _, w in mix)
         assert sum(w for _, w in mix) == pytest.approx(1.0)
+
+
+def test_blend_falls_back_across_the_range_axis_when_the_range_bucket_has_no_regimes():
+    """Basic coverage for the `not order` branch: when `range_bucket` has no
+    regime at ANY discharge, blend_regimes cannot blend at all and must fall
+    through to select_regime's cross-range fallback rather than crash or
+    silently drop the axis.
+
+    mean is one range step from spring; neap is two. RANGE_STEP_COST=3 beats
+    even the worst possible discharge mismatch (DISCHARGE_STEP_COST=1 * 2),
+    so a `mean_*` regime always wins over any `neap_*` one here regardless of
+    which discharge bucket 4533 cfs (the med point) is nearest to -- and
+    since it's nearest med itself, mean_med is the unique minimum-cost pick."""
+    no_spring = ALL - {"spring_low", "spring_med", "spring_high"}
+    mix, clamped = blend_regimes("spring", 4533.0, BUCKETS, no_spring)
+    assert mix == [("mean_med", 1.0)]
+    assert clamped is True
+
+
+def test_blend_fallback_breaks_a_range_tie_by_actual_discharge_not_a_fixed_med():
+    """Regression for a defect found in review: the total-fallback branch
+    once scored every candidate's discharge distance against a hardcoded
+    "med" instead of the bucket nearest `cfs`, so two range-adjacent
+    candidates that tied on range distance fell through to an alphabetic
+    tiebreak instead of the real discharge distance.
+
+    neap_high and spring_low are both exactly one range step from "mean"
+    (RANGE_STEP_COST=3 either way) -- a genuine tie that must be broken by
+    discharge. cfs=100 sits far below every bucket, so "low" is the correct
+    discharge match: scored against the true nearest bucket ("low"), the
+    costs are neap_high=3*1+1*2=5 vs spring_low=3*1+1*0=3, and spring_low
+    wins outright. Scored against a fixed "med" they would instead tie at
+    cost 4 apiece (3*1+1*1 for both), and the name-alphabetical tiebreak
+    would hand this to neap_high -- the high-discharge regime, wrong for
+    cfs=100 -- which is exactly the bug this pins against regressing."""
+    avail = {"neap_high", "spring_low"}
+    mix, clamped = blend_regimes("mean", 100.0, BUCKETS, avail)
+    assert mix == [("spring_low", 1.0)]
+    assert clamped is True
