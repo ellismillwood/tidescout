@@ -1,6 +1,10 @@
 import pytest
+import yaml
+from pydantic import ValidationError
 
 from tidescout.config import load_fishery
+from tidescout.models import Fishery
+from tidescout.paths import FISHERIES_DIR
 
 
 def test_load_winyah_bay():
@@ -53,3 +57,28 @@ def test_anuga_mass_tolerance_is_not_machine_precision():
     """A 1e-6 assert fails on a healthy wetting/drying run (measured 4.2e-4)."""
     f = load_fishery("winyah-bay")
     assert f.anuga.mass_tolerance >= 1e-4
+
+
+def test_mistyped_top_level_key_is_rejected():
+    """A typo'd top-level key (`salinty:` for `salinity:`) must fail loudly,
+    not silently fall back to that field's Python defaults. Before
+    Fishery.model_config gained extra="forbid", this was undetectable by
+    inspection once Task 5 writes fitted salinity numbers into the YAML: the
+    block still parses, still looks complete, and the app runs on the
+    unfitted theoretical constants while reporting nothing wrong."""
+    raw = yaml.safe_load((FISHERIES_DIR / "winyah-bay.yaml").read_text())
+    raw["salinty"] = raw.pop("salinity")
+    with pytest.raises(ValidationError, match="salinty"):
+        Fishery.model_validate(raw)
+
+
+def test_real_fishery_document_has_no_unknown_top_level_keys():
+    """Fishery.model_config's extra="forbid" is only safe repo-wide because
+    the one real Fishery document declares every top-level key it uses --
+    verified here so a future YAML addition that outruns the model fails
+    fast in CI rather than as a surprise the next time someone edits it."""
+    for path in FISHERIES_DIR.glob("*.yaml"):
+        if path.name.endswith((".known-spots.yaml", ".tiles.yaml")):
+            continue  # parsed by different models, never reach Fishery
+        raw = yaml.safe_load(path.read_text())
+        Fishery.model_validate(raw)  # raises ValidationError on any extra key

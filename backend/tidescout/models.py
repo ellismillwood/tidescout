@@ -241,6 +241,18 @@ class SalinityConfig(BaseModel):
 
 
 class Fishery(BaseModel):
+    # Verified 2026-08-22 against the real fishery document: winyah-bay.yaml
+    # is the only Fishery YAML in the repo and all 16 of its top-level keys
+    # are declared below (winyah-bay.known-spots.yaml and .tiles.yaml are
+    # parsed by different models and never reach this class), so this is a
+    # no-op today. It exists so a typo'd top-level key -- e.g. `salinty:`
+    # for `salinity:` -- raises at load time instead of silently falling
+    # back to that field's Python defaults. That failure mode is undetectable
+    # by inspection once Task 5 has written fitted salinity numbers into the
+    # YAML: the block still parses, still looks complete, and the app runs
+    # on the unfitted theoretical constants while reporting nothing wrong.
+    model_config = ConfigDict(extra="forbid")
+
     slug: str
     name: str
     timezone: str

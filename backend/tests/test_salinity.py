@@ -111,7 +111,7 @@ def test_salinity_never_exceeds_the_ocean_end_member():
     x = np.array([0.0, 0.5, 1.0])
     for phase in (0.0, 0.25, 0.5, 0.75):
         s = salinity.salinity_at(x, cfs=1232.0, phase=phase, cfg=CFG)
-        assert np.all(s <= CFG.ocean_ppt + 1e-9)
+        assert np.all(s < CFG.ocean_ppt), f"phase={phase}: {s} touched or exceeded ocean_ppt"
 
 
 def test_salinity_is_never_negative_far_up_river():

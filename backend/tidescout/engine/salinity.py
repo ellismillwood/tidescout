@@ -33,12 +33,26 @@ structural defects in it (full arithmetic in
 
 The bounded logistic (sigmoid) form above fixes both by construction. tanh's
 range is [-1, 1], so S sits in [0, S_ocean] with NO clipping anywhere in this
-module -- there is no plateau region left to reintroduce, at any phase. And L
-(WHERE the front sits) is independent of W (HOW SHARP it is), so satisfying
-the head's near-fresh condition no longer has to fight the mouth's near-ocean
-one. Re-verified against the real field under this form: 0 exact ties between
-the calibration range's endpoints at every phase, and the same 1 ppt head
-constraint above now costs North Jetty only 0.01 ppt.
+module -- there is no plateau region left to reintroduce ACROSS THE
+CALIBRATION RANGE, at any phase: 0 exact ties between the range's endpoints
+at every phase tested, re-verified against the real field.
+
+That scoping is deliberate, not decorative. Below the calibration range,
+float64 itself reintroduces a plateau: tanh(z) rounds to exactly +-1 once
+|z| exceeds ~19.06, i.e. once |x_eff - L| is at least ~19.06 * front_width_km
+(~95 km with the defaults below). `intrusion_length_km`'s 1 cfs floor pushes
+L to ~278 km at near-zero discharge, so at cfs <= ~5 -- 38x below the
+observed 1,232 cfs minimum -- the whole field reads exactly ocean_ppt
+regardless of the exact (sub-floor) discharge. That is the right physical
+limit (marine everywhere at zero river flow), and every discharge that low
+is already flagged `extrapolated=True`, but it IS a bit-exact tie -- the
+same failure mode defect 1 was about, just relocated to where this model
+never claimed to be trustworthy.
+
+L (WHERE the front sits) is independent of W (HOW SHARP it is), so
+satisfying the head's near-fresh condition no longer has to fight the
+mouth's near-ocean one: the same 1 ppt head constraint above now costs
+North Jetty only 0.01 ppt.
 """
 
 from dataclasses import dataclass
@@ -76,9 +90,12 @@ def intrusion_length_km(cfs: float, cfg: SalinityConfig) -> float:
     L does NOT saturate as Q -> 0 -- the power law diverges there (Q^-k grows
     without bound). What keeps it finite is `_effective_cfs`'s 1 cfs floor:
     with this fishery's defaults (l0_km=18, q0_cfs=4000, k=0.33) that floor
-    caps L at ~277.9 km, an order of magnitude past the domain's own
-    31.57 km extent. That is a guard against the power law blowing up at
-    Q=0, not a physical property of the estuary.
+    caps L at ~277.9 km, an order of magnitude past L at either end of
+    `calibration_range_cfs` (~26.5 km at 1,232 cfs, ~10.1 km at 22,996 cfs).
+    That is a guard against the power law blowing up at Q=0, not a physical
+    property of the estuary -- and that gap is exactly what saturates
+    `salinity_at`'s tanh outside the calibration range (see the module
+    docstring); it is not sized to keep L "reasonable" in any absolute sense.
     """
     return cfg.l0_km * (_effective_cfs(cfs) / cfg.q0_cfs) ** (-cfg.k)
 
