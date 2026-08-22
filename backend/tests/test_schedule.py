@@ -101,3 +101,48 @@ def test_wet_window_length_is_wrap_safe_when_the_window_spans_the_wrap():
     assert s.drain_phase[0] == pytest.approx(0.25)
     window = (s.drain_phase[0] - s.flood_phase[0]) % 1.0
     assert window == pytest.approx(0.5)
+
+
+def test_cell_schedule_reads_a_regime_off_disk_in_phase_order(tmp_path, monkeypatch):
+    """`cell_schedule` is the only part of this module that touches the
+    filesystem, and it had no test: it reads `phases` out of grid.json and then
+    pairs entry `i` of that list with `phase_{i:03d}.npz`. Get that pairing
+    wrong -- read the phases sorted, or off by one -- and every flood and drain
+    time in the bay shifts, silently, with the arrays themselves still correct.
+
+    The phases here are deliberately UNEVENLY spaced (0.0, 0.3, 0.5, 0.8), so
+    the expected answers cannot be recovered from the index alone: the cell
+    floods at the third snapshot, and only a correct pairing reports 0.5."""
+    import json
+
+    from tidescout import paths
+    from tidescout.pipeline import schedule as sched_mod
+
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+    grid = paths.fishery_data_dir("winyah-bay") / "flow" / "mean_med" / "grid"
+    grid.mkdir(parents=True)
+
+    phases = [0.0, 0.3, 0.5, 0.8]
+    # cell 0: dry, dry, wet, dry -> floods at 0.5, drains at 0.8
+    # cell 1: wet throughout -> a channel, no schedule at all
+    depths = [[0.0, 2.0], [0.0, 2.0], [0.6, 2.0], [0.0, 2.0]]
+    for i, row in enumerate(depths):
+        np.savez_compressed(
+            grid / f"phase_{i:03d}.npz",
+            u=np.zeros(2, dtype="float32"), v=np.zeros(2, dtype="float32"),
+            depth=np.asarray(row, dtype="float32"), phase=np.float32(phases[i]),
+        )
+    (grid / "grid.json").write_text(json.dumps({
+        "shape": [1, 2], "cell_m": 20.0, "transform": [20, 0, 0, 0, -20, 0],
+        "n_cells": 2, "flat_index_len": 2, "phases": phases,
+        "stage_bc_m": [0.0] * len(phases),
+    }))
+
+    s = sched_mod.cell_schedule("winyah-bay", "mean_med")
+    assert s.flood_phase[0] == pytest.approx(0.5)
+    assert s.drain_phase[0] == pytest.approx(0.8)
+    assert s.wet_fraction[0] == pytest.approx(0.25)
+    assert np.isnan(s.flood_phase[1]) and s.wet_fraction[1] == pytest.approx(1.0)
+
+    expected = sched_mod.schedule_from_depths(_series(depths), phases)
+    assert np.array_equal(s.wet_fraction, expected.wet_fraction)
