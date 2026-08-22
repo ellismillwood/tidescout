@@ -235,6 +235,28 @@ class SalinityConfig(BaseModel):
     # Discharge span the fit was made over, (lo, hi) with lo < hi. Outside
     # it, results are flagged rather than silently trusted.
     calibration_range_cfs: tuple[float, float] = (1232.0, 22996.0)
+    # True ONLY when a calibration run produced these values AND raised no
+    # warning about its own data. False means every number above is
+    # theoretical -- an authored starting point, not a measurement -- and any
+    # salinity computed from them carries no observational signal whatsoever.
+    #
+    # FALSE IS THE SHIPPED STATE FOR WINYAH BAY, and not for want of trying.
+    # Task 5 ran the calibration against every observation that exists. Both
+    # of the bay's USGS 00480 sites lie OUTSIDE the model domain (1,362 m and
+    # 9,498 m from the nearest in-domain cell) and both snap to the same
+    # cell, the distance field's maximum at 31.57 km, so every observation
+    # available carries ONE along-estuary distance at the extreme fresh end.
+    # The 0-31.57 km reach the scoring layer actually reads has none. Fitted
+    # anyway on 348 daily means, four parameter sets whose rmse differed by
+    # 0.016 ppt -- 60x below the observations' own 1 ppt quantisation --
+    # predicted anywhere from 19.8 to 34.0 ppt at North Jetty.
+    #
+    # This is deliberately SEPARATE from `salinity_field`'s `extrapolated`,
+    # which asks a narrower question: was this DISCHARGE inside the span the
+    # fit covered. That flag cannot express "no observation ever constrained
+    # this cell's DISTANCE", which is currently true of every cell in the
+    # bay, so a caller checking only `extrapolated` sees green everywhere.
+    fitted: bool = False
 
     @field_validator("calibration_range_cfs")
     @classmethod

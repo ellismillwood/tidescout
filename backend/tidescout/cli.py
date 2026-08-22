@@ -430,10 +430,31 @@ def salinity_calibrate(
         )
     except ValueError as exc:
         console.print(f"\n[red]CANNOT CALIBRATE[/red]: {exc}")
+        rejected = [r for r in data.sites if not r.used]
+        if rejected:
+            console.print(
+                f"\n{len(rejected)} of {len(data.sites)} salinity sensor(s) were "
+                "rejected, so the fit had nothing to run on:"
+            )
+            for r in rejected:
+                console.print(f"  [bold]{r.site}[/bold] — {r.note}")
+            far = [r for r in rejected if r.snap_gap_m > max_snap_m]
+            if far:
+                worst = max(r.snap_gap_m for r in far)
+                console.print(
+                    f"\nThe problem is WHERE these sensors are, not the tool. They sit "
+                    f"outside the model domain — up to {worst:,.0f} m from the nearest "
+                    f"in-domain cell — so the along-estuary distance each would be "
+                    f"assigned belongs to a different place on the estuary than the "
+                    f"sensor does, and no length scale in the model absorbs that.\n"
+                    f"Re-run with [bold]--max-snap-m {worst:.0f}[/bold] (or higher) to "
+                    f"fit anyway, accepting a borrowed distance. Read the warning block "
+                    f"it prints before believing the numbers."
+                )
         console.print(
-            "[dim]That is a finding about the available data, not a bug. "
-            "The unfitted config stands and the climatology fallback stays "
-            "live.[/dim]"
+            "\n[dim]That is a finding about the available data, not a bug. "
+            "The unfitted config stands (salinity.fitted stays False) and the "
+            "climatology fallback stays live.[/dim]"
         )
         raise typer.Exit(1) from exc
 
@@ -453,7 +474,20 @@ def salinity_calibrate(
     lo, hi = fitted.calibration_range_cfs
     params.add_row("calibration_range_cfs", str(fishery.salinity.calibration_range_cfs),
                    f"({lo:.0f}, {hi:.0f})", "-", "yes")
+    params.add_row(
+        "fitted",
+        str(fishery.salinity.fitted),
+        f"[green]{fitted.fitted}[/green]" if fitted.fitted else f"[red]{fitted.fitted}[/red]",
+        "-",
+        "derived",
+    )
     console.print(params)
+    if not fitted.fitted:
+        console.print(
+            "[red]fitted=False[/red] — this run raised at least one warning about its "
+            "own data, so the parameters above are NOT calibrated. Anything computed "
+            "from them carries no observational signal."
+        )
 
     console.print("\n[bold]diagnostics[/bold]")
     for key, value in diag.items():

@@ -64,9 +64,30 @@ from tidescout.models import SalinityConfig
 
 @dataclass
 class SalinityField:
+    """Salinity plus the provenance a caller needs to know what it is worth.
+
+    `extrapolated` and `fitted` answer DIFFERENT questions and a caller
+    that reads only the first will be misled:
+
+    * `extrapolated` -- was this DISCHARGE outside `calibration_range_cfs`.
+      A per-evaluation property; it changes with the river.
+    * `fitted` -- did a calibration ever constrain these parameters AT ALL.
+      A property of the config, identical at every cell and every hour. It
+      is `False` for Winyah Bay today (see `models.SalinityConfig.fitted`
+      for the measured reason), which means a caller can get
+      `extrapolated=False` -- "this discharge is in range" -- on a number
+      that no observation anywhere ever constrained.
+
+    Neither flag changes a computed value. They ride alongside the numbers.
+    """
+
     ppt: np.ndarray
     cfs: float
     extrapolated: bool
+    # Whether cfg's parameters were fitted to observations. Metadata only --
+    # see the class docstring for why this cannot be folded into
+    # `extrapolated`.
+    fitted: bool = False
 
 
 def _effective_cfs(cfs: float) -> float:
@@ -142,4 +163,5 @@ def salinity_field(
         ppt=salinity_at(distance_km, cfs, phase, cfg),
         cfs=effective_cfs,
         extrapolated=not (lo <= effective_cfs <= hi),
+        fitted=cfg.fitted,
     )

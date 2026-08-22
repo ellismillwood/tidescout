@@ -540,3 +540,78 @@ def test_fit_reports_no_bound_hits_on_a_well_posed_problem():
     _, diag = fit_intrusion(obs, cfg=TRUTH.model_copy(update={"l0_km": 25.0}))
     assert diag["at_bounds"] == []
     assert "optimizer bound" not in diag["warning"].lower()
+
+
+# -- The `fitted` marker ----------------------------------------------------
+# `extrapolated` answers "was this DISCHARGE in range". Nothing answered "did
+# any observation ever constrain these parameters", which is currently False
+# for every cell in Winyah Bay -- so a caller checking only `extrapolated`
+# saw green on numbers carrying no observational signal at all.
+
+
+def test_config_defaults_to_unfitted():
+    """The default must be the pessimistic one. A theoretical config that
+    reads as calibrated is the exact failure this flag exists to prevent."""
+    assert SalinityConfig().fitted is False
+
+
+def test_the_shipped_winyah_config_is_marked_unfitted():
+    """Task 5 ran the calibration and declined to write its output. If this
+    ever flips to True, a fit was accepted -- check it raised no warning."""
+    assert load_fishery("winyah-bay").salinity.fitted is False
+
+
+def test_field_carries_the_fitted_flag_beside_extrapolated():
+    x = np.array([10.0])
+    unfitted = salinity.salinity_field(x, cfs=4000.0, phase=0.25, cfg=CFG)
+    assert unfitted.fitted is False
+    assert unfitted.extrapolated is False, "in-range discharge, but still unfitted"
+    ok = salinity.salinity_field(
+        x, cfs=4000.0, phase=0.25, cfg=CFG.model_copy(update={"fitted": True})
+    )
+    assert ok.fitted is True
+
+
+def test_the_fitted_flag_changes_no_computed_value():
+    """It is metadata riding alongside the numbers, nothing more."""
+    x = np.array([2.58, 9.47, 20.0, 31.57])
+    a = salinity.salinity_field(x, cfs=4000.0, phase=0.25, cfg=CFG)
+    b = salinity.salinity_field(
+        x, cfs=4000.0, phase=0.25, cfg=CFG.model_copy(update={"fitted": True})
+    )
+    assert np.array_equal(a.ppt, b.ppt)
+    assert a.cfs == b.cfs and a.extrapolated == b.extrapolated
+
+
+def test_a_fit_that_raises_any_warning_is_not_marked_fitted():
+    """Winyah's real shape: one distance. The residual is fine and every
+    numerical health check passes; the flag must still say False."""
+    obs = _synthetic_obs(TRUTH, [31.57], [1500.0, 4000.0, 12000.0, 20000.0])
+    fit, diag = fit_intrusion(obs, cfg=TRUTH)
+    assert diag["warning"] != ""
+    assert fit.fitted is False
+
+
+def test_a_clean_fit_is_marked_fitted():
+    """The positive case, so the flag is not just permanently False: enough
+    observations, spanning the gradient, over a wide discharge range, with a
+    swing target to constrain the excursion."""
+    distances = [2.0, 6.0, 10.0, 15.0, 20.0, 25.0, 35.0]
+    flows = [1500.0, 4000.0, 12000.0]
+    fit, diag = fit_intrusion(
+        _synthetic_obs(TRUTH, distances, flows),
+        cfg=TRUTH.model_copy(update={"l0_km": 20.0}),
+        swings=_synthetic_swings(TRUTH, distances, flows),
+    )
+    assert diag["warning"] == "", f"unexpected warning: {diag['warning']}"
+    assert fit.fitted is True
+
+
+def test_the_interior_count_is_named_as_value_based_in_the_warning():
+    """36 'interior observations' on a spatially degenerate set is the
+    misleading combination, and diagnostics get read alone."""
+    obs = _synthetic_obs(TRUTH, [12.0], [1500.0, 4000.0, 12000.0, 20000.0])
+    _, diag = fit_intrusion(obs, cfg=TRUTH)
+    assert diag["n_interior_obs"] > 0
+    assert "n_interior_obs" in diag["warning"]
+    assert "blind to this" in diag["warning"]

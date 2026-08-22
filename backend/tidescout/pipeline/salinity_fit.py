@@ -231,7 +231,20 @@ def fit_intrusion(
 
     Returns the fitted config -- constructed through validation, not
     `model_copy`, which skips it -- and a diagnostics dict. Read the
-    diagnostics before the config.
+    diagnostics before the config, and within them know which numbers bite:
+
+    * `n_distinct_distances` / `distance_span_km` are the load-bearing
+      checks. The profile's SHAPE is what the scoring layer reads and only
+      these say whether the data spans it.
+    * `n_interior_obs` is VALUE-based -- it counts observations falling
+      between 10% and 90% of `ocean_ppt` -- and is BLIND TO SPATIAL
+      COVERAGE. It read 36 on Winyah's real data, every one of those 36 at
+      the same along-estuary distance. A healthy interior count is not
+      evidence of a constrained profile; do not read it alone.
+    * `condition_number`, `param_sigma` and `at_bounds` describe the design
+      that WAS observed and are structurally blind to extrapolation beyond
+      it. All three read healthy on Winyah's unusable fit.
+    * `fitted` on the returned config is True only if `warning` is empty.
     """
     obs, dropped = _finite_rows(observations)
     swing_obs, swing_dropped = _finite_rows(swings)
@@ -269,13 +282,7 @@ def fit_intrusion(
     fitted_values = {n: float(v) for n, v in zip(names, sol.x, strict=True)}
     q = np.array([o[1] for o in obs], dtype="float64")
     cfs_span = (float(q.min()), float(q.max()))
-    fitted = SalinityConfig(
-        **{
-            **cfg.model_dump(),
-            **fitted_values,
-            "calibration_range_cfs": cfs_span,
-        }
-    )
+    solution = cfg.model_copy(update=fitted_values)
 
     d = np.array([o[0] for o in obs], dtype="float64")
     band_lo, band_hi = INTERIOR_BAND
@@ -283,10 +290,10 @@ def fit_intrusion(
     n_interior = int(((frac > band_lo) & (frac < band_hi)).sum())
     n_distinct_d = len({round(v, 6) for v in d})
     distance_span = float(d.max() - d.min())
-    level_resid = _levels(groups, fitted, len(obs)) - y
+    level_resid = _levels(groups, solution, len(obs)) - y
     rmse = float(np.sqrt(np.mean(level_resid**2)))
     swing_rmse = (
-        float(np.sqrt(np.mean((_swing(swing_groups, fitted, len(swing_obs)) - y_swing) ** 2)))
+        float(np.sqrt(np.mean((_swing(swing_groups, solution, len(swing_obs)) - y_swing) ** 2)))
         if swing_obs
         else None
     )
@@ -294,26 +301,42 @@ def fit_intrusion(
         sol, names, [fitted_values[n] for n in names]
     )
     at_bounds = _at_bounds(fitted_values)
+    warning = _warnings(
+        n_obs=len(obs),
+        n_params=len(names),
+        n_interior=n_interior,
+        n_distinct_d=n_distinct_d,
+        distance_span=distance_span,
+        front_width_km=fitted_values["front_width_km"],
+        cfs_span=cfs_span,
+        fitted_values=fitted_values,
+        param_sigma=param_sigma,
+        condition=condition,
+        has_swings=bool(swing_obs),
+        at_bounds=at_bounds,
+    )
+
+    # `fitted=True` requires the fit to raise NO warning about its own data.
+    # A clean residual is not enough and never was: the run that produced
+    # Winyah's 1.719 ppt rmse also reported a healthy condition number and
+    # 1-sigmas below every value, on data that could not distinguish 19.8
+    # from 34.0 ppt at North Jetty. The warnings are the checks with teeth,
+    # so passing all of them is the bar.
+    fitted = SalinityConfig(
+        **{
+            **cfg.model_dump(),
+            **fitted_values,
+            "calibration_range_cfs": cfs_span,
+            "fitted": not warning,
+        }
+    )
 
     diagnostics = {
         "rmse_ppt": rmse,
         "n_obs": len(obs),
         "n_interior_obs": n_interior,
         "cfs_span": cfs_span,
-        "warning": _warnings(
-            n_obs=len(obs),
-            n_params=len(names),
-            n_interior=n_interior,
-            n_distinct_d=n_distinct_d,
-            distance_span=distance_span,
-            front_width_km=fitted.front_width_km,
-            cfs_span=cfs_span,
-            fitted_values=fitted_values,
-            param_sigma=param_sigma,
-            condition=condition,
-            has_swings=bool(swing_obs),
-            at_bounds=at_bounds,
-        ),
+        "warning": warning,
         "n_dropped": dropped + swing_dropped,
         "n_swing_obs": len(swing_obs),
         "swing_rmse_ppt": swing_rmse,
@@ -367,7 +390,16 @@ def _warnings(
             f"width of {front_width_km:.2f} km. The profile's SHAPE is what the "
             "scoring layer reads, and a shape cannot be fitted from points that do "
             "not span it -- l0_km, front_width_km and k trade off freely against "
-            "each other here. Do not let the numbers above talk you out of this: "
+            "each other here. "
+            + (
+                f"Note that n_interior_obs reports {n_interior} observation(s) as "
+                "'interior', which is a VALUE test (a fraction of ocean_ppt) and is "
+                "blind to this: all of them sit at the distance(s) named above. A "
+                "healthy interior count is not evidence of a constrained profile. "
+                if n_interior
+                else ""
+            )
+            + "Do not let the numbers above talk you out of this: "
             "condition_number, param_sigma and at_bounds are all properties of the "
             "design that WAS observed and read perfectly healthy on exactly this "
             "failure (measured on Winyah's real 348-observation fit: condition 44.8, "

@@ -257,6 +257,20 @@ salinity:
   # min 1232 / max 22996 cfs. Outside this span, salinity_field flags
   # extrapolated=True rather than silently trusting the fit.
   calibration_range_cfs: [1232.0, 22996.0]
+  # FALSE, and stated explicitly rather than left to the model default, so
+  # nothing downstream can read these constants as calibrated. Every value in
+  # this block is theoretical; see the CALIBRATION ATTEMPTED AND DECLINED
+  # note at the top of the block for what was tried and why it was declined.
+  # `tidescout salinity calibrate` sets this True only when a run raises no
+  # warning at all about its own data -- which requires, at minimum, salinity
+  # observations at three or more distinct along-estuary distances spanning
+  # more than one front width. Winyah has one distance, so no run can set it
+  # True until a mid-bay sensor exists.
+  #
+  # Distinct from salinity_field's `extrapolated`, which asks only whether a
+  # DISCHARGE fell inside calibration_range_cfs. A caller checking only that
+  # flag sees green on every cell in the bay.
+  fitted: false
 climatology:
   water_temp_f_by_month:
     {1: 48, 2: 50, 3: 57, 4: 66, 5: 74, 6: 81, 7: 85, 8: 85, 9: 80, 10: 71, 11: 60, 12: 52}
