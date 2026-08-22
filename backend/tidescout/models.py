@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class RiverGauge(BaseModel):
@@ -187,20 +187,57 @@ class SalinityConfig(BaseModel):
     k = 1/3 is the Savenije-family scaling exponent and l0_km is a rough guess
     at Winyah's intrusion length at median flow. Task 5 replaces them and
     records the fit residual alongside.
+
+    S is a bounded logistic (sigmoid) function of the tidally-shifted
+    distance, not a clipped exponential -- see `engine/salinity.py`'s module
+    docstring for the real-data review that found the clipped form made
+    47.40% of Winyah's domain read bit-identical salinity across a 19x
+    discharge swing at high water, and why a single length scale could not
+    be fixed without trading the mouth's salinity for the head's. Bounds
+    below are load-bearing, not decorative: Task 5's fit is an unconstrained
+    optimizer, and e.g. `l0_km=-18` produces salinity ABOVE ocean_ppt with no
+    error anywhere unless these are enforced at construction.
     """
 
-    ocean_ppt: float = 34.0
-    # Intrusion length at q0_cfs. Fitted.
-    l0_km: float = 18.0
-    q0_cfs: float = 4000.0
+    model_config = ConfigDict(extra="forbid")
+
+    ocean_ppt: float = Field(default=34.0, gt=0)
+    # Along-estuary distance (net of tidal shift) at which salinity crosses
+    # 50% of ocean_ppt -- the salt front's POSITION. Fitted.
+    l0_km: float = Field(default=18.0, gt=0)
+    q0_cfs: float = Field(default=4000.0, gt=0)
     # Power-law exponent: L ~ Q^-k. 1/3 is the theoretical value. Fitted.
-    k: float = 0.33
+    k: float = Field(default=0.33, ge=0)
     # Tidal excursion -- how far the salt field slides over a cycle.
     # u_tidal * T / pi with u ~ 0.5 m/s and T = 12.42 h gives ~7 km.
-    excursion_km: float = 7.0
-    # Discharge span the fit was made over. Outside it, results are flagged
-    # rather than silently trusted.
+    excursion_km: float = Field(default=7.0, gt=0)
+    # Half-width of the logistic transition, in km -- the salt front's
+    # SHARPNESS, independent of l0_km's POSITION. Added because a single
+    # length scale is over-constrained: forcing near-fresh (1 ppt) at the
+    # real domain's 31.57 km head with a plain exponential forced l0_km down
+    # to 8.95 km, which alone cost North Jetty (2.58 km) 8.5 of its 34 ppt.
+    # Splitting position from sharpness fixes that -- under the same head
+    # constraint here, North Jetty loses 0.01 ppt. 5.0 km is a starting
+    # guess, sized so neither the mouth nor the head saturates to
+    # bit-identical output across the full calibration range (verified
+    # against the real 587,325-cell distance field; see Task 3's report).
+    # Fitted in Task 5 alongside the rest.
+    front_width_km: float = Field(default=5.0, gt=0)
+    # Discharge span the fit was made over, (lo, hi) with lo < hi. Outside
+    # it, results are flagged rather than silently trusted.
     calibration_range_cfs: tuple[float, float] = (1232.0, 22996.0)
+
+    @field_validator("calibration_range_cfs")
+    @classmethod
+    def _calibration_range_is_ordered(cls, v: tuple[float, float]) -> tuple[float, float]:
+        lo, hi = v
+        if not lo < hi:
+            raise ValueError(
+                f"calibration_range_cfs must be (lo, hi) with lo < hi, got {v!r} -- "
+                "a reversed or degenerate range makes every discharge read as "
+                "extrapolated, which defeats the flag's whole purpose"
+            )
+        return v
 
 
 class Fishery(BaseModel):
