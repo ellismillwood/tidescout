@@ -179,11 +179,52 @@ discharge_buckets:
   low_below_cfs: 2774
   high_above_cfs: 6292
 salinity:
-  # Task 3 (2026-08-22) defaults -- THEORETICAL, not fitted. Task 5 replaces
-  # every value below against real 00480 salinity observations and records
-  # the fit residual alongside. Kept here (rather than relying silently on
-  # the model default) so the provenance of each number is visible in one
-  # place, per this file's own convention.
+  # CALIBRATION ATTEMPTED AND DECLINED 2026-08-22 (Task 5). Every value below
+  # is still THEORETICAL, not fitted. `tidescout salinity calibrate` runs and
+  # returns numbers; those numbers are not constrained by any data that
+  # exists, so writing them here would have made the block look calibrated
+  # while being no better anchored than it is now. What the run found:
+  #
+  #   - Winyah Bay has exactly two USGS 00480 sites (021108125, 02110815).
+  #     BOTH lie outside the model domain -- 9,498 m and 1,362 m from the
+  #     nearest in-domain library cell -- so both snap to the SAME cell, the
+  #     distance field's maximum at 31.57 km. Every observation that exists
+  #     carries one along-estuary distance, at the extreme fresh end.
+  #   - The 0-31.57 km reach the scoring layer actually reads has no salinity
+  #     observation at all. The only in-domain candidate, SAMPIT RIVER
+  #     02136371 at 20.01 km, returns zero 00480 records over four years
+  #     (live-probed 2026-08-22, 1,500-day dv query: 0 timeSeries entries).
+  #   - No ocean end-member: no CO-OPS station within 250 km serves salinity
+  #     (Task 4). ocean_ppt was HELD at 34.0, not fitted.
+  #   - q0_cfs is held because it is EXACTLY degenerate with l0_km:
+  #     L = l0*(Q/q0)^-k is invariant under (l0, q0) -> (l0*c^k, c*q0).
+  #
+  #   Fit over 348 daily means (365 d, 02110815 admitted at --max-snap-m 2000),
+  #   composite discharge 1,232-11,905 cfs, plus 117 observed tidal swings:
+  #     l0_km 4.105  k 1.040  front_width_km 16.623  excursion_km 11.525
+  #     rmse_ppt 1.719   swing_rmse_ppt 2.993
+  #     n_obs 348   n_interior_obs 36   n_distinct_distances 1
+  #     cfs_span (1231.6, 11905.0)   condition_number 44.8   at_bounds []
+  #     warning: DISTANCE COVERAGE TOO THIN -- 1 distinct along-estuary
+  #     distance spanning 0.00 km against a fitted front width of 16.62 km.
+  #
+  #   WHY THOSE NUMBERS WERE NOT WRITTEN IN. Holding front_width_km at 5, 8,
+  #   12 and 16 km and refitting the rest gives four fits whose rmse spans
+  #   1.6978-1.7137 ppt -- a spread of 0.016 ppt, 60x below the 1 ppt
+  #   quantisation of the observations themselves (all 348 daily means are
+  #   whole numbers; 56% are exactly 0.0). Those four indistinguishable fits
+  #   predict, at median flow: North Jetty 19.8-34.0 ppt, Mud Bay Cut
+  #   12.6-33.9 ppt, mid-bay 4.7-27.1 ppt, with l0_km spanning 5.1-23.4 km.
+  #   The data cannot tell a nearly-oceanic Mud Bay Cut from a brackish one.
+  #   Note that every NUMERICAL health check passes on this fit (condition
+  #   44.8, all 1-sigma below their values, nothing on a bound) -- they
+  #   describe the design that was observed and cannot see the extrapolation.
+  #
+  #   WHAT WOULD RESOLVE IT: one salinity sensor anywhere between the mouth
+  #   and Georgetown. Registering the NERR CDMO IP (North Inlet-Winyah Bay,
+  #   Oyster Landing) would supply exactly this; the CDMO web service returns
+  #   "Invalid ip" until a human submits their form. Until then the
+  #   climatology fallback stays live and these constants stay theoretical.
   #
   # Open-ocean end-member off the SC coast; typical nearshore Atlantic
   # salinity runs ~34-36 ppt. Not measured at Winyah's mouth specifically --

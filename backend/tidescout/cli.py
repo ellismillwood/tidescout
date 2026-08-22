@@ -10,6 +10,10 @@ bathy_app = typer.Typer(no_args_is_help=True, help="Bathymetry tile discovery an
 app.add_typer(bathy_app, name="bathy")
 flow_app = typer.Typer(no_args_is_help=True, help="ANUGA flow-state library.")
 app.add_typer(flow_app, name="flow")
+salinity_app = typer.Typer(
+    no_args_is_help=True, help="Along-estuary distance field and salinity calibration."
+)
+app.add_typer(salinity_app, name="salinity")
 console = Console()
 
 
@@ -342,6 +346,123 @@ def bathy_wetlands(slug: str) -> None:
         f"{len(fc['features'])} wetland features -> {path} ({path.stat().st_size:,} bytes)"
     )
 
+
+
+@salinity_app.command("field")
+def salinity_field(slug: str) -> None:
+    """Build the along-estuary distance field the salinity model reads."""
+    import numpy as np
+
+    from tidescout.config import load_fishery
+    from tidescout.pipeline.estuary import build_distance_field
+
+    fishery = load_fishery(slug)
+    path = build_distance_field(slug, fishery)
+    d = np.load(path)
+    finite = np.isfinite(d)
+    console.print(
+        f"{finite.sum():,} cells with a water route to the sea "
+        f"({(~finite).sum():,} unreachable) -> {path}"
+    )
+    if finite.any():
+        console.print(
+            f"along-estuary km: min {np.nanmin(d):.2f}  median {np.nanmedian(d):.2f}  "
+            f"max {np.nanmax(d):.2f}"
+        )
+
+
+@salinity_app.command("calibrate")
+def salinity_calibrate(
+    slug: str,
+    days: int = typer.Option(90, "--days", help="days of USGS history to fit against"),
+    max_snap_m: float = typer.Option(
+        500.0,
+        "--max-snap-m",
+        help="exclude a sensor further than this from any in-domain cell",
+    ),
+) -> None:
+    """Fit the intrusion model to real observations, and print what it cannot say.
+
+    The diagnostics block is printed verbatim and is the point of the command.
+    A fit that returns numbers is not the same as a fit that means something,
+    and this is the only place that difference is visible.
+    """
+    from tidescout.config import load_fishery
+    from tidescout.pipeline import salinity_fit
+    from tidescout.sources.cache import default_cache
+
+    fishery = load_fishery(slug)
+    data = salinity_fit.collect_observations(
+        slug, fishery, default_cache(), days=days, max_snap_m=max_snap_m
+    )
+
+    table = Table(title=f"{fishery.name} — 00480 sensors over the last {days} days")
+    for col in ("site", "along-estuary km", "snap gap m", "days", "ppt min", "ppt max", "used"):
+        table.add_column(col)
+    for r in data.sites:
+        table.add_row(
+            r.site,
+            f"{r.distance_km:.2f}",
+            f"{r.snap_gap_m:,.0f}",
+            str(r.n_days),
+            f"{r.ppt_range[0]:.1f}",
+            f"{r.ppt_range[1]:.1f}",
+            "[green]yes[/green]" if r.used else f"[red]no[/red] — {r.note}",
+        )
+    console.print(table)
+
+    if data.day_span:
+        console.print(f"discharge paired over {data.day_span[0]} .. {data.day_span[1]}")
+    console.print(
+        f"{len(data.observations)} salinity observations, "
+        f"{len(data.swings)} tidal-swing observations "
+        f"(swings from the last {data.swing_days} days — USGS keeps instantaneous "
+        "values for 120)"
+    )
+
+    try:
+        fitted, diag = salinity_fit.fit_intrusion(
+            data.observations, cfg=fishery.salinity, swings=data.swings
+        )
+    except ValueError as exc:
+        console.print(f"\n[red]CANNOT CALIBRATE[/red]: {exc}")
+        console.print(
+            "[dim]That is a finding about the available data, not a bug. "
+            "The unfitted config stands and the climatology fallback stays "
+            "live.[/dim]"
+        )
+        raise typer.Exit(1) from exc
+
+    params = Table(title="fitted SalinityConfig")
+    for col in ("parameter", "before", "after", "1-sigma", "fitted?"):
+        params.add_column(col)
+    for name in ("ocean_ppt", "l0_km", "q0_cfs", "k", "excursion_km", "front_width_km"):
+        sigma = diag["param_sigma"].get(name)
+        was, now = getattr(fishery.salinity, name), getattr(fitted, name)
+        params.add_row(
+            name,
+            f"{was:.4g}",
+            f"{now:.4g}",
+            "-" if sigma is None else f"{sigma:.4g}",
+            "yes" if name in diag["fitted_params"] else "[dim]held[/dim]",
+        )
+    lo, hi = fitted.calibration_range_cfs
+    params.add_row("calibration_range_cfs", str(fishery.salinity.calibration_range_cfs),
+                   f"({lo:.0f}, {hi:.0f})", "-", "yes")
+    console.print(params)
+
+    console.print("\n[bold]diagnostics[/bold]")
+    for key, value in diag.items():
+        if key == "warning":
+            continue
+        console.print(f"  {key}: {value}")
+    console.print("\n[bold]warning[/bold]")
+    console.print(diag["warning"] or "  (none)")
+    console.print(
+        "\n[dim]Read the warning before the numbers. Nothing here is written to "
+        f"fisheries/{slug}.yaml — that edit is a human decision, with this output "
+        "recorded as its provenance.[/dim]"
+    )
 
 @flow_app.command("mesh")
 def flow_mesh(slug: str) -> None:
