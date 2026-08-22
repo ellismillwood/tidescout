@@ -197,3 +197,37 @@ class Fishery(BaseModel):
     jetties: list[JettySeed] = []
     model_domain: ModelDomain | None = None
     anuga: AnugaConfig = AnugaConfig()
+
+    def branch_shares(self) -> list[float]:
+        """Each river's fraction of total inflow, in `self.rivers` order.
+
+        Shared by every caller that splits a composite discharge across
+        branches (`pipeline.forcing.river_inflow_m3s`, the ANUGA boundary;
+        `sources.usgs.branch_discharge_cfs`, the runtime salinity path) so the
+        split logic and its guards exist in exactly one place. Three cases:
+
+          - every river's `inflow_share` is None: fall back to equal shares.
+            This is the state a fishery starts in before anyone measures its
+            per-river split (see `RiverGauge.inflow_share`) -- not an error.
+          - some but not all are None: raise, naming the missing rivers.
+            Half a split half-guesses the rest; that must fail loudly.
+          - shares are all present but do not sum to 1.0 (within 1e-6): raise.
+            Renormalising silently would hide an authoring mistake.
+        """
+        shares = [r.inflow_share for r in self.rivers]
+        if all(s is None for s in shares):
+            n = len(self.rivers) or 1
+            return [1.0 / n] * len(self.rivers)
+        if any(s is None for s in shares):
+            missing = [r.name for r in self.rivers if r.inflow_share is None]
+            raise ValueError(
+                f"inflow_share is set on some rivers but missing on {missing} -- "
+                "author it on all of them or none, so the split is never half-guessed"
+            )
+        total_share = sum(shares)
+        if abs(total_share - 1.0) > 1e-6:
+            raise ValueError(
+                f"inflow_share values sum to {total_share:.4f}, not 1.0 -- "
+                "renormalising silently would hide an authoring mistake"
+            )
+        return shares

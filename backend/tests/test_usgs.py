@@ -275,3 +275,25 @@ def test_branch_discharge_falls_back_to_now_when_no_lagged_value_exists():
     f = load_fishery("winyah-bay")
     branches = branch_discharge_cfs(f, _summary(7000.0, None))
     assert sum(branches.values()) == pytest.approx(7000.0, rel=1e-9)
+
+
+def test_branch_discharge_rejects_partial_share_authorship():
+    """Half-authoring a split must fail loudly, not half-guess it -- the same
+    guard `forcing.river_inflow_m3s` enforces, shared via
+    `Fishery.branch_shares()` so the runtime salinity path can't silently
+    diverge from the ANUGA forcing path."""
+    f = load_fishery("winyah-bay")
+    f.rivers[1].inflow_share = None  # Waccamaw left unauthored
+    with pytest.raises(ValueError) as exc_info:
+        branch_discharge_cfs(f, _summary(10000.0, 9000.0))
+    assert "Waccamaw" in str(exc_info.value)
+
+
+def test_branch_discharge_rejects_shares_that_do_not_sum_to_one():
+    """A silent renormalisation would hide an authoring mistake -- and here,
+    hide up to a tenth of the river's discharge from a model where intrusion
+    length is a strong function of Q."""
+    f = load_fishery("winyah-bay")
+    f.rivers[0].inflow_share = 0.5  # now sums to ~0.72
+    with pytest.raises(ValueError, match="inflow_share"):
+        branch_discharge_cfs(f, _summary(10000.0, 9000.0))

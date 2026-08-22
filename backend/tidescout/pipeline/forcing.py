@@ -81,6 +81,8 @@ def river_inflow_m3s(fishery: Fishery, bucket: str) -> dict[str, float]:
     The composite bucket boundaries are the calibrated percentiles from Plan 3
     Task 1. Each river takes its `inflow_share` of that composite -- NOT its
     gauge `weight`, which serves the different job of building the composite.
+    The split (and its guards against partial or mis-summed authorship) lives
+    on `Fishery.branch_shares()`, shared with the runtime salinity path.
     """
     b = fishery.discharge_buckets
     composite_cfs = {
@@ -89,23 +91,7 @@ def river_inflow_m3s(fishery: Fishery, bucket: str) -> dict[str, float]:
         "high": b.high_above_cfs,
     }[bucket]
 
-    shares = [r.inflow_share for r in fishery.rivers]
-    if all(s is None for s in shares):
-        # Unauthored fishery: fall back to equal shares rather than failing.
-        n = len(fishery.rivers) or 1
-        shares = [1.0 / n] * len(fishery.rivers)
-    elif any(s is None for s in shares):
-        missing = [r.name for r in fishery.rivers if r.inflow_share is None]
-        raise ValueError(
-            f"inflow_share is set on some rivers but missing on {missing} -- "
-            "author it on all of them or none, so the split is never half-guessed"
-        )
-    total_share = sum(shares)
-    if abs(total_share - 1.0) > 1e-6:
-        raise ValueError(
-            f"inflow_share values sum to {total_share:.4f}, not 1.0 -- "
-            "renormalising silently would hide an authoring mistake"
-        )
+    shares = fishery.branch_shares()
     return {
         r.name: composite_cfs * CFS_TO_M3S * s
         for r, s in zip(fishery.rivers, shares, strict=True)

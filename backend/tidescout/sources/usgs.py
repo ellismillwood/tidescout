@@ -65,15 +65,14 @@ def branch_discharge_cfs(fishery: Fishery, summary: DischargeSummary) -> dict[st
     the runtime twin of the ANUGA forcing correction, and it matters more here:
     intrusion length is a strong function of the discharge on each branch, so a
     78/13/8 river system modelled as equal thirds puts the salt front in the
-    wrong place on all three.
+    wrong place on all three. The split itself, and its guards against partial
+    or mis-summed `inflow_share` authorship, live on `Fishery.branch_shares()`,
+    shared with `pipeline.forcing.river_inflow_m3s`.
     """
     basis = summary.cfs_lagged if summary.cfs_lagged is not None else summary.cfs_now
     if basis is None:
         return {}
-    shares = [r.inflow_share for r in fishery.rivers]
-    if any(s is None for s in shares):
-        n = len(fishery.rivers) or 1
-        shares = [1.0 / n] * len(fishery.rivers)
+    shares = fishery.branch_shares()
     return {r.name: basis * s for r, s in zip(fishery.rivers, shares, strict=True)}
 
 
