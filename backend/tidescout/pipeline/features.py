@@ -3,6 +3,7 @@ per-fishery UTM analysis raster, reproject geometries to EPSG:4326, and write
 a single `features.geojson` FeatureCollection."""
 
 import json
+import math
 from pathlib import Path
 
 from rasterio.warp import transform as warp_transform
@@ -13,6 +14,7 @@ from tidescout.engine.terrain import slope_deg
 from tidescout.models import Fishery
 from tidescout.paths import fishery_data_dir
 from tidescout.pipeline.bathy import read_bathy
+from tidescout.pipeline.oysters import load_reefs_utm, nearest_reef_m, reef_area_m2_within
 
 
 def _to4326(geom, epsg: int):
@@ -56,11 +58,33 @@ def build_features(slug: str, fishery: Fishery) -> Path:
         + detect.detect_bars(z, t, cell, transform)
         + detect.seed_jetties(fishery, lonlat_to_grid)
     )
+
+    # Oysters hold bait/structure independently of the tide, so this is a
+    # static attribute computed once here rather than per-hour derived
+    # structure. Both layers must still be in the same UTM CRS for metre
+    # distances to mean anything, so this runs before _to4326 below.
+    reefs_utm = load_reefs_utm(slug, epsg)
+    geoms = [f.geometry for f in feats]
+    reef_areas = reef_area_m2_within(geoms, reefs_utm)
+    reef_dists = nearest_reef_m(geoms, reefs_utm)
+    for f, area, dist in zip(feats, reef_areas, reef_dists, strict=True):
+        f.attrs["oyster_area_m2"] = area
+        f.attrs["oyster_nearest_m"] = dist
+
     out = []
     for f in feats:
         props = {"type": f.type}
         for k, v in f.attrs.items():
-            props[k] = round(v, 2) if isinstance(v, float) else v
+            if isinstance(v, float) and math.isinf(v):
+                # nearest_reef_m's documented no-reef-layer value. JSON has no
+                # infinity literal -- json.dumps(inf) emits the bare token
+                # `Infinity`, which RFC 8259 forbids and a browser's
+                # JSON.parse rejects outright, so this must become null here.
+                props[k] = None
+            elif isinstance(v, float):
+                props[k] = round(v, 2)
+            else:
+                props[k] = v
         out.append(
             {
                 "type": "Feature",

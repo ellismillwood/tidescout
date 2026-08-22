@@ -50,6 +50,29 @@ def test_build_features_on_synthetic(tmp_path, monkeypatch):
             assert -180 <= lon <= 180 and -90 <= lat <= 90
 
 
+def test_build_features_defaults_oyster_attrs_and_writes_json_safe_null_for_missing_reef_layer(
+    tmp_path, monkeypatch
+):
+    """No oyster_reefs.geojson on disk is the documented "SCDNR layer
+    unavailable" contingency, not an error. Every feature must get
+    oyster_area_m2 = 0.0 (a real "no reef nearby" answer, not NaN) and
+    oyster_nearest_m = null -- NOT the raw `Infinity` token nearest_reef_m
+    returns internally, which is invalid JSON per RFC 8259 and would blow up
+    the frontend's JSON.parse. This is the reachable worst case: with no reef
+    layer at all, *every* feature hits this path at once."""
+    z = synth.creek_mouth_dem()
+    _fake_bathy(tmp_path, monkeypatch, z)
+    f = load_fishery("winyah-bay")
+    out = build_features("winyah-bay", f)
+    raw = out.read_text()
+    assert "Infinity" not in raw
+    fc = json.loads(raw)
+    assert fc["features"], "must have detected some synthetic features"
+    for feat in fc["features"]:
+        assert feat["properties"]["oyster_area_m2"] == 0.0
+        assert feat["properties"]["oyster_nearest_m"] is None
+
+
 def test_feature_ids_unique_and_prefixed_by_type(tmp_path, monkeypatch):
     """Interface contract: id is "<type>-<12 hex chars>", a hash of the type
     plus quantised centroid, stable across rebuilds."""
