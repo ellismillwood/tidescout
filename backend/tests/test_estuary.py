@@ -149,3 +149,48 @@ def test_ocean_seed_mask_keeps_only_the_largest_contiguous_run():
 
     assert seeds[rows == 2].all(), "the large run is the true mouth and must all seed"
     assert not seeds[rows == 15].any(), "the small detached run must not seed"
+
+
+def test_ocean_seed_mask_excludes_edge_and_deep_cells_outside_the_polygon():
+    """The polygon leg matters on its own, not just edge and depth: an edge
+    cell that is deep enough and would otherwise qualify must not seed if it
+    sits outside the authored ocean polygon. Every other test here uses a
+    whole-grid polygon, so this is the one regression check that would catch
+    `inside` being dropped from the seed calculation entirely."""
+    mask = np.zeros((20, 20), bool)
+    mask[10, 0:10] = True  # a channel one cell wide -- every cell is an edge cell
+    spec = _Spec(mask)
+    rows, cols = np.unravel_index(spec.flat_index, spec.shape)
+    bed_elev_m = np.full(spec.flat_index.size, -5.0)  # uniformly deep
+    # Covers only the west half of the grid (x up to 0.5 km); cols 0-4 sit at
+    # x <= 0.45 km (inside), cols 5-9 at x >= 0.55 km (outside).
+    polygon_km = [(0.0, 0.0), (0.0, 2.0), (0.5, 2.0), (0.5, 0.0)]
+
+    seeds = estuary.ocean_seed_mask(spec, polygon_km, bed_elev_m, ocean_max_z_m=-2.0)
+
+    assert seeds[cols <= 4].all(), "edge, deep, and inside the polygon must seed"
+    assert not seeds[cols >= 5].any(), "edge and deep but outside the polygon must not seed"
+
+
+def test_load_distance_field_round_trips_a_written_array(tmp_path, monkeypatch):
+    from tidescout import paths
+
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+    d = paths.fishery_data_dir("winyah-bay")
+    np.save(d / "estuary_km.npy", np.array([0.0, 1.5, np.nan], dtype="float32"))
+
+    d_out = estuary.load_distance_field("winyah-bay")
+
+    assert np.allclose(d_out[:2], [0.0, 1.5])
+    assert np.isnan(d_out[2])
+
+
+def test_load_distance_field_names_the_missing_file(tmp_path, monkeypatch):
+    """A missing field must point at the command that builds it, not raise a
+    bare FileNotFoundError on a path the caller has to decode."""
+    from tidescout import paths
+
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+
+    with pytest.raises(FileNotFoundError, match="tidescout salinity field winyah-bay"):
+        estuary.load_distance_field("winyah-bay")

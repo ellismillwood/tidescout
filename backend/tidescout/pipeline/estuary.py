@@ -41,8 +41,8 @@ def along_estuary_km(spec, seed_mask: np.ndarray) -> np.ndarray:
     n = spec.flat_index.size
     if not seed_mask.any():
         raise ValueError(
-            "no seed cells -- the ocean polygon selects nothing inside the "
-            "model domain, so there is no sea to measure distance from"
+            "no seed cells -- the seed mask is empty, so there is no sea to "
+            "measure distance from"
         )
 
     rows, cols = np.unravel_index(spec.flat_index, spec.shape)
@@ -99,13 +99,13 @@ def _largest_component(mask: np.ndarray, spec) -> np.ndarray:
     deep pocket that happens to touch the domain edge inside the polygon,
     passes all three tests without being part of the mouth. On Winyah at
     `ocean_max_z_m = -2.0` the raw edge-and-deep-and-inside set fragments
-    into 8 separate 8-connected components; the largest holds 950 of 1,317
+    into 9 separate 8-connected components; the largest holds 950 of 1,317
     candidate cells, and the other ~370 are scattered noise -- including the
     single near-threshold cell 1.14 km from Georgetown Lighthouse that made
     its distance swing by 5 km across a physically-arbitrary choice of
     `ocean_max_z_m` (0.50 to 5.51 km over -1.6 to -3.0 m). Restricted to the
     largest component alone, that swing disappears: Georgetown holds at
-    5.51 km and North Jetty at 2.58 km across the same sweep.
+    5.52 km and North Jetty at 2.58 km across the same sweep.
 
     ASSUMES exactly one seaward opening. Winyah Bay has one. A fishery with
     two genuinely disconnected true mouths would silently lose the smaller
@@ -167,7 +167,16 @@ def ocean_seed_mask(
         )
     poly = Polygon([(x * 1000.0, y * 1000.0) for x, y in ocean_boundary_utm_km])
     if not poly.is_valid:
-        raise ValueError("ocean_boundary_utm_km is not a valid polygon")
+        # A self-intersecting (bowtied) hand-authored ring makes .contains()
+        # below misclassify silently -- Shapely doesn't raise, it just gives
+        # an answer nobody authored. Same failure mode as
+        # `mesh.classify_boundary`'s identical check on the same polygon.
+        raise ValueError(
+            "ocean_boundary_utm_km is not a valid polygon (self-"
+            "intersecting or otherwise malformed) -- fix the authored "
+            "vertices in the fishery YAML before computing the along-"
+            "estuary distance field"
+        )
     inside = np.fromiter(
         (poly.contains(Point(x, y)) for x, y in zip(spec.xs, spec.ys, strict=True)),
         dtype=bool,
@@ -175,6 +184,17 @@ def ocean_seed_mask(
     )
     deep = np.isfinite(bed_elev_m) & (bed_elev_m < ocean_max_z_m)
     candidates = inside & _domain_edge_mask(spec) & deep
+    if not candidates.any():
+        # along_estuary_km's own empty-seed check is seed-agnostic and can't
+        # say why; this function is where all three conditions -- and their
+        # inputs -- are visible enough to diagnose which one emptied it.
+        raise ValueError(
+            "no cell is simultaneously inside ocean_boundary_utm_km, on the "
+            "domain's outer edge, and below ocean_max_z_m -- check that the "
+            "polygon actually overlaps real coastline, that ocean_max_z_m "
+            "isn't excluding every deep cell, and that the domain mask "
+            "reaches the polygon at all"
+        )
     return _largest_component(candidates, spec)
 
 
@@ -194,6 +214,18 @@ def _bed_elevation_m(slug: str, fishery: Fishery, spec) -> np.ndarray:
     z, _, _ = read_bathy(slug)
     step = int(round(fishery.anuga.library_cell_m / fishery.bathymetry.cell_m))
     z_lib = z[::step, ::step]
+    if z_lib.shape != spec.shape:
+        # The whole point of this function is that z_lib and spec share a
+        # source pixel per cell. If grid_spec's own decimation ever changes
+        # without this `step` formula changing to match, `z_lib[rows, cols]`
+        # below would silently read the wrong pixels -- fancy indexing does
+        # not bounds-check against an intended shape, only against z_lib's
+        # actual one. Fail loudly here instead.
+        raise ValueError(
+            f"bed elevation grid {z_lib.shape} does not match the library "
+            f"grid {spec.shape} -- flowlib.grid_spec's mask decimation and "
+            "this function's z[::step, ::step] have drifted apart"
+        )
     rows, cols = np.unravel_index(spec.flat_index, spec.shape)
     return z_lib[rows, cols].astype("float64")
 
