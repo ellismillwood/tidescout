@@ -19,12 +19,13 @@ stations:
   # Add this to CO-OPS MLLW predictions (ft*0.3048) to get NAVD88 metres, the
   # bathymetry datum.
   tide_datum_offset_m: -0.661
-  # Springmaid Pier, Myrtle Beach (33.6550, -78.9183) -- ~50 km NE on the open
-  # coast, the CLOSEST CO-OPS station tagged with a "Physical Oceanography"
-  # product page (Charleston, 8665530, 92.5 km away, carries the same tag and
-  # is also within 100 km -- corrected 2026-08-22; "sole" was inaccurate).
-  # It measures shelf water, which is the role it plays: the ocean end-member
-  # the intrusion profile decays away from, not an in-bay observation.
+  # Springmaid Pier, Myrtle Beach (33.6550, -78.9183) -- ~42.8 km NE on the
+  # open coast, the CLOSEST CO-OPS station tagged with a "Physical
+  # Oceanography" product page (Charleston, 8665530, 92.5 km away, carries
+  # the same tag and is also within 100 km -- corrected 2026-08-22; "sole"
+  # was inaccurate). It measures shelf water, which is the role it plays:
+  # the ocean end-member the intrusion profile decays away from, not an
+  # in-bay observation.
   # NOT AVAILABLE, probed 2026-08-16 -- do not re-litigate without new access:
   #   - NERR North Inlet-Winyah Bay (Oyster Landing et al): the CDMO web
   #     service returns "Invalid ip" for every method; it requires IP
@@ -43,9 +44,12 @@ stations:
   #   Wilmington 8658120, Wrightsville Beach 8658163, Fort Pulaski 8670870)
   #   were also checked and none carry a Conductivity sensor either -- there
   #   is no live CO-OPS salinity substitute near Winyah Bay today. Kept
-  #   configured anyway: it is the documented sole candidate, and
-  #   fetch_ocean_salinity degrades to None (-> SalinityConfig.ocean_ppt's
-  #   static default) rather than erroring when it returns nothing.
+  #   configured anyway: it is the documented best candidate. That
+  #   {"error": ...} response makes fetch_ocean_salinity RAISE
+  #   SourceUnavailable (a real failure, not "responded with nothing
+  #   usable") -- it is meant to propagate to sources.dayloader.load_day's
+  #   attempt(), which records failing sources by name in `missing`, rather
+  #   than silently falling back to SalinityConfig.ocean_ppt with no trace.
   ocean_salinity: "8661070"
   water:
     # WACCAMAW RIVER NEAR PAWLEYS ISLAND, SC (33.5066, -79.1270) -- tidal

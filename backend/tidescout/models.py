@@ -37,9 +37,11 @@ class Stations(BaseModel):
     # CO-OPS physocean station supplying S_ocean. Springmaid Pier is the
     # closest one to Winyah Bay (mdapi probe, 2026-08-16, corrected 2026-08-22
     # -- it is not the only one within 100 km). Its salinity product currently
-    # returns no data live-probed 2026-08-22 -- see sources/coops_water.py's
-    # module docstring; the field is kept because it is the best documented
-    # candidate and fetch_ocean_salinity degrades to None cleanly.
+    # returns a CO-OPS {"error": ...} payload live-probed 2026-08-22 -- see
+    # sources/coops_water.py's module docstring; the field is kept because it
+    # is the best documented candidate. fetch_ocean_salinity raises
+    # SourceUnavailable in that case (a real failure), not None -- None is
+    # reserved for "the station responded with nothing usable."
     ocean_salinity: str = ""
 
 

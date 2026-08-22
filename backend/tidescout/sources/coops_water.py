@@ -1,6 +1,6 @@
 """CO-OPS physical-oceanography salinity: the model's ocean end-member.
 
-Springmaid Pier (8661070), ~50 km NE of Winyah Bay on the open coast, is the
+Springmaid Pier (8661070), ~42.8 km NE of Winyah Bay on the open coast, is the
 closest CO-OPS station tagged with a "Physical Oceanography" product page.
 It measures shelf water rather than anything inside the bay, which is exactly
 the role it plays here: S_ocean, the boundary value the intrusion profile
@@ -31,10 +31,15 @@ None of the other 4 CO-OPS stations within 250 km of Winyah Bay (Charleston
 8665530, Wilmington 8658120, Wrightsville Beach 8658163, Fort Pulaski 8670870)
 carry a Conductivity sensor either, so there is currently no substitute
 station reachable via CO-OPS. In practice `fetch_ocean_salinity` therefore
-always returns None against the configured station today, and callers fall
-back to `SalinityConfig.ocean_ppt`'s static default -- exactly the resilience
-path this module is built to hit gracefully rather than crash on, per spec
-section 10, but worth recording so it is not mistaken for a live feed.
+RAISES `SourceUnavailable` against the configured station today -- CO-OPS's
+"No data was found" response is a `{"error": ...}` payload, which is a real
+failure under this module's contract below, not a "responded with nothing
+usable" case. That exception is meant to propagate to
+`sources.dayloader.load_day`'s `attempt()` helper, the app's one place that
+catches source failures and records them by name in `missing`, so Springmaid
+Pier shows up there rather than silently supplying
+`SalinityConfig.ocean_ppt`'s static default with no trace. Recorded here so
+this is not mistaken for a live feed.
 
 Reuses noaa.py's CO-OPS client (`_get_json`) rather than re-implementing an
 HTTP layer for the same datagetter endpoint noaa.py already owns.
@@ -42,7 +47,6 @@ HTTP layer for the same datagetter endpoint noaa.py already owns.
 
 from datetime import date
 
-from tidescout.errors import SourceUnavailable
 from tidescout.sources.cache import Cache
 from tidescout.sources.noaa import OBS_TTL, _get_json
 
@@ -55,11 +59,32 @@ PLAUSIBLE_PPT = (25.0, 40.0)
 
 
 def fetch_ocean_salinity(station: str, day: date, cache: Cache) -> float | None:
-    """Mean of `day`'s valid salinity readings in ppt, or None if the sensor
-    gives nothing usable: offline, blank readings, or values outside
-    PLAUSIBLE_PPT (a stuck/miscalibrated sensor). Never raises -- a dark ocean
-    sensor must degrade to the caller's configured default, not take down the
-    day's forecast (spec section 10).
+    """Mean of `day`'s valid salinity readings in ppt.
+
+    `None` and `SourceUnavailable` mean two different things, deliberately
+    kept apart:
+
+    - Returns `None` only when the station RESPONDED and had nothing usable:
+      every reading blank (CO-OPS's dark-sensor marker), malformed, or
+      outside PLAUSIBLE_PPT (a stuck/miscalibrated sensor).
+    - Raises `tidescout.errors.SourceUnavailable` for everything that is
+      actually a failure: a bad station id, a CO-OPS `{"error": ...}`
+      payload (this is how "No data was found" arrives -- see the module
+      docstring's FINDING), a network fault, or a cache miss with no stale
+      fallback to serve. This is NOT caught here on purpose: catching it
+      would make a station typo, an API-shape change, and a transient
+      network blip return the identical silent `None` as "the station has
+      no salinity today," and -- since Springmaid Pier never succeeds --
+      nothing would ever reveal which case actually happened. Letting it
+      propagate routes the failure through the app's one place that already
+      handles this (`sources.dayloader.load_day`'s `attempt()`), which
+      records the source by name instead of it vanishing into a constant.
+
+    Not defensive beyond CO-OPS's documented response shape: if `data` were
+    ever something other than a list of `{"t", "s", ...}` dicts, iterating it
+    raises whatever built-in exception that produces (e.g. `AttributeError`
+    on a non-dict row's `.get`) rather than being caught and turned into
+    `None` or `SourceUnavailable` -- left to propagate to `attempt()` too.
     """
     begin_end = day.strftime("%Y%m%d")
     params = {
@@ -74,13 +99,10 @@ def fetch_ocean_salinity(station: str, day: date, cache: Cache) -> float | None:
         "format": "json",
     }
     key = f"salinity:{station}:{begin_end}"
-    try:
-        # Same "coops" cache bucket as noaa.py's own key prefixes
-        # (pred:/hilo:/cur:/wtemp:) -- one bucket per API family, not per
-        # module.
-        cached = cache.get_or_fetch("coops", key, OBS_TTL, lambda: _get_json(params))
-    except SourceUnavailable:
-        return None  # network failure or a CO-OPS {"error": ...} payload
+    # Same "coops" cache bucket as noaa.py's own key prefixes
+    # (pred:/hilo:/cur:/wtemp:) -- one bucket per API family, not per module.
+    # SourceUnavailable propagates from here -- see docstring above.
+    cached = cache.get_or_fetch("coops", key, OBS_TTL, lambda: _get_json(params))
 
     values = []
     for row in cached.payload.get("data", []):

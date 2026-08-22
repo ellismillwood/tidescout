@@ -14,6 +14,7 @@ import pytest
 import respx
 from httpx import Response
 
+from tidescout.errors import SourceUnavailable
 from tidescout.sources.cache import Cache
 from tidescout.sources.coops_water import fetch_ocean_salinity
 
@@ -46,13 +47,19 @@ def test_blank_readings_are_skipped_not_read_as_zero(tmp_path):
 
 
 @respx.mock
-def test_api_error_payload_returns_none_rather_than_raising(tmp_path):
-    """Spec section 10: a dark sensor degrades to the configured default with a
-    flag, it does not take down the day's forecast."""
+def test_api_error_payload_raises_source_unavailable(tmp_path):
+    """A CO-OPS {"error": ...} payload (this is how "No data was found"
+    arrives -- the shape Springmaid Pier's salinity product actually returns,
+    live-verified) is a real failure, not "the station responded with
+    nothing usable" -- it must propagate as SourceUnavailable so it reaches
+    the app's one failure-handling path (dayloader.load_day's attempt(),
+    which records it by name) instead of vanishing into an indistinguishable
+    None alongside a blank reading or an out-of-range value."""
     respx.get(url__regex=r".*datagetter.*product=salinity.*").mock(
         return_value=Response(200, json={"error": {"message": "No data was found"}})
     )
-    assert fetch_ocean_salinity("8661070", date(2026, 8, 16), Cache(tmp_path / "c.db")) is None
+    with pytest.raises(SourceUnavailable):
+        fetch_ocean_salinity("8661070", date(2026, 8, 16), Cache(tmp_path / "c.db"))
 
 
 @respx.mock
@@ -64,3 +71,23 @@ def test_implausible_values_are_rejected(tmp_path):
         )
     )
     assert fetch_ocean_salinity("8661070", date(2026, 8, 16), Cache(tmp_path / "c.db")) is None
+
+
+@respx.mock
+def test_sends_station_and_date_in_request_params(tmp_path):
+    """Guards the actual wiring, not just the URL shape: a bug that swapped
+    `station` and `begin_date`/`end_date` would pass every other test here
+    (they only match on `product=salinity` via regex) but silently query the
+    wrong station or the wrong day."""
+    route = respx.get(url__regex=r".*datagetter.*product=salinity.*").mock(
+        return_value=Response(200, json=PAYLOAD)
+    )
+    fetch_ocean_salinity("8661070", date(2026, 8, 16), Cache(tmp_path / "c.db"))
+    sent = route.calls.last.request.url.params
+    assert sent["station"] == "8661070"
+    assert sent["begin_date"] == "20260816"
+    assert sent["end_date"] == "20260816"
+    assert sent["product"] == "salinity"
+    assert sent["datum"] == "MLLW"
+    assert sent["units"] == "metric"
+    assert sent["time_zone"] == "gmt"
