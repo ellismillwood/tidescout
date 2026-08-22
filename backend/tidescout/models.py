@@ -34,6 +34,13 @@ class Stations(BaseModel):
     # Added to CO-OPS predictions to convert MLLW -> NAVD88, the bathymetry
     # datum. Resolved from the station's own datums endpoint, not assumed.
     tide_datum_offset_m: float = 0.0
+    # CO-OPS physocean station supplying S_ocean. Springmaid Pier is the
+    # closest one to Winyah Bay (mdapi probe, 2026-08-16, corrected 2026-08-22
+    # -- it is not the only one within 100 km). Its salinity product currently
+    # returns no data live-probed 2026-08-22 -- see sources/coops_water.py's
+    # module docstring; the field is kept because it is the best documented
+    # candidate and fetch_ocean_salinity degrades to None cleanly.
+    ocean_salinity: str = ""
 
 
 class DischargeBuckets(BaseModel):

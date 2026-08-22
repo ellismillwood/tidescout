@@ -19,6 +19,34 @@ stations:
   # Add this to CO-OPS MLLW predictions (ft*0.3048) to get NAVD88 metres, the
   # bathymetry datum.
   tide_datum_offset_m: -0.661
+  # Springmaid Pier, Myrtle Beach (33.6550, -78.9183) -- ~50 km NE on the open
+  # coast, the CLOSEST CO-OPS station tagged with a "Physical Oceanography"
+  # product page (Charleston, 8665530, 92.5 km away, carries the same tag and
+  # is also within 100 km -- corrected 2026-08-22; "sole" was inaccurate).
+  # It measures shelf water, which is the role it plays: the ocean end-member
+  # the intrusion profile decays away from, not an in-bay observation.
+  # NOT AVAILABLE, probed 2026-08-16 -- do not re-litigate without new access:
+  #   - NERR North Inlet-Winyah Bay (Oyster Landing et al): the CDMO web
+  #     service returns "Invalid ip" for every method; it requires IP
+  #     registration via a form a human must submit.
+  #   - Mid-bay USGS salinity: none exists. The only in-bbox 00480 sites are
+  #     the two Waccamaw stations above, both ~30 km up-river reading 0-1 ppth.
+  # STATION DOES NOT ACTUALLY SERVE SALINITY, live-probed 2026-08-22:
+  #   curl -s "https://api.tidesandcurrents.noaa.gov/api/prod/datagetter?product=salinity&station=8661070&date=latest&datum=MLLW&units=metric&time_zone=gmt&format=json&application=tidescout"
+  #   -> {"error": {"message": "No data was found..."}}, same for 2026-08-16,
+  #   a recent 2-day window, and 2015-01-01..07 (no historical data either).
+  #   Its sensors.json has no Conductivity/Salinity sensor -- only Wind, Air
+  #   Temperature, Water Temperature, Barometric Pressure, Tsunami WL,
+  #   Microwave WL. "Physical Oceanography" is a broad tag (239 CO-OPS
+  #   stations nationwide carry it) and does not imply salinity reporting.
+  #   The other 4 CO-OPS stations within 250 km (Charleston 8665530,
+  #   Wilmington 8658120, Wrightsville Beach 8658163, Fort Pulaski 8670870)
+  #   were also checked and none carry a Conductivity sensor either -- there
+  #   is no live CO-OPS salinity substitute near Winyah Bay today. Kept
+  #   configured anyway: it is the documented sole candidate, and
+  #   fetch_ocean_salinity degrades to None (-> SalinityConfig.ocean_ppt's
+  #   static default) rather than erroring when it returns nothing.
+  ocean_salinity: "8661070"
   water:
     # WACCAMAW RIVER NEAR PAWLEYS ISLAND, SC (33.5066, -79.1270) -- tidal
     # reach (site_tp_cd=ST-TS), live-reporting both params (temp 27.5-30.9
