@@ -188,3 +188,87 @@ spot in every comparison, and the discharge axis barely moves speed (as predicte
    inversion in the validation gate. Each is now pinned by a test.
 7. **The Mac sleeps and kills sessions.** Hold it awake for the whole run: `caffeinate -dimsu -t N`,
    sized to the job — an 8 h window would have expired mid-build #4.
+
+## Phase 1 results (Plan 4, `plan-04-phase1-structure`)
+
+Tasks 1–11 complete, 249 tests green. `tidescout flow structure` is the new inspection CLI
+(`backend/tidescout/cli.py`); everything below was produced by it or by the Task 3/11 diagnostics
+built on `engine/activation.py` and `engine/structure.py`.
+
+**Georgetown Lighthouse — the current-shadow question answered.** Plan 3 left this open: the
+flood÷ebb ratio said Georgetown peaks on the ebb (contradicting `works_on: flood`), but also showed
+the largest speed contrast of any known spot, with a minimum of exactly 0.000 m/s beside ~1 m/s
+water. Task 1 of this plan re-read that contrast as an eddy signature and changed `works_on` to
+`slack`. Task 11 asked the derived-structure fields directly: does the model produce a current
+shadow (high ambush contrast, non-trivial rotation-dominated cell fraction) at Georgetown, the way
+it plainly does not at a spot that has none? Over `winyah-bay`'s `mean_med` regime, all 26 phases,
+within each spot's 150 m radius:
+
+| spot | max ambush (m/s) | max eddy share | phases (of 26) with any eddy cells | max seam share |
+|---|---|---|---|---|
+| Georgetown Lighthouse | **0.868** | **9.0%** | **20/26** | 11.8% |
+| North Jetty | 0.454 | 0.0% | 0/26 | 32.6% |
+| Mud Bay Cut | 0.160 | 0.0% | 0/26 | 0.0% |
+
+**The shadow is there, and it is the most pronounced structure of the three known spots.** Georgetown
+shows the highest ambush contrast of any of them (nearly 2× North Jetty's) and is the *only* one of
+the three that ever reads as rotation-dominated (Okubo-Weiss < 0) — 20 of 26 phases show some eddy
+fraction within its disc, peaking at 9.0%. North Jetty, by contrast, never registers a single eddy
+cell across the whole cycle (0/26) despite being the strongest, most consistent seam (up to 32.6%) —
+a real current break, but a shear line, not a closed eddy. Mud Bay Cut shows essentially no derived
+structure at all at any phase. This is independent confirmation, from a different signal than the
+Plan-3 flood÷ebb ratio, that Task 1's `works_on: slack` reasoning for Georgetown was right: it is a
+contrast/eddy spot, not a peak-current one, and the model was never wrong about it — the flood÷ebb
+question was just the wrong question to ask of it.
+
+One caveat surfaced while producing the table above: `engine/activation.py`'s `sample_features`
+reduces `okubo_w` per feature with `np.nanmax` over the 150 m disc, the same reducer used for
+`ambush`, `strain`, and `convergence`. That convention structurally erases eddy signal at the
+*feature* level — a disc large enough to hold an eddy core is also, in every real case checked,
+large enough to also hold a stronger seam cell at its edge, so the per-feature `okubo_w` reads
+positive even when the disc's interior is genuinely rotation-dominated. Confirmed directly: of 2,162
+features, only 2 ever recorded a negative per-feature `okubo_w` across all 26 phases (both within
+1e-6 of zero, inside the `quiet_w = 1e-5` dead band — i.e. not meaningfully different from "quiet").
+Yet the feature/phase with the single highest in-disc eddy-cell fraction anywhere in the inventory
+(`hole-7aa52bde1062`, phase 20, 16.9% of its disc classified eddy, true in-disc min W = −2.9e-4, well
+past the quiet floor) still reported `okubo_w = +9.0e-5` under `sample_features`'s nanmax — the
+disc's strongest seam cell, not its eddy core. The raw grid genuinely contains large eddy regions
+(955 cells classified eddy at one sample phase alone); `classify_structure`/the tensor are not
+wrong. The Georgetown table above sidesteps this because it computes eddy/seam *cell fraction*
+directly from the grid rather than through `sample_features`'s max reduction — which is exactly why
+Task 11's Step 3 diagnostic, not Step 2's per-feature ranking, is the right tool for asking "is there
+an eddy here." **This is a Phase 2 opening item, not something Task 11 adjusted**: if a future
+scoring pass wants a per-feature eddy signal, it needs `nanmin` (or a separate min-reduced field)
+alongside the existing max-reduced `okubo_w`, not a replacement of it — `okubo_w`'s max is still the
+right reducer for detecting seams.
+
+Sanity check on jetty ranking (Step 2, `tidescout flow structure winyah-bay --regime mean_med`)
+passed cleanly: both `jetty`-type features rank in the top 10% of the 531 in-domain features by
+ambush contrast (median ambush 0.556 across the 2 jetty features — the highest median of any
+feature type in the inventory, ahead of `creek_mouth` 0.116, `hole` 0.104, `wall` 0.093, `bar` 0.084,
+`dropoff` 0.044, `flat` 0.037), confirming jetties read as the canonical current shadow the model
+predicts them to be.
+
+**Intertidal share progression (Task 7).** Across `winyah-bay`'s three range regimes (fixed at
+`_med`/`_low`/`_high` discharge), intertidal cell share rises monotonically with tidal range, as
+physically expected:
+
+| regime | intertidal cells | share |
+|---|---|---|
+| neap_low | 42,645 | 7.26% |
+| mean_med | 50,124 | 8.53% |
+| spring_high | 57,796 | 9.84% |
+
+**Feature inventory count and id stability (Task 8).** The detector produces **2,162 features**
+(256 bar + 134 creek_mouth + 847 dropoff + 497 flat + 389 hole + 2 jetty + 37 wall), all with
+**2,162 unique ids** — no collisions — and two consecutive rebuilds from the same inputs produced
+**identical** id sets (2,162 == 2,162, set-equal), confirming the hash-of-type-plus-centroid key
+(Plan 3 carryover item 4, above) closed the `bar-78`-style renumbering trap for good.
+
+**Oyster reef attachment (Task 10, for completeness).** 146 of 2,162 features (6.75%) carry mapped
+SC oyster reef within 75 m — a clear minority, as expected (neither "nearly all" nor "none").
+Reef *density* (`reef_area_m2_within / feature_area_m2`) ranks the inventory differently from raw
+reef *area*: the area-ranked top 5 is entirely large flats/holes (17,000–89,000 m²) with modest
+density (0.01–0.07) that merely graze reef at their edges, while the density-ranked top 5 is a
+different set of much smaller holes/flats (3,000–7,000 m²) at meaningfully higher density
+(0.09–0.14) — area alone is confounded by feature footprint, and density is the scale-free signal.
