@@ -117,6 +117,31 @@ _BOUNDS: dict[str, tuple[float, float]] = {
 _SPATIAL_PARAMS = ("l0_km", "k", "front_width_km")
 
 
+def observation_resolution_ppt(values: Sequence[float]) -> float:
+    """The finest distinction the observation set actually draws, in ppt.
+
+    Mean spacing between distinct observed values: (max - min) / (n - 1).
+    DERIVED from the data rather than authored, and for uniformly quantised
+    data it recovers the quantum exactly -- Winyah's 348 daily means take 11
+    distinct values, the integers 0 through 10, giving exactly 1.0000 ppt.
+    That is the most those observations can resolve, so a residual below it
+    is not measurable and a residual above it is structure the model failed
+    to represent, not rounding.
+
+    Degrades sensibly for continuous data, where it becomes the mean level
+    spacing: measured on dense synthetic observations spanning 0-34 ppt it
+    gives ~1.7 ppt, which passes a legitimately noisy fit (rmse 0.263) and
+    still catches a per-site bias the model cannot represent (rmse 3.897).
+
+    NaN when fewer than two distinct values exist -- nothing to derive from,
+    and the caller skips the check rather than inventing a threshold.
+    """
+    v = np.unique(np.asarray(list(values), dtype="float64"))
+    if v.size < 2:
+        return float("nan")
+    return float((v[-1] - v[0]) / (v.size - 1))
+
+
 def _finite_rows(rows: Sequence[Observation]) -> tuple[list[Observation], int]:
     """Keep rows whose three values are all finite; count what was dropped.
 
@@ -302,6 +327,10 @@ def fit_intrusion(
     )
     at_bounds = _at_bounds(fitted_values)
     warning = _warnings(
+        rmse=rmse,
+        resolution=observation_resolution_ppt(y),
+        swing_rmse=swing_rmse,
+        swing_resolution=observation_resolution_ppt(y_swing) if swing_obs else float("nan"),
         n_obs=len(obs),
         n_params=len(names),
         n_interior=n_interior,
@@ -353,6 +382,10 @@ def fit_intrusion(
 
 def _warnings(
     *,
+    rmse: float,
+    resolution: float,
+    swing_rmse: float | None,
+    swing_resolution: float,
     n_obs: int,
     n_params: int,
     n_interior: int,
@@ -373,6 +406,29 @@ def _warnings(
     and a number that means nothing would go on being used as though it did.
     """
     out: list[str] = []
+    poor = []
+    if np.isfinite(resolution) and resolution > 0 and rmse > resolution:
+        poor.append(f"salinity rmse {rmse:.3f} ppt against a resolution of {resolution:.3f}")
+    if (
+        swing_rmse is not None
+        and np.isfinite(swing_resolution)
+        and swing_resolution > 0
+        and swing_rmse > swing_resolution
+    ):
+        poor.append(
+            f"tidal-swing rmse {swing_rmse:.3f} ppt against a resolution of "
+            f"{swing_resolution:.3f}"
+        )
+    if poor:
+        out.append(
+            "POOR FIT: " + "; ".join(poor) + ". The resolution is the mean spacing "
+            "between the distinct values the observations actually take -- derived "
+            "from them, not authored -- and for quantised data it is the quantum "
+            "exactly. Missing by more than the observations can resolve means the "
+            "residual is structure the model cannot represent, not rounding. A "
+            "config is not calibrated by parameters that reproduce nothing, however "
+            "well-conditioned the fit that produced them."
+        )
     if n_interior == 0:
         out.append(
             "NO INTERIOR OBSERVATIONS: every point sits at an end of the gradient "
@@ -477,6 +533,47 @@ class SiteRecord:
     ppt_range: tuple[float, float]
     used: bool
     note: str = ""
+
+
+def build_site_record(
+    site: str,
+    rows: list[tuple[date, float]],
+    *,
+    located: bool,
+    distance_km: float,
+    snap_gap_m: float,
+    max_snap_m: float,
+) -> SiteRecord:
+    """One sensor's admission decision, and the REASON, which must be the
+    real one.
+
+    Order matters and is the whole point of this being a function. A site
+    whose coordinates USGS never supplied is never queried for history
+    either, so it arrives here with `rows == []` -- and a naive "no rows
+    means no history" test would report a data-availability claim about a
+    site whose actual problem is that nobody knows where it is. `located` is
+    therefore tested FIRST, before anything that depends on having asked.
+    """
+    ppt = [v for _, v in rows]
+    if not located:
+        note = "USGS gave no coordinates for this site"
+    elif not np.isfinite(distance_km):
+        note = "no water route to the sea from the nearest in-domain cell"
+    elif not rows:
+        note = "no 00480 history"
+    elif snap_gap_m > max_snap_m:
+        note = f"outside the domain by {snap_gap_m:.0f} m (limit {max_snap_m:.0f} m)"
+    else:
+        note = ""
+    return SiteRecord(
+        site=site,
+        distance_km=distance_km,
+        snap_gap_m=snap_gap_m,
+        n_days=len(rows),
+        ppt_range=(min(ppt), max(ppt)) if ppt else (float("nan"), float("nan")),
+        used=not note,
+        note=note,
+    )
 
 
 def composite_discharge_by_day(
@@ -634,34 +731,17 @@ def collect_observations(
     usable, records = {}, []
     for w in sensors:
         site = w.station
-        rows = salinity_daily.get(site, [])
-        ppt = [v for _, v in rows]
-        located = site in distances
-        dist, gap = distances.get(site, (float("nan"), float("inf")))
-        ok = bool(rows) and located and gap <= max_snap_m and np.isfinite(dist)
-        if ok:
-            usable[site] = dist
-        records.append(
-            SiteRecord(
-                site=site,
-                distance_km=dist,
-                snap_gap_m=gap,
-                n_days=len(rows),
-                ppt_range=(min(ppt), max(ppt)) if ppt else (float("nan"), float("nan")),
-                used=ok,
-                note=(
-                    ""
-                    if ok
-                    else "no 00480 history"
-                    if not rows
-                    else "USGS gave no coordinates for this site"
-                    if not located
-                    else "no water route to the sea from the nearest cell"
-                    if not np.isfinite(dist)
-                    else f"outside the domain by {gap:.0f} m (limit {max_snap_m:.0f} m)"
-                ),
-            )
+        record = build_site_record(
+            site,
+            salinity_daily.get(site, []),
+            located=site in distances,
+            distance_km=distances.get(site, (float("nan"), float("inf")))[0],
+            snap_gap_m=distances.get(site, (float("nan"), float("inf")))[1],
+            max_snap_m=max_snap_m,
         )
+        if record.used:
+            usable[site] = record.distance_km
+        records.append(record)
 
     observations = pair_daily_means(salinity_daily, by_day, usable)
     swing_days = min(days, MAX_IV_DAYS)

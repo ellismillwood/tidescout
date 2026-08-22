@@ -220,11 +220,23 @@ salinity:
   #   44.8, all 1-sigma below their values, nothing on a bound) -- they
   #   describe the design that was observed and cannot see the extrapolation.
   #
+  #   NO FALLBACK EXISTS FOR THE SPATIAL FIELD. Corrected 2026-08-22 after an
+  #   earlier draft of this note claimed a climatology fallback covers this;
+  #   it does not. The only live climatology substitution is in
+  #   sources/usgs.py's water_summary, which fills a single bay-wide SCALAR
+  #   (climatology.salinity_ppt_by_month) for the conditions summary. Nothing
+  #   substitutes for the per-cell field: engine.salinity.salinity_field
+  #   computes from these constants unconditionally, so while `fitted` is
+  #   false the field must NOT be read as a between-spot discriminator. It
+  #   still varies correctly WITH discharge and tide at a given spot (Mud Bay
+  #   Cut moves 14.8 ppt across the discharge range and swings 11.3 ppt
+  #   tidally); what collapsed is the near-mouth BETWEEN-SPOT gradient.
+  #
   #   WHAT WOULD RESOLVE IT: one salinity sensor anywhere between the mouth
   #   and Georgetown. Registering the NERR CDMO IP (North Inlet-Winyah Bay,
   #   Oyster Landing) would supply exactly this; the CDMO web service returns
-  #   "Invalid ip" until a human submits their form. Until then the
-  #   climatology fallback stays live and these constants stay theoretical.
+  #   "Invalid ip" until a human submits their form. Until then these
+  #   constants stay theoretical.
   #
   # Open-ocean end-member off the SC coast; typical nearshore Atlantic
   # salinity runs ~34-36 ppt. Not measured at Winyah's mouth specifically --

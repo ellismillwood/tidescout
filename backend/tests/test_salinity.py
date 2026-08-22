@@ -12,6 +12,8 @@ and x < excursion_km -- exactly where the old plateau lived and the new form
 must not.
 """
 
+import re
+
 import numpy as np
 import pytest
 from pydantic import ValidationError
@@ -284,8 +286,11 @@ TRUTH = SalinityConfig(
 
 def test_fit_recovers_known_parameters_from_dense_observations():
     obs = _synthetic_obs(TRUTH, [2.0, 8.0, 15.0, 25.0, 35.0], [2000.0, 6000.0, 15000.0])
+    # Every free parameter starts away from truth -- front_width_km included.
+    # Starting W at 5.0 would have recovered 5.0 nearly by construction and
+    # demonstrated nothing about whether the optimizer can find it.
     fitted, diag = fit_intrusion(
-        obs, cfg=TRUTH.model_copy(update={"l0_km": 25.0, "k": 0.2})
+        obs, cfg=TRUTH.model_copy(update={"l0_km": 25.0, "k": 0.2, "front_width_km": 12.0})
     )
     assert fitted.l0_km == pytest.approx(16.0, rel=0.05)
     assert fitted.k == pytest.approx(0.40, rel=0.10)
@@ -615,3 +620,132 @@ def test_the_interior_count_is_named_as_value_based_in_the_warning():
     assert diag["n_interior_obs"] > 0
     assert "n_interior_obs" in diag["warning"]
     assert "blind to this" in diag["warning"]
+
+
+# -- Goodness of fit is part of the `fitted` gate ---------------------------
+# `fitted = not warning` originally had NO residual component: a config could
+# miss every observation by a seventh of the ocean-to-fresh range and still be
+# certified. Rejecting "clean residual" as a SUFFICIENT bar was right; dropping
+# it as a NECESSARY one was not.
+
+
+def test_resolution_recovers_the_quantum_of_integer_observations():
+    """Winyah's 348 daily means take the integers 0..10. The derived
+    resolution must come back as exactly the 1 ppt quantum -- this is the
+    threshold, so it is measured, not authored."""
+    assert salinity_fit.observation_resolution_ppt(range(11)) == 1.0
+    assert salinity_fit.observation_resolution_ppt([0.0, 0.0, 5.0, 10.0]) == 5.0
+
+
+def test_resolution_is_undefined_below_two_distinct_values():
+    assert np.isnan(salinity_fit.observation_resolution_ppt([3.0, 3.0, 3.0]))
+    assert np.isnan(salinity_fit.observation_resolution_ppt([]))
+
+
+def test_a_fit_that_reproduces_nothing_is_not_marked_fitted():
+    """A per-site bias the model cannot represent. The design is otherwise
+    ideal -- 7 distances, 3 flows, well conditioned, nothing on a bound -- so
+    every non-residual check passes and only the residual catches it."""
+    distances = [2.0, 6.0, 10.0, 15.0, 20.0, 25.0, 35.0]
+    flows = [1500.0, 4000.0, 12000.0]
+    bias = {2.0: -6.0, 6.0: 6.0, 20.0: 5.0, 35.0: 4.0}
+    obs = [(d, q, y + bias.get(d, 0.0)) for d, q, y in _synthetic_obs(TRUTH, distances, flows)]
+    fitted, diag = fit_intrusion(
+        obs,
+        cfg=TRUTH.model_copy(update={"l0_km": 20.0}),
+        swings=_synthetic_swings(TRUTH, distances, flows),
+    )
+    assert diag["rmse_ppt"] > 1.0
+    assert "poor fit" in diag["warning"].lower()
+    assert fitted.fitted is False, "a config reproducing nothing was certified"
+
+
+def test_a_legitimately_noisy_fit_is_still_marked_fitted():
+    """The other side of the threshold: real data has noise, and a fit inside
+    what the observations can resolve must not be failed for it."""
+    distances = [2.0, 6.0, 10.0, 15.0, 20.0, 25.0, 35.0]
+    flows = [1500.0, 4000.0, 12000.0]
+    obs = _noisy_obs(TRUTH, distances, flows, sigma_ppt=0.3)
+    fitted, diag = fit_intrusion(
+        obs,
+        cfg=TRUTH.model_copy(update={"l0_km": 20.0}),
+        swings=_synthetic_swings(TRUTH, distances, flows),
+    )
+    assert 0.0 < diag["rmse_ppt"] < 1.0
+    assert "poor fit" not in diag["warning"].lower()
+    assert fitted.fitted is True
+
+
+# -- Site admission: the reason must be the real one ------------------------
+
+NAN = float("nan")
+
+
+@pytest.mark.parametrize(
+    "rows,located,dist,gap,used,expect",
+    [
+        ([(date(2026, 5, 1), 4.0)], True, 10.0, 12.0, True, ""),
+        ([(date(2026, 5, 1), 4.0)], True, 10.0, 900.0, False, "outside the domain"),
+        # An unlocated site is never QUERIED, so it arrives with no rows. The
+        # old order tested `not rows` first and reported "no 00480 history" --
+        # a data-availability claim about a site whose problem is that nobody
+        # knows where it is.
+        ([], False, NAN, float("inf"), False, "no coordinates"),
+        ([], True, 10.0, 12.0, False, "no 00480 history"),
+        ([(date(2026, 5, 1), 4.0)], True, NAN, 12.0, False, "no water route"),
+    ],
+)
+def test_site_record_names_the_real_reason(rows, located, dist, gap, used, expect):
+    r = salinity_fit.build_site_record(
+        "X", rows, located=located, distance_km=dist, snap_gap_m=gap, max_snap_m=500.0
+    )
+    assert r.used is used
+    assert expect in r.note
+    assert r.n_days == len(rows)
+
+
+def test_site_record_reports_the_observed_ppt_range():
+    rows = [(date(2026, 5, 1), 0.0), (date(2026, 5, 2), 8.0), (date(2026, 5, 3), 3.0)]
+    r = salinity_fit.build_site_record(
+        "X", rows, located=True, distance_km=31.57, snap_gap_m=5.0, max_snap_m=500.0
+    )
+    assert r.ppt_range == (0.0, 8.0)
+
+
+# -- The CLI refusal path ---------------------------------------------------
+
+
+def test_calibrate_refuses_and_names_every_rejected_site(monkeypatch):
+    """The refusal is the DEFAULT outcome on this fishery, so its message is
+    the most-read output this command has."""
+    from typer.testing import CliRunner
+
+    from tidescout.cli import app
+
+    rejected = [
+        salinity_fit.build_site_record(
+            "021108125", [], located=True, distance_km=31.57,
+            snap_gap_m=9497.907, max_snap_m=500.0,
+        ),
+        salinity_fit.build_site_record(
+            "02110815", [(date(2026, 5, 1), 4.0)], located=True, distance_km=31.57,
+            snap_gap_m=1362.043, max_snap_m=500.0,
+        ),
+    ]
+    monkeypatch.setattr(
+        salinity_fit,
+        "collect_observations",
+        lambda *a, **k: salinity_fit.CalibrationInput([], [], rejected, 90, None, 90),
+    )
+    result = CliRunner().invoke(app, ["salinity", "calibrate", "winyah-bay"])
+    assert result.exit_code == 1
+    # Rich wraps to the terminal width and would split these phrases across
+    # lines; collapse whitespace so the assertions test content, not layout.
+    out = re.sub(r"\s+", " ", re.sub(r"\x1b\[[0-9;]*m", "", result.output))
+    assert "CANNOT CALIBRATE" in out
+    assert "2 of 2" in out
+    assert "021108125" in out and "02110815" in out
+    # ceil, not round: admission is `gap <= max_snap_m`, so 9497.907 must
+    # suggest 9498 and never 9497.
+    assert "--max-snap-m 9498" in out
+    assert "fitted" in out

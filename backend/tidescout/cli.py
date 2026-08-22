@@ -1,4 +1,5 @@
 import json
+import math
 import time
 
 import typer
@@ -440,21 +441,29 @@ def salinity_calibrate(
                 console.print(f"  [bold]{r.site}[/bold] — {r.note}")
             far = [r for r in rejected if r.snap_gap_m > max_snap_m]
             if far:
-                worst = max(r.snap_gap_m for r in far)
+                # ceil, not round: admission is `gap <= max_snap_m`, so a
+                # gap of 9498.3 printed as "9498" would suggest a re-run that
+                # still refuses. The one actionable instruction in this
+                # message must not be a coin flip.
+                worst = math.ceil(max(r.snap_gap_m for r in far))
                 console.print(
                     f"\nThe problem is WHERE these sensors are, not the tool. They sit "
-                    f"outside the model domain — up to {worst:,.0f} m from the nearest "
+                    f"outside the model domain — up to {worst:,} m from the nearest "
                     f"in-domain cell — so the along-estuary distance each would be "
                     f"assigned belongs to a different place on the estuary than the "
                     f"sensor does, and no length scale in the model absorbs that.\n"
-                    f"Re-run with [bold]--max-snap-m {worst:.0f}[/bold] (or higher) to "
+                    f"Re-run with [bold]--max-snap-m {worst}[/bold] (or higher) to "
                     f"fit anyway, accepting a borrowed distance. Read the warning block "
                     f"it prints before believing the numbers."
                 )
         console.print(
-            "\n[dim]That is a finding about the available data, not a bug. "
-            "The unfitted config stands (salinity.fitted stays False) and the "
-            "climatology fallback stays live.[/dim]"
+            "\n[dim]That is a finding about the available data, not a bug. The "
+            "unfitted config stands and salinity.fitted stays False.\n"
+            "There is NO fallback for the spatial field to degrade to: the only "
+            "live climatology substitution fills a single bay-wide scalar "
+            "(sources/usgs.py water_summary), not a per-cell field. While "
+            "fitted is False the field must not be read as a between-spot "
+            "discriminator.[/dim]"
         )
         raise typer.Exit(1) from exc
 
