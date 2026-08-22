@@ -468,8 +468,9 @@ def flow_validate(
             here = sp[sel]
             peak_speed[spot.name].append(float(np.nanmax(here)))
             # Within-radius max minus min: a proxy for a seam. Deliberately NOT
-            # called shear -- that is the gradient `flowlib.shear_magnitude`
-            # computes, and conflating the two would hide which one was used.
+            # called shear -- that is the velocity gradient
+            # `engine.structure.strain_rate` computes, and conflating the two
+            # would hide which one was used.
             spread[spot.name].append(float(np.nanmax(here) - np.nanmin(here)))
 
     table = Table(title=f"{fishery.name} — known spots vs flow library ({regime})")
@@ -531,9 +532,24 @@ def flow_structure(
     from tidescout.pipeline.features import load_features
 
     fishery = load_fishery(slug)
-    spec = flowlib.grid_spec(slug, fishery)
-    feats = load_features(slug)["features"]
-    grid_path = fishery_data_dir(slug) / "flow" / regime / "grid" / "grid.json"
+    # Every prerequisite is checked before anything reads it. `grid_spec` calls
+    # `read_bathy` and `load_features` opens features.geojson, and both used to
+    # run BEFORE the library guard below -- so a fresh checkout that had not run
+    # `tidescout bathy build` or `tidescout features` got a raw
+    # FileNotFoundError traceback out of this command's third line.
+    data_dir = fishery_data_dir(slug)
+    for path, remedy in (
+        (data_dir / "bathy_meta.json", f"tidescout bathy build {slug}"),
+        (data_dir / "bathy_utm.tif", f"tidescout bathy build {slug}"),
+        (data_dir / "features.geojson", f"tidescout features {slug} --rebuild"),
+    ):
+        if not path.exists():
+            console.print(
+                f"[red]no {path.name} for {slug}[/red] (expected {path}).\n"
+                f"Run `{remedy}` first."
+            )
+            raise typer.Exit(1)
+    grid_path = data_dir / "flow" / regime / "grid" / "grid.json"
     if not grid_path.exists():
         console.print(
             f"[red]no rasterised library for regime {regime!r}[/red] "
@@ -541,10 +557,24 @@ def flow_structure(
         )
         raise typer.Exit(1)
     grid_meta = json.loads(grid_path.read_text())
+
+    # Validate at the boundary. `phase < 0` means "every phase", so an
+    # unvalidated `--phase -2` silently ran the whole sweep instead of erroring,
+    # and an out-of-range positive failed deep inside `load_state`.
+    n_phases = len(grid_meta["phases"])
+    if phase < -1 or phase >= n_phases:
+        console.print(
+            f"[red]--phase {phase} is out of range[/red]: this library has "
+            f"{n_phases} phases (0-{n_phases - 1}), and -1 means every phase."
+        )
+        raise typer.Exit(1)
+
+    spec = flowlib.grid_spec(slug, fishery)
+    feats = load_features(slug)["features"]
     states = flow.tide_states(grid_meta["stage_bc_m"])
     sched = schedule.cell_schedule(slug, regime)
 
-    idxs = range(len(grid_meta["phases"])) if phase < 0 else [phase]
+    idxs = range(n_phases) if phase < 0 else [phase]
     best: dict[str, activation.FeatureMetrics] = {}
     best_state: dict[str, str] = {}
     for i in idxs:
@@ -566,22 +596,35 @@ def flow_structure(
         reverse=True,
     )[:top]
 
+    def num(value: float, spec_: str) -> str:
+        """NaN prints as an em dash, not as `nan`/`+nan`. Every one of these
+        columns can legitimately be NaN -- a disc that is entirely dry at its
+        best phase has no speed, no strain and no tensor at all -- and only
+        `wet frac` used to say so."""
+        return "-" if np.isnan(value) else format(value, spec_)
+
     table = Table(title=f"{fishery.name} — derived structure ({regime})")
     for col in ("feature", "type", "best state", "ambush m/s", "speed",
-                "strain 1/s", "okubo W", "converg.", "wet frac"):
+                "strain 1/s", "okubo W", "eddy %", "converg.", "wet frac"):
         table.add_column(col)
     for m in ranked:
         table.add_row(
-            m.key, m.type, best_state[m.key], f"{m.ambush:.3f}", f"{m.speed:.3f}",
-            f"{m.strain:.2e}", f"{m.okubo_w:+.2e}", f"{m.convergence:+.2e}",
-            "-" if np.isnan(m.wet_fraction) else f"{m.wet_fraction:.2f}",
+            m.key, m.type, best_state[m.key],
+            num(m.ambush, ".3f"), num(m.speed, ".3f"),
+            num(m.strain, ".2e"), num(m.okubo_w, "+.2e"),
+            num(m.eddy_share * 100.0, ".1f"),
+            num(m.convergence, "+.2e"),
+            num(m.wet_fraction, ".2f"),
         )
     console.print(table)
     console.print(
-        "\n[dim]okubo W < 0 is an eddy core (rotation-dominated); W > 0 is a seam "
-        "(strain-dominated). `ambush` is how much faster the water within "
-        f"{fishery.structure.ambush_radius_m:.0f} m is than the feature itself — "
-        "the current-shadow signal.[/dim]"
+        "\n[dim]`okubo W` is MAX-reduced over the feature's disc, so it reports the "
+        "strongest SEAM in it (W > 0, strain-dominated) and structurally cannot report "
+        "an eddy: a max over a mixed disc returns its most seam-like cell. `eddy %` is "
+        "the eddy channel — the share of the feature's WET cells that classify as "
+        f"rotation-dominated (W < -{fishery.structure.quiet_w:g}). `ambush` is how much "
+        f"faster the water within {fishery.structure.ambush_radius_m:.0f} m is than the "
+        "feature itself — the current-shadow signal.[/dim]"
     )
 
 
