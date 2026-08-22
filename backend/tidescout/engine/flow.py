@@ -78,6 +78,63 @@ def select_regime(
     return min(candidates)[1], True
 
 
+def bucket_flows(buckets) -> dict[str, float]:
+    """The cfs each simulated discharge bucket actually represents.
+
+    These are the values `forcing.river_inflow_m3s` injects, not the bucket
+    EDGES: 'med' is the midpoint of low and high, which is 4,533 cfs and not
+    the record's median of 3,866.
+    """
+    return {
+        "low": buckets.low_below_cfs,
+        "med": 0.5 * (buckets.low_below_cfs + buckets.high_above_cfs),
+        "high": buckets.high_above_cfs,
+    }
+
+
+def blend_regimes(
+    range_bucket: str, cfs: float, buckets, available: set[str]
+) -> tuple[list[tuple[str, float]], bool]:
+    """Weights over regimes bracketing `cfs` on the discharge axis.
+
+    The library holds three discharge values spanning 2,774-6,292 cfs while the
+    observed record runs 1,232-22,996, so snapping to the nearest bucket throws
+    away most of the axis. Blending recovers it within the simulated span --
+    justified by Plan 3's measurement that depth rises monotonically and
+    near-linearly with discharge at every inflow.
+
+    The RANGE axis is deliberately not blended. One range step rescales the
+    entire tidal forcing (~15 cm of amplitude on a 1.10 m mean range) against a
+    discharge step's ~1 cm of depth; RANGE_STEP_COST=3 exists to stop range
+    being traded away, and a blend that crossed it would be the same mistake.
+
+    Outside the simulated span this CLAMPS and returns True. Extrapolating a
+    shallow-water solution 3.7x past any flow it was run at would be inventing
+    data, and the caller needs to know the difference.
+    """
+    flows = bucket_flows(buckets)
+    order = [b for b in DISCHARGE_ORDER if f"{range_bucket}_{b}" in available]
+    if not order:
+        # No regime at this range at all: fall back to the existing nearest-
+        # regime logic, which is allowed to cross the range axis as a last resort.
+        name, _ = select_regime(range_bucket, "med", available)
+        return [(name, 1.0)], True
+
+    lo_b, hi_b = order[0], order[-1]
+    if cfs <= flows[lo_b]:
+        return [(f"{range_bucket}_{lo_b}", 1.0)], cfs < flows[lo_b]
+    if cfs >= flows[hi_b]:
+        return [(f"{range_bucket}_{hi_b}", 1.0)], cfs > flows[hi_b]
+
+    for a, b in zip(order, order[1:], strict=False):
+        fa, fb = flows[a], flows[b]
+        if fa <= cfs <= fb:
+            w = (cfs - fa) / (fb - fa) if fb > fa else 0.0
+            mix = [(f"{range_bucket}_{a}", 1.0 - w), (f"{range_bucket}_{b}", w)]
+            return [(n, x) for n, x in mix if x > 0.0] or [(f"{range_bucket}_{a}", 1.0)], False
+    return [(f"{range_bucket}_{hi_b}", 1.0)], True
+
+
 def bracket_phases(phases, phase: float) -> tuple[int, int, float]:
     """Indices either side of `phase` and the weight toward the second.
 

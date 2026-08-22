@@ -2,6 +2,8 @@ import numpy as np
 import pytest
 
 from tidescout.engine import flow
+from tidescout.engine.flow import blend_regimes
+from tidescout.models import DischargeBuckets
 
 
 def test_exact_regime_is_preferred():
@@ -209,3 +211,58 @@ def test_tide_states_rejects_an_empty_series():
 def test_tide_states_handles_a_flat_series():
     """A regime whose boundary never moved is entirely slack, not a crash."""
     assert flow.tide_states([1.0, 1.0, 1.0, 1.0]) == ["slack"] * 4
+
+
+BUCKETS = DischargeBuckets(low_below_cfs=2774.0, high_above_cfs=6292.0)
+ALL = {f"{r}_{d}" for r in ("neap", "mean", "spring") for d in ("low", "med", "high")}
+
+
+def test_exact_bucket_flow_returns_a_single_regime():
+    mix, clamped = blend_regimes("mean", 2774.0, BUCKETS, ALL)
+    assert mix == [("mean_low", 1.0)]
+    assert clamped is False
+
+
+def test_midway_flow_blends_the_two_bracketing_buckets():
+    """4533 cfs is the med point; 3653 is halfway from low to med."""
+    mix, _ = blend_regimes("mean", 3653.5, BUCKETS, ALL)
+    assert {r for r, _ in mix} == {"mean_low", "mean_med"}
+    assert dict(mix)["mean_low"] == pytest.approx(0.5, abs=0.01)
+    assert sum(w for _, w in mix) == pytest.approx(1.0)
+
+
+def test_blend_never_crosses_the_range_axis():
+    """Range is the strong axis -- one step rescales the whole tidal forcing.
+    A blend that traded it for discharge would be the exact mistake
+    RANGE_STEP_COST=3 exists to prevent."""
+    mix, _ = blend_regimes("spring", 5000.0, BUCKETS, ALL)
+    assert all(r.startswith("spring_") for r, _ in mix)
+
+
+def test_flow_above_the_top_bucket_clamps_and_flags():
+    """22,996 cfs was observed; 6,292 is the highest ever simulated. The model
+    must not be extrapolated 3.7x past anything it was run at."""
+    mix, clamped = blend_regimes("mean", 22996.0, BUCKETS, ALL)
+    assert mix == [("mean_high", 1.0)]
+    assert clamped is True
+
+
+def test_flow_below_the_bottom_bucket_clamps_and_flags():
+    mix, clamped = blend_regimes("mean", 500.0, BUCKETS, ALL)
+    assert mix == [("mean_low", 1.0)]
+    assert clamped is True
+
+
+def test_blend_falls_back_when_a_bracketing_regime_is_missing():
+    """A partial library must degrade, per spec section 10, not raise."""
+    partial = {"mean_low", "mean_high"}
+    mix, _ = blend_regimes("mean", 4533.0, BUCKETS, partial)
+    assert {r for r, _ in mix} <= partial
+    assert sum(w for _, w in mix) == pytest.approx(1.0)
+
+
+def test_weights_are_never_negative():
+    for cfs in (1000.0, 2774.0, 3500.0, 4533.0, 5500.0, 6292.0, 30000.0):
+        mix, _ = blend_regimes("mean", cfs, BUCKETS, ALL)
+        assert all(w >= 0.0 for _, w in mix)
+        assert sum(w for _, w in mix) == pytest.approx(1.0)
