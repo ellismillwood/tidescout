@@ -8,6 +8,25 @@ independently of the tide.
 
 Static: reefs do not move with the tide, so this is computed once into
 features.geojson rather than per hour.
+
+CAUTION -- extent confound in `oyster_area_m2`/`oyster_nearest_m`: both
+buffer the feature's *whole* geometry, not a fixed-size neighbourhood. For a
+Point that is exactly "reef within radius_m of this point," but 2,026 of the
+real inventory's 2,162 features are Polygon, and flats alone run 1.6-2.0
+million m^2 -- four of the five largest `oyster_area_m2` values in the real
+inventory are flats, purely because the detector drew a big polygon there,
+not because their reef is denser than a small drop-off's. `oyster_nearest_m`
+is 0.0 whenever any reef falls anywhere inside a Polygon feature, however
+large that polygon is. Consumers that want a scale-free "how reef-dense is
+this spot" answer should use `reef_density_within`/`oyster_density` instead,
+which normalises by the buffered search area itself.
+
+`oyster_area_m2` and `oyster_nearest_m` are kept exactly as specified even
+so -- they are the plan's named cross-phase interface, and the seemingly
+obvious fix (buffer the centroid instead of the whole geometry) trades this
+bias for a worse one: a flat's fishable oyster is typically along its edge,
+so centroid-buffering would systematically miss the reef that matters most
+on precisely the features this note is about.
 """
 
 import json
@@ -37,6 +56,12 @@ def reef_area_m2_within(features, reefs, radius_m: float = DEFAULT_RADIUS_M) -> 
 
     STRtree-indexed: the layer is 8,451 reefs against thousands of features, and
     the naive nested loop is 30M+ intersection tests.
+
+    Extent confound (see module docstring): buffers the feature's whole
+    geometry, not a fixed neighbourhood -- a large Polygon feature's total
+    includes reef anywhere in its interior, not just near an edge or within a
+    cast's length of one. Prefer `reef_density_within` when comparing feature
+    sizes that vary a lot, e.g. a Point against a multi-hectare flat.
     """
     if not reefs:
         return [0.0] * len(features)
@@ -60,11 +85,38 @@ def nearest_reef_m(features, reefs) -> list[float]:
     no meaningful zero-substitute, and inf makes any downstream curve clamp to
     its worst authored value rather than its best. Callers that serialise this
     to JSON must convert inf to null themselves: JSON has no infinity literal.
+
+    Extent confound (see module docstring): 0.0 for a Polygon feature means
+    "some reef is somewhere inside this polygon," which can be anywhere in a
+    multi-hectare flat -- not necessarily near any particular edge of it.
     """
     if not reefs:
         return [math.inf] * len(features)
     tree = STRtree(reefs)
     return [float(geom.distance(reefs[tree.nearest(geom)])) for geom in features]
+
+
+def reef_density_within(features, reefs, radius_m: float = DEFAULT_RADIUS_M) -> list[float]:
+    """Reef area within `radius_m` of each feature, as a fraction of the
+    buffered search area itself: `reef_area_m2_within / buffer_area_m2`.
+
+    Dimensionless and scale-free -- comparable between a 20 m point feature
+    and a 2 km^2 flat, where `reef_area_m2_within` alone is dominated by how
+    big the detector's polygon happened to be (see module docstring). A
+    small feature fully ringed by reef and a huge one fully ringed by reef
+    both come out near 1.0 here, even though their `reef_area_m2_within`
+    values differ by orders of magnitude.
+
+    Delegates to `reef_area_m2_within` rather than re-querying the STRtree:
+    building that tree is the expensive part (8,451 reefs), and this needs
+    nothing beyond its output divided by each buffer's own area -- a second
+    `STRtree` build already happens in `nearest_reef_m`; a third here would
+    make it worse for no benefit.
+    """
+    areas = reef_area_m2_within(features, reefs, radius_m)
+    return [
+        area / geom.buffer(radius_m).area for area, geom in zip(areas, features, strict=True)
+    ]
 
 
 def reef_to_utm(geom, epsg: int):

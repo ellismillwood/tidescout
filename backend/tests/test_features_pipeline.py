@@ -3,7 +3,7 @@ import json
 import numpy as np
 import pytest
 from rasterio.warp import transform as warp_transform
-from shapely.geometry import Polygon, shape
+from shapely.geometry import Polygon, mapping, shape
 
 from tidescout.config import load_fishery
 from tidescout.pipeline.features import build_features, load_features
@@ -71,6 +71,65 @@ def test_build_features_defaults_oyster_attrs_and_writes_json_safe_null_for_miss
     for feat in fc["features"]:
         assert feat["properties"]["oyster_area_m2"] == 0.0
         assert feat["properties"]["oyster_nearest_m"] is None
+
+
+def test_build_features_attaches_positive_oyster_area_when_reef_layer_present(
+    tmp_path, monkeypatch
+):
+    """Every other oyster test either has no reef layer at all, or checks
+    load_reefs_utm/reef_area_m2_within/nearest_reef_m directly -- nothing
+    exercises build_features end-to-end with a reef layer actually present,
+    so a wrong epsg threaded into load_reefs_utm, or the oyster block
+    drifting to after _to4326 (reef and feature no longer sharing a CRS
+    when distances are computed), would be caught by nothing in CI. Only a
+    manual `tidescout features winyah-bay --rebuild` over gitignored data/
+    would ever surface it.
+
+    Places two small reefs, in the reef layer's real EPSG:4326, directly on
+    top of the two seeded jetty vertices. Jetty geometry is seeded straight
+    from fisheries/winyah-bay.yaml's real lon/lat (independent of the
+    synthetic DEM), so this is a deterministic, hand-placed check, not a
+    hopeful one: get the CRS handling wrong in either direction and the
+    reef lands nowhere near the jetty, and oyster_area_m2 stays 0.0."""
+    from tidescout import paths
+
+    z = synth.creek_mouth_dem()
+    _fake_bathy(tmp_path, monkeypatch, z)
+    f = load_fishery("winyah-bay")
+
+    def _tiny_square(clon, clat, side_deg=0.0005):
+        h = side_deg / 2.0
+        return Polygon(
+            [
+                (clon - h, clat - h),
+                (clon + h, clat - h),
+                (clon + h, clat + h),
+                (clon - h, clat + h),
+            ]
+        )
+
+    reef_fc = {
+        "type": "FeatureCollection",
+        "features": [
+            {
+                "type": "Feature",
+                "properties": {},
+                "geometry": mapping(_tiny_square(*jetty.coords[0])),
+            }
+            for jetty in f.jetties
+        ],
+    }
+    (paths.fishery_data_dir("winyah-bay") / "oyster_reefs.geojson").write_text(
+        json.dumps(reef_fc)
+    )
+
+    build_features("winyah-bay", f)
+    fc = load_features("winyah-bay")
+    jetties = [feat for feat in fc["features"] if feat["properties"]["type"] == "jetty"]
+    assert len(jetties) == len(f.jetties)
+    for feat in jetties:
+        assert feat["properties"]["oyster_area_m2"] > 0
+        assert feat["properties"]["oyster_nearest_m"] == pytest.approx(0.0)
 
 
 def test_feature_ids_unique_and_prefixed_by_type(tmp_path, monkeypatch):

@@ -14,7 +14,12 @@ from tidescout.engine.terrain import slope_deg
 from tidescout.models import Fishery
 from tidescout.paths import fishery_data_dir
 from tidescout.pipeline.bathy import read_bathy
-from tidescout.pipeline.oysters import load_reefs_utm, nearest_reef_m, reef_area_m2_within
+from tidescout.pipeline.oysters import (
+    load_reefs_utm,
+    nearest_reef_m,
+    reef_area_m2_within,
+    reef_density_within,
+)
 
 
 def _to4326(geom, epsg: int):
@@ -63,23 +68,35 @@ def build_features(slug: str, fishery: Fishery) -> Path:
     # static attribute computed once here rather than per-hour derived
     # structure. Both layers must still be in the same UTM CRS for metre
     # distances to mean anything, so this runs before _to4326 below.
+    #
+    # oyster_area_m2/oyster_nearest_m buffer each feature's *whole* geometry,
+    # not a fixed neighbourhood -- for a large Polygon feature (2,026 of the
+    # real inventory's 2,162 are Polygon; flats run 1.6-2.0 million m^2) this
+    # counts reef anywhere in its interior and reports 0.0 distance whenever
+    # any reef falls anywhere inside it, regardless of feature size.
+    # oyster_density corrects for that by normalising to the buffered search
+    # area itself; see oysters.py's module docstring for the full rationale.
     reefs_utm = load_reefs_utm(slug, epsg)
     geoms = [f.geometry for f in feats]
     reef_areas = reef_area_m2_within(geoms, reefs_utm)
     reef_dists = nearest_reef_m(geoms, reefs_utm)
-    for f, area, dist in zip(feats, reef_areas, reef_dists, strict=True):
+    reef_density = reef_density_within(geoms, reefs_utm)
+    for f, area, dist, density in zip(feats, reef_areas, reef_dists, reef_density, strict=True):
         f.attrs["oyster_area_m2"] = area
         f.attrs["oyster_nearest_m"] = dist
+        f.attrs["oyster_density"] = density
 
     out = []
     for f in feats:
         props = {"type": f.type}
         for k, v in f.attrs.items():
-            if isinstance(v, float) and math.isinf(v):
-                # nearest_reef_m's documented no-reef-layer value. JSON has no
-                # infinity literal -- json.dumps(inf) emits the bare token
-                # `Infinity`, which RFC 8259 forbids and a browser's
-                # JSON.parse rejects outright, so this must become null here.
+            if isinstance(v, float) and not math.isfinite(v):
+                # nearest_reef_m's documented no-reef-layer value is inf; NaN
+                # is caught defensively too, for the same reason. JSON has no
+                # infinity/NaN literal -- json.dumps emits the bare tokens
+                # `Infinity`/`NaN`, both forbidden by RFC 8259 and rejected
+                # outright by a browser's JSON.parse, so either must become
+                # null here.
                 props[k] = None
             elif isinstance(v, float):
                 props[k] = round(v, 2)

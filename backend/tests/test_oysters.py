@@ -11,6 +11,7 @@ from tidescout.pipeline.oysters import (
     load_reefs_utm,
     nearest_reef_m,
     reef_area_m2_within,
+    reef_density_within,
     reef_to_utm,
 )
 
@@ -95,6 +96,32 @@ def test_reef_area_and_nearest_for_a_polygon_feature_containing_a_reef():
     assert nearest_reef_m([feature_poly], [reef])[0] == 0.0
     got = reef_area_m2_within([feature_poly], [reef], radius_m=5.0)
     assert got[0] == pytest.approx(100.0)
+
+
+def test_reef_density_is_scale_free_unlike_reef_area():
+    """reef_area_m2_within alone is dominated by how big the detector's
+    polygon happened to be: four of the five largest oyster_area_m2 values in
+    the real inventory are flats (1.6-2.0 million m^2), not because their reef
+    is denser than a small drop-off's. This is the confound reef_density_within
+    exists to correct for -- a small feature and a huge one, both fully
+    surrounded by reef, must get ~equal density even though their raw area
+    differs by orders of magnitude."""
+    reef = _square(0.0, 0.0, 1_000_000.0)  # one reef, big enough to cover both
+    small = Point(10.0, 10.0)
+    big = _square(10.0, 10.0, 2000.0)  # a "flat"-scale polygon feature
+    density = reef_density_within([small, big], [reef], radius_m=50.0)
+    area = reef_area_m2_within([small, big], [reef], radius_m=50.0)
+    assert density[0] == pytest.approx(1.0)
+    assert density[1] == pytest.approx(1.0)
+    assert area[1] / area[0] > 100  # same density, wildly different area
+
+
+def test_reef_density_is_zero_not_nan_when_there_are_no_reefs():
+    """No reefs means reef_area_m2_within already returns 0.0, and dividing
+    that by the (always positive, for radius_m > 0) buffer area is still
+    0.0 -- not a 0/0 NaN."""
+    got = reef_density_within([Point(0.0, 0.0)], [], radius_m=50.0)
+    assert got[0] == 0.0
 
 
 def _lonlat_square(clon, clat, side_deg):
