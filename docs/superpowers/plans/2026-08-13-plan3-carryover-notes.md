@@ -243,18 +243,21 @@ i.e. not meaningfully different from "quiet"). That two-fact pairing is doing le
 first-pass note here claimed, though. Two separate things are true and need to stay separate:
 
 1. **`nanmax` demonstrably suppresses eddy signal in discs that contain one.** The single clearest
-   case in the inventory: `creek_mouth-97b7b83992ef` at phase 24 has 21.4% of its 150 m disc
-   classified eddy (true in-disc min `okubo_w` = −2.26e-4, well past the quiet floor) — yet
-   `sample_features`'s `nanmax` reports `okubo_w = +5.47e-5` for it, the disc's strongest seam cell,
-   not its eddy core. `classify_structure`/the tensor are not wrong; the max-reducer at the feature
-   level is throwing the signal away for exactly this feature.
+   case in the inventory: `creek_mouth-e3a7602b91aa` at phase 20 has 28 of its 179 disc cells
+   classified eddy — 15.6% — on a disc that is **fully wet** (179 of 179 cells), so eddy-over-disc
+   and eddy-over-wet are the same number and there is no denominator to misread. True in-disc min
+   `okubo_w` = −1.48e-4, well past the quiet floor — yet `sample_features`'s `nanmax` reports
+   `okubo_w = +1.89e-4` for it, the disc's strongest seam cell, not its eddy core.
+   `classify_structure`/the tensor are not wrong; the max-reducer at the feature level is throwing
+   the signal away for exactly this feature.
 2. **But eddies are sparse enough that most discs never contain one to throw away, regardless of
    reducer.** The domain-wide wet-cell eddy rate (masked) is 0.105% on average across the cycle,
-   0.199% at its peak phase. A typical evaluated disc holds ~175 cells (the median), so the expected
-   eddy-cell count per disc is ~0.18 (mean) to ~0.35 (peak-phase) — most discs are expected to hold
-   zero. Directly counted: only **104 of the 526** evaluated features (19.8%) ever have *any* cell
-   crossing the `-quiet_w` eddy threshold in their disc across the whole cycle. For the other 422,
-   `nanmax` isn't suppressing anything — there is simply nothing there to suppress.
+   0.199% at its peak phase, against a typical (median) disc size of 175 cells. Measured directly
+   across all 526 evaluated features and all 26 phases (13,676 feature-phase samples), the mean
+   eddy-cell count per disc is **0.28** — most individual feature-phases hold zero. Directly counted:
+   only **104 of the 526** evaluated features (19.8%) ever have *any* cell crossing the `-quiet_w`
+   eddy threshold in their disc across the whole cycle. For the other 422, `nanmax` isn't suppressing
+   anything — there is simply nothing there to suppress.
 
 Point 2 also has a sharp edge for whatever Phase 2/3 builds next: a naive `nanmin` field, compared
 against 0 rather than against `-quiet_w`, would **not** cleanly recover an eddy signal either. Raw,
