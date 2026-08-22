@@ -146,6 +146,33 @@ discharge_buckets:
   # low threshold, and 25000 is above the observed max).
   low_below_cfs: 2774
   high_above_cfs: 6292
+salinity:
+  # Task 3 (2026-08-22) defaults -- THEORETICAL, not fitted. Task 5 replaces
+  # every value below against real 00480 salinity observations and records
+  # the fit residual alongside. Kept here (rather than relying silently on
+  # the model default) so the provenance of each number is visible in one
+  # place, per this file's own convention.
+  #
+  # Open-ocean end-member off the SC coast; typical nearshore Atlantic
+  # salinity runs ~34-36 ppt. Not measured at Winyah's mouth specifically --
+  # Task 5's fit should check it against the wettest USGS 00480 readings.
+  ocean_ppt: 34.0
+  # Rough guess at the intrusion length at median flow, pending Task 5.
+  l0_km: 18.0
+  # Matches this fishery's own discharge distribution: close to the 3866 cfs
+  # composite median measured above (365-day USGS daily means), not the raw
+  # bucket median.
+  q0_cfs: 4000.0
+  # Savenije-family scaling exponent, L ~ Q^-k. 1/3 is the textbook starting
+  # value; Task 5 fits the real one.
+  k: 0.33
+  # Tidal excursion: u_tidal * T / pi with u ~ 0.5 m/s and T = anuga.cycle_h
+  # = 12.42 h gives 0.5 * 44712 / pi / 1000 = 7.12 km, rounded to 7.0.
+  excursion_km: 7.0
+  # Same min/max as discharge_buckets above (365-day USGS daily means, n=365):
+  # min 1232 / max 22996 cfs. Outside this span, salinity_field flags
+  # extrapolated=True rather than silently trusting the fit.
+  calibration_range_cfs: [1232.0, 22996.0]
 climatology:
   water_temp_f_by_month:
     {1: 48, 2: 50, 3: 57, 4: 66, 5: 74, 6: 81, 7: 85, 8: 85, 9: 80, 10: 71, 11: 60, 12: 52}

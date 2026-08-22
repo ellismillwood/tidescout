@@ -180,6 +180,29 @@ class AnugaConfig(BaseModel):
     store_sww: bool = True
 
 
+class SalinityConfig(BaseModel):
+    """Empirical salt-intrusion parameters. Fitted in Phase 2 Task 5.
+
+    The defaults here are theoretical starting points, NOT calibrated values --
+    k = 1/3 is the Savenije-family scaling exponent and l0_km is a rough guess
+    at Winyah's intrusion length at median flow. Task 5 replaces them and
+    records the fit residual alongside.
+    """
+
+    ocean_ppt: float = 34.0
+    # Intrusion length at q0_cfs. Fitted.
+    l0_km: float = 18.0
+    q0_cfs: float = 4000.0
+    # Power-law exponent: L ~ Q^-k. 1/3 is the theoretical value. Fitted.
+    k: float = 0.33
+    # Tidal excursion -- how far the salt field slides over a cycle.
+    # u_tidal * T / pi with u ~ 0.5 m/s and T = 12.42 h gives ~7 km.
+    excursion_km: float = 7.0
+    # Discharge span the fit was made over. Outside it, results are flagged
+    # rather than silently trusted.
+    calibration_range_cfs: tuple[float, float] = (1232.0, 22996.0)
+
+
 class Fishery(BaseModel):
     slug: str
     name: str
@@ -197,6 +220,7 @@ class Fishery(BaseModel):
     jetties: list[JettySeed] = []
     model_domain: ModelDomain | None = None
     anuga: AnugaConfig = AnugaConfig()
+    salinity: SalinityConfig = SalinityConfig()
 
     def branch_shares(self) -> list[float]:
         """Each river's fraction of total inflow, in `self.rivers` order.
