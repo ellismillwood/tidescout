@@ -202,18 +202,30 @@ water. Task 1 of this plan re-read that contrast as an eddy signature and change
 `slack`. Task 11 asked the derived-structure fields directly: does the model produce a current
 shadow (high ambush contrast, non-trivial rotation-dominated cell fraction) at Georgetown, the way
 it plainly does not at a spot that has none? Over `winyah-bay`'s `mean_med` regime, all 26 phases,
-within each spot's 150 m radius:
+within each spot's 150 m radius, **classifying seam/eddy from `activation.structure_fields`'s
+`okubo_w`** (which is wet-masked twice — inputs then outputs — exactly as its docstring specifies,
+guarding against the same dry-cell central-difference bridging artifact Task 9 was fixed to remove):
 
 | spot | max ambush (m/s) | max eddy share | phases (of 26) with any eddy cells | max seam share |
 |---|---|---|---|---|
-| Georgetown Lighthouse | **0.868** | **9.0%** | **20/26** | 11.8% |
+| Georgetown Lighthouse | **0.868** | **7.6%** | **19/26** | 9.7% |
 | North Jetty | 0.454 | 0.0% | 0/26 | 32.6% |
 | Mud Bay Cut | 0.160 | 0.0% | 0/26 | 0.0% |
 
+*(Round-1 review caught that the first pass of this table classified seam/eddy from raw `u`/`v` with
+no wet mask, reintroducing exactly the dry-cell bridging artifact `activation.structure_fields`'s
+docstring warns about and Task 9 removed. Unmasked, Georgetown's peak read 9.0% eddy / 20-of-26
+phases / 11.8% max seam — measurably inflated: at the two eddy-richest phases, masking moves
+Georgetown from 9.0%→6.9% and 6.9%→4.9%, and the domain-wide eddy-cell count at phase 0 drops from
+1,545 (raw) to 780 (masked), roughly halving. North Jetty and Mud Bay Cut are unaffected — both have
+zero dry cells anywhere in their 150 m discs across the whole cycle, so masking changes nothing for
+them. The table above is the corrected, masked version and is the number of record; ambush is
+untouched either way, since `structure_fields` already wet-masks it before this table ever sees it.)*
+
 **The shadow is there, and it is the most pronounced structure of the three known spots.** Georgetown
 shows the highest ambush contrast of any of them (nearly 2× North Jetty's) and is the *only* one of
-the three that ever reads as rotation-dominated (Okubo-Weiss < 0) — 20 of 26 phases show some eddy
-fraction within its disc, peaking at 9.0%. North Jetty, by contrast, never registers a single eddy
+the three that ever reads as rotation-dominated (Okubo-Weiss < 0) — 19 of 26 phases show some eddy
+fraction within its disc, peaking at 7.6%. North Jetty, by contrast, never registers a single eddy
 cell across the whole cycle (0/26) despite being the strongest, most consistent seam (up to 32.6%) —
 a real current break, but a shear line, not a closed eddy. Mud Bay Cut shows essentially no derived
 structure at all at any phase. This is independent confirmation, from a different signal than the
@@ -223,24 +235,40 @@ question was just the wrong question to ask of it.
 
 One caveat surfaced while producing the table above: `engine/activation.py`'s `sample_features`
 reduces `okubo_w` per feature with `np.nanmax` over the 150 m disc, the same reducer used for
-`ambush`, `strain`, and `convergence`. That convention structurally erases eddy signal at the
-*feature* level — a disc large enough to hold an eddy core is also, in every real case checked,
-large enough to also hold a stronger seam cell at its edge, so the per-feature `okubo_w` reads
-positive even when the disc's interior is genuinely rotation-dominated. Confirmed directly: of 2,162
-features, only 2 ever recorded a negative per-feature `okubo_w` across all 26 phases (both within
-1e-6 of zero, inside the `quiet_w = 1e-5` dead band — i.e. not meaningfully different from "quiet").
-Yet the feature/phase with the single highest in-disc eddy-cell fraction anywhere in the inventory
-(`hole-7aa52bde1062`, phase 20, 16.9% of its disc classified eddy, true in-disc min W = −2.9e-4, well
-past the quiet floor) still reported `okubo_w = +9.0e-5` under `sample_features`'s nanmax — the
-disc's strongest seam cell, not its eddy core. The raw grid genuinely contains large eddy regions
-(955 cells classified eddy at one sample phase alone); `classify_structure`/the tensor are not
-wrong. The Georgetown table above sidesteps this because it computes eddy/seam *cell fraction*
-directly from the grid rather than through `sample_features`'s max reduction — which is exactly why
-Task 11's Step 3 diagnostic, not Step 2's per-feature ranking, is the right tool for asking "is there
-an eddy here." **This is a Phase 2 opening item, not something Task 11 adjusted**: if a future
-scoring pass wants a per-feature eddy signal, it needs `nanmin` (or a separate min-reduced field)
-alongside the existing max-reduced `okubo_w`, not a replacement of it — `okubo_w`'s max is still the
-right reducer for detecting seams.
+`ambush`, `strain`, and `convergence`. Confirmed directly: of the **526** features that ever record a
+finite `okubo_w` anywhere in the 26-phase cycle (2,162 total features in the inventory, but only 531
+have any in-domain cell at all, and 5 of those never get a finite `okubo_w`), only 2 ever recorded a
+negative per-feature `okubo_w` (both within 1e-6 of zero, inside the `quiet_w = 1e-5` dead band —
+i.e. not meaningfully different from "quiet"). That two-fact pairing is doing less work than the
+first-pass note here claimed, though. Two separate things are true and need to stay separate:
+
+1. **`nanmax` demonstrably suppresses eddy signal in discs that contain one.** The single clearest
+   case in the inventory: `creek_mouth-97b7b83992ef` at phase 24 has 21.4% of its 150 m disc
+   classified eddy (true in-disc min `okubo_w` = −2.26e-4, well past the quiet floor) — yet
+   `sample_features`'s `nanmax` reports `okubo_w = +5.47e-5` for it, the disc's strongest seam cell,
+   not its eddy core. `classify_structure`/the tensor are not wrong; the max-reducer at the feature
+   level is throwing the signal away for exactly this feature.
+2. **But eddies are sparse enough that most discs never contain one to throw away, regardless of
+   reducer.** The domain-wide wet-cell eddy rate (masked) is 0.105% on average across the cycle,
+   0.199% at its peak phase. A typical evaluated disc holds ~175 cells (the median), so the expected
+   eddy-cell count per disc is ~0.18 (mean) to ~0.35 (peak-phase) — most discs are expected to hold
+   zero. Directly counted: only **104 of the 526** evaluated features (19.8%) ever have *any* cell
+   crossing the `-quiet_w` eddy threshold in their disc across the whole cycle. For the other 422,
+   `nanmax` isn't suppressing anything — there is simply nothing there to suppress.
+
+Point 2 also has a sharp edge for whatever Phase 2/3 builds next: a naive `nanmin` field, compared
+against 0 rather than against `-quiet_w`, would **not** cleanly recover an eddy signal either. Raw,
+unthresholded `nanmin(okubo_w)` goes negative for **520 of the 526** features (98.9%) at some point
+in the cycle — because `okubo_w` scatters within a few units of zero as ordinary floating-point/
+dead-band noise in slack or otherwise featureless water, the same noise `classify_structure`'s
+`quiet_w` dead band exists to absorb at the cell level (see that function's own docstring). Only the
+104-feature eddy-containing subset above reflects genuine rotation-dominated content. **This is a
+Phase 2 opening item, not something Task 11 adjusted**: a correct per-feature eddy field needs
+`nanmin(okubo_w)` compared against `-quiet_w`, not against zero — the same dead band already applied
+at the cell level, reapplied at the feature level — alongside the existing max-reduced `okubo_w`,
+which remains the right reducer for detecting seams. Building an unthresholded `nanmin` field alone
+would report "most features are eddies" just as wrongly as the current `nanmax` field reports "none
+are."
 
 Sanity check on jetty ranking (Step 2, `tidescout flow structure winyah-bay --regime mean_med`)
 passed cleanly: both `jetty`-type features rank in the top 10% of the 531 in-domain features by
