@@ -514,5 +514,71 @@ def flow_validate(
             console.print(f"  [dim]{spot.name}: {spot.notes}[/dim]")
 
 
+@flow_app.command("structure")
+def flow_structure(
+    slug: str,
+    regime: str = typer.Option("mean_med", "--regime"),
+    phase: int = typer.Option(-1, "--phase", help="phase index; -1 = every phase"),
+    top: int = typer.Option(15, "--top", help="features to list"),
+) -> None:
+    """Derived structure at the feature inventory: seams, eddies, ambush points."""
+    import numpy as np
+
+    from tidescout.config import load_fishery
+    from tidescout.engine import activation, flow
+    from tidescout.paths import fishery_data_dir
+    from tidescout.pipeline import flowlib, schedule
+    from tidescout.pipeline.features import load_features
+
+    fishery = load_fishery(slug)
+    spec = flowlib.grid_spec(slug, fishery)
+    feats = load_features(slug)["features"]
+    grid_meta = json.loads(
+        (fishery_data_dir(slug) / "flow" / regime / "grid" / "grid.json").read_text()
+    )
+    states = flow.tide_states(grid_meta["stage_bc_m"])
+    sched = schedule.cell_schedule(slug, regime)
+
+    idxs = range(len(grid_meta["phases"])) if phase < 0 else [phase]
+    best: dict[str, activation.FeatureMetrics] = {}
+    best_state: dict[str, str] = {}
+    for i in idxs:
+        st = flowlib.load_state(slug, regime, i)
+        fields = activation.structure_fields(
+            st["u"], st["v"], st["depth"], spec, fishery.structure
+        )
+        for m in activation.sample_features(
+            feats, spec, fields, sched, fishery.structure.ambush_radius_m
+        ):
+            prev = best.get(m.key)
+            if prev is None or (np.nan_to_num(m.ambush) > np.nan_to_num(prev.ambush)):
+                best[m.key] = m
+                best_state[m.key] = states[i]
+
+    ranked = sorted(
+        (m for m in best.values() if m.n_cells),
+        key=lambda m: np.nan_to_num(m.ambush),
+        reverse=True,
+    )[:top]
+
+    table = Table(title=f"{fishery.name} — derived structure ({regime})")
+    for col in ("feature", "type", "best state", "ambush m/s", "speed",
+                "strain 1/s", "okubo W", "converg.", "wet frac"):
+        table.add_column(col)
+    for m in ranked:
+        table.add_row(
+            m.key, m.type, best_state[m.key], f"{m.ambush:.3f}", f"{m.speed:.3f}",
+            f"{m.strain:.2e}", f"{m.okubo_w:+.2e}", f"{m.convergence:+.2e}",
+            "-" if np.isnan(m.wet_fraction) else f"{m.wet_fraction:.2f}",
+        )
+    console.print(table)
+    console.print(
+        "\n[dim]okubo W < 0 is an eddy core (rotation-dominated); W > 0 is a seam "
+        "(strain-dominated). `ambush` is how much faster the water within "
+        f"{fishery.structure.ambush_radius_m:.0f} m is than the feature itself — "
+        "the current-shadow signal.[/dim]"
+    )
+
+
 def main() -> None:
     app()
