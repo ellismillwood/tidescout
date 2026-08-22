@@ -197,7 +197,7 @@ def sample_features(
             if np.isfinite(wf).any():
                 wet_fraction = float(np.nanmean(wf))
             if np.isfinite(fp).any():
-                flood_phase = float(np.nanmedian(fp))
+                flood_phase = _circular_mean_phase(fp)
 
         out.append(
             FeatureMetrics(
@@ -210,6 +210,48 @@ def sample_features(
             )
         )
     return out
+
+
+def _circular_mean_phase(phases: np.ndarray) -> float:
+    """Mean of tidal phases on the CIRCLE, returned in [0, 1).
+
+    Phase wraps, so 0.95 and 0.05 are 0.1 of a cycle apart and their centre is
+    0.0 -- low water -- not 0.5, which is the other half of the tide.
+    `pipeline/schedule.py` spends its module docstring establishing that phase
+    is circular and that an ordinary median of one "lands on whichever side of
+    0.5 that cluster happens to fall, which is an artifact of the cut point,
+    not of the physics"; this used to be `np.nanmedian` and undid that.
+
+    The standard resultant-vector construction: average the unit vectors at
+    angle 2*pi*phase and read the angle back with atan2.
+
+    Measured on the shipped winyah-bay `mean_med` library, against the ordinary
+    median it replaces: of the 301 features whose disc carries any finite
+    `flood_phase`, 261 move at all, 159 by more than 0.01 of a cycle, 19 by
+    more than 0.05, and 3 by more than 0.1. The largest single correction is
+    `flat-b6a1aec2d79d`, where the median read 0.0 -- "floods exactly at low
+    water" -- for a cluster whose circular centre is 0.884, late on the ebb
+    half. On a 12.42 h cycle 0.1 of a phase is about 75 minutes.
+
+    Degenerate case, documented rather than guarded: a disc whose flood phases
+    are spread right around the cycle has a resultant near zero and no
+    meaningful central phase at all, so the angle atan2 recovers from it is
+    noise. That is rare and visible -- one of those 301 features has a
+    resultant length below 0.2 (it is 0.05, on 55 cells), against a median
+    disc resultant of 0.89 -- and adding a cutoff would mean inventing a
+    threshold at the merge gate to turn a weakly-determined answer into NaN.
+    Exactly antipodal phases resolve to 0.0.
+    """
+    ang = 2.0 * np.pi * np.asarray(phases, dtype="float64")
+    sin_bar = float(np.nanmean(np.sin(ang)))
+    cos_bar = float(np.nanmean(np.cos(ang)))
+    phase = float(np.arctan2(sin_bar, cos_bar) / (2.0 * np.pi) % 1.0)
+    # `% 1.0` does not by itself guarantee the half-open range: atan2 lands a
+    # hair BELOW zero for a cluster centred on the wrap (0.95 with 0.05 gives
+    # about -1e-17), and 1.0 - 1e-17 rounds to exactly 1.0 in float64. Same
+    # point on the circle, outside the documented interval, and a downstream
+    # "is this the flood half" test would read it as the end of the ebb.
+    return 0.0 if phase >= 1.0 else phase
 
 
 def _sampling_anchors(

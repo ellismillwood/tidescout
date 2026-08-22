@@ -173,6 +173,49 @@ def test_structure_fields_returns_masked_1d_arrays_on_the_library_layout():
     assert np.allclose(fields["ambush"], 0.0)  # uniform flow: no contrast
 
 
+def _schedule(flood_by_cell, n=64):
+    """Minimal stand-in for schedule.CellSchedule over the 8x8 _Spec grid."""
+    flood = np.full(n, np.nan)
+    for idx, phase in flood_by_cell.items():
+        flood[idx] = phase
+    return SimpleNamespace(wet_fraction=np.ones(n), flood_phase=flood)
+
+
+def test_flood_phase_is_averaged_on_the_circle_not_on_the_line():
+    """Phase wraps. 0.95 and 0.05 are 0.1 of a cycle apart and their centre is
+    0.0 -- LOW water, the start of the flood half -- while an ordinary median
+    of that pair returns 0.5, which is high water, the other half of the tide.
+    `pipeline/schedule.py`'s module docstring establishes that an ordinary
+    median of a phase "lands on whichever side of 0.5 that cluster happens to
+    fall, which is an artifact of the cut point, not of the physics";
+    `sample_features` reduced `flood_phase` with `np.nanmedian` and undid it.
+
+    Cells 27 and 28 are the two cells within 15 m of (80, 90) on the _Spec
+    grid, so the disc holds exactly this straddling pair."""
+    spec = _Spec()
+    feats = [_feature("flat-wrap", "flat", (80.0, 90.0))]
+    out = activation.sample_features(
+        feats, spec, {}, _schedule({27: 0.95, 28: 0.05}),
+        radius_m=15.0, already_projected=True,
+    )
+    assert out[0].n_cells == 2
+    assert np.nanmedian([0.95, 0.05]) == 0.5, "what the old reduction returned"
+    assert out[0].flood_phase == pytest.approx(0.0, abs=1e-9)
+
+
+def test_flood_phase_of_a_cluster_that_does_not_wrap_is_its_ordinary_centre():
+    """The circular mean must not move an ordinary cluster: away from the wrap
+    it has to agree with the obvious answer, or it would trade one artifact
+    for another."""
+    spec = _Spec()
+    feats = [_feature("flat-plain", "flat", (80.0, 90.0))]
+    out = activation.sample_features(
+        feats, spec, {}, _schedule({27: 0.28, 28: 0.32}),
+        radius_m=15.0, already_projected=True,
+    )
+    assert out[0].flood_phase == pytest.approx(0.3, abs=1e-3)
+
+
 def _rotation_and_strain_grid(n=32, cell=20.0, strain=0.01, omega=0.004):
     """A pure-strain background with a solid-body rotation patch cut into it.
 
