@@ -191,9 +191,12 @@ spot in every comparison, and the discharge axis barely moves speed (as predicte
 
 ## Phase 1 results (Plan 4, `plan-04-phase1-structure`)
 
-Tasks 1–11 complete, 249 tests green. `tidescout flow structure` is the new inspection CLI
+Tasks 1–11 complete, plus the merge-gate fix wave that closed the final whole-branch review: **265
+tests green** (249 at the end of Task 11). `tidescout flow structure` is the new inspection CLI
 (`backend/tidescout/cli.py`); everything below was produced by it or by the Task 3/11 diagnostics
-built on `engine/activation.py` and `engine/structure.py`.
+built on `engine/activation.py` and `engine/structure.py`. Figures are post-fix-wave unless a
+sentence says otherwise; the last section of this results block is the before/after for everything
+the wave moved.
 
 **Georgetown Lighthouse — the current-shadow question answered.** Plan 3 left this open: the
 flood÷ebb ratio said Georgetown peaks on the ebb (contradicting `works_on: flood`), but also showed
@@ -233,10 +236,14 @@ Plan-3 flood÷ebb ratio, that Task 1's `works_on: slack` reasoning for Georgetow
 contrast/eddy spot, not a peak-current one, and the model was never wrong about it — the flood÷ebb
 question was just the wrong question to ask of it.
 
-One caveat surfaced while producing the table above: `engine/activation.py`'s `sample_features`
-reduces `okubo_w` per feature with `np.nanmax` over the 150 m disc, the same reducer used for
-`ambush`, `strain`, and `convergence`. Confirmed directly: of the **526** features that ever record a
-finite `okubo_w` anywhere in the 26-phase cycle (2,162 total features in the inventory, but only 531
+One caveat surfaced while producing the table above, and it is what drove the fix wave's `eddy_share`
+change. *(Every count in this paragraph and in the two numbered points below was measured at the
+PRE-fix sampling anchor — 531 in-domain / 526 with a finite `okubo_w` — and is kept as measured
+because it is the evidence the change rests on. The post-fix equivalents are in the SHIPPED block
+that follows and in the before/after table at the end of this section.)* `engine/activation.py`'s
+`sample_features` reduces `okubo_w` per feature with `np.nanmax` over the 150 m disc, the same
+reducer used for `ambush`, `strain`, and `convergence`. Confirmed directly: of the **526** features
+that ever record a finite `okubo_w` anywhere in the 26-phase cycle (2,162 total features in the inventory, but only 531
 have any in-domain cell at all, and 5 of those never get a finite `okubo_w`), only 2 ever recorded a
 negative per-feature `okubo_w` (both within 1e-6 of zero, inside the `quiet_w = 1e-5` dead band —
 i.e. not meaningfully different from "quiet"). That two-fact pairing is doing less work than the
@@ -297,11 +304,19 @@ dead-band noise in slack or otherwise featureless water, the same noise `classif
 > the wrong label.
 
 Sanity check on jetty ranking (Step 2, `tidescout flow structure winyah-bay --regime mean_med`)
-passed cleanly: both `jetty`-type features rank in the top 10% of the 531 in-domain features by
-ambush contrast (median ambush 0.556 across the 2 jetty features — the highest median of any
-feature type in the inventory, ahead of `creek_mouth` 0.116, `hole` 0.104, `wall` 0.093, `bar` 0.084,
-`dropoff` 0.044, `flat` 0.037), confirming jetties read as the canonical current shadow the model
-predicts them to be.
+passed cleanly, and still passes on the post-fix-wave anchors: both `jetty`-type features rank in the
+top 10% of the **529** in-domain features by ambush contrast — **24th** (0.536) and **51st** (0.392)
+of 529, against a top-10% cut at rank 52. Median ambush across the 2 jetty features is **0.464**, the
+highest median of any feature type in the inventory by more than 4×, ahead of `creek_mouth` 0.116,
+`hole` 0.111, `wall` 0.100, `bar` 0.100, `dropoff` 0.044, `flat` 0.034. (`wall` and `bar` are
+separated by 0.0003 — 0.09982 against 0.09950 — so they print the same at 3 dp. That is a tie for
+every practical purpose, not a transcription error.) Jetties read as the canonical current shadow the
+model predicts them to be.
+
+The Task 11 version of this paragraph read 0.556 across the jetties and put them 8th and 48th of 531.
+Those numbers were measured at a sampling anchor sitting **538.9 m** off North Jetty's own centroid,
+so they describe the wrong piece of water; the before/after table below has the full accounting. The
+finding — jetties top the inventory on ambush and sit comfortably inside the top 10% — is unchanged.
 
 **Intertidal share progression (Task 7).** Across `winyah-bay`'s three range regimes (fixed at
 `_med`/`_low`/`_high` discharge), intertidal cell share rises monotonically with tidal range, as
@@ -312,6 +327,12 @@ physically expected:
 | neap_low | 42,645 | 7.26% |
 | mean_med | 50,124 | 8.53% |
 | spring_high | 57,796 | 9.84% |
+
+Re-run post-fix-wave via `backend/tools/schedule_stats.py winyah-bay`: identical to the cell, as it
+must be — nothing in the wave touches `wet_mask` or `schedule_from_depths`. The figures
+`pipeline/schedule.py`'s own module docstring quotes reproduce with it (wet-window p50 = 0.523 in all
+nine regimes; 33.8% neap / 35.7% spring draining in phase 0.0–0.2; spring_high's 4,037 cells at
+`flood_phase == 0.0`, 2,697 of them — 66.8% — overlapping the early-drain bucket).
 
 **Feature inventory count and id stability (Task 8).** The detector produces **2,162 features**
 (256 bar + 134 creek_mouth + 847 dropoff + 497 flat + 389 hole + 2 jetty + 37 wall), all with
@@ -327,9 +348,12 @@ version of this line said. That would be undefined for 136 of the 2,162 features
 mouths are Points and the 2 jetties are LineStrings, all with zero area. `oysters.py:106-107` states
 the real formula correctly; this line did not) ranks the inventory differently from raw
 reef *area*: the area-ranked top 5 is entirely large flats/holes (17,000–89,000 m²) with modest
-density (0.01–0.07) that merely graze reef at their edges, while the density-ranked top 5 is a
-different set of much smaller holes/flats (3,000–7,000 m²) at meaningfully higher density
-(0.09–0.14) — area alone is confounded by feature footprint, and density is the scale-free signal.
+density (0.013–0.066) that merely graze reef at their edges, while the density-ranked top 5 is a
+different set of holes/flats carrying far less reef (3,700–14,800 m²) at meaningfully higher density
+(0.092–0.139) — area alone is confounded by feature footprint, and density is the scale-free signal.
+(The Task 11 version of this line gave the density top 5 as 3,000–7,000 m². Its 4th and 5th places
+were tied at 0.09 under the old 2 dp rounding and were ordered by file position; at full precision
+`flat-1387858bbedf` takes 5th. See the before/after block below.)
 
 ### What the final fix wave moved in the figures above
 
@@ -360,12 +384,14 @@ geometry, so the anchor fix cannot reach them — and the Georgetown conclusion 
 | median ambush, `jetty` | 0.556 | 0.464 |
 | median ambush, `hole` / `wall` / `bar` | 0.104 / 0.093 / 0.084 | 0.111 / 0.100 / 0.100 |
 | median ambush, `flat` | 0.037 | 0.034 |
-| jetty ranks by ambush | 7th and 47th of 531 | 23rd and 50th of 529 |
+| jetty ranks by ambush | 8th and 48th of 531 | 24th and 51st of 529 |
 | `oyster_density`-ranked top 5, reef area | 3,134–7,340 m² | 3,689–14,812 m² |
+| tests green | 249 | 265 |
 
 `creek_mouth` (0.116) and `dropoff` (0.044) are unchanged, and the qualitative claims all survive:
 jetties still hold the highest median ambush of any type by a factor of four, both jetty features are
-still inside the top 10% (the cut is rank 52 of 529), and flats and dropoffs still sit last.
+still inside the top 10% (the cut is rank 52 of 529; they land 24th and 51st), and flats and
+dropoffs still sit last.
 
 The jetty median is the single largest move and it has a specific cause worth recording: North
 Jetty's LineString has five unevenly spaced vertices over 3.2 km, so its vertex mean sat **538.9 m**
