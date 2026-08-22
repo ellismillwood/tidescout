@@ -392,9 +392,13 @@ def salinity_calibrate(
     from tidescout.sources.cache import default_cache
 
     fishery = load_fishery(slug)
-    data = salinity_fit.collect_observations(
-        slug, fishery, default_cache(), days=days, max_snap_m=max_snap_m
-    )
+    try:
+        data = salinity_fit.collect_observations(
+            slug, fishery, default_cache(), days=days, max_snap_m=max_snap_m
+        )
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
 
     table = Table(title=f"{fishery.name} — 00480 sensors over the last {days} days")
     for col in ("site", "along-estuary km", "snap gap m", "days", "ppt min", "ppt max", "used"):

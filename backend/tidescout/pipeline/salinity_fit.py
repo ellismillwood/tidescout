@@ -202,16 +202,15 @@ def _uncertainty(sol, names: list[str], values: list[float]):
     jac = np.asarray(sol.jac, dtype="float64")
     m, n = jac.shape
     scale = np.array([abs(v) if abs(v) > 1e-12 else 1.0 for v in values])
-    s = np.linalg.svd(jac * scale, compute_uv=False)
-    condition = float(s[0] / s[-1]) if s[-1] > 0 else float("inf")
+    _, sv, vt = np.linalg.svd(jac * scale, full_matrices=False)
+    condition = float(sv[0] / sv[-1]) if sv.size and sv[-1] > 0 else float("inf")
 
     dof = m - n
-    tol = max(m, n) * float(np.finfo(float).eps) * float(s[0]) if s.size else 0.0
-    if dof <= 0 or s.size == 0 or s[-1] <= tol:
+    tol = max(m, n) * float(np.finfo(float).eps) * float(sv[0]) if sv.size else 0.0
+    if dof <= 0 or sv.size == 0 or sv[-1] <= tol:
         return dict.fromkeys(names), condition
     resid = np.asarray(sol.fun, dtype="float64")
     resid_var = float(resid @ resid) / dof
-    _, sv, vt = np.linalg.svd(jac * scale, full_matrices=False)
     cov = (vt.T * (1.0 / sv**2)) @ vt * resid_var
     sigma = np.sqrt(np.abs(np.diag(cov))) * scale
     return {name: float(v) for name, v in zip(names, sigma, strict=True)}, condition
@@ -605,8 +604,9 @@ def collect_observations(
         site = w.station
         rows = salinity_daily.get(site, [])
         ppt = [v for _, v in rows]
+        located = site in distances
         dist, gap = distances.get(site, (float("nan"), float("inf")))
-        ok = bool(rows) and gap <= max_snap_m and np.isfinite(dist)
+        ok = bool(rows) and located and gap <= max_snap_m and np.isfinite(dist)
         if ok:
             usable[site] = dist
         records.append(
@@ -622,6 +622,10 @@ def collect_observations(
                     if ok
                     else "no 00480 history"
                     if not rows
+                    else "USGS gave no coordinates for this site"
+                    if not located
+                    else "no water route to the sea from the nearest cell"
+                    if not np.isfinite(dist)
                     else f"outside the domain by {gap:.0f} m (limit {max_snap_m:.0f} m)"
                 ),
             )
