@@ -80,7 +80,10 @@ def build_features(slug: str, fishery: Fishery) -> Path:
     geoms = [f.geometry for f in feats]
     reef_areas = reef_area_m2_within(geoms, reefs_utm)
     reef_dists = nearest_reef_m(geoms, reefs_utm)
-    reef_density = reef_density_within(geoms, reefs_utm)
+    # Reuse reef_areas rather than letting reef_density_within recompute it:
+    # that would be a second full STRtree build + buffer/intersection pass
+    # over every feature, not just a second tree construction.
+    reef_density = reef_density_within(geoms, reefs_utm, areas=reef_areas)
     for f, area, dist, density in zip(feats, reef_areas, reef_dists, reef_density, strict=True):
         f.attrs["oyster_area_m2"] = area
         f.attrs["oyster_nearest_m"] = dist

@@ -96,7 +96,13 @@ def nearest_reef_m(features, reefs) -> list[float]:
     return [float(geom.distance(reefs[tree.nearest(geom)])) for geom in features]
 
 
-def reef_density_within(features, reefs, radius_m: float = DEFAULT_RADIUS_M) -> list[float]:
+def reef_density_within(
+    features,
+    reefs,
+    radius_m: float = DEFAULT_RADIUS_M,
+    *,
+    areas: list[float] | None = None,
+) -> list[float]:
     """Reef area within `radius_m` of each feature, as a fraction of the
     buffered search area itself: `reef_area_m2_within / buffer_area_m2`.
 
@@ -107,13 +113,17 @@ def reef_density_within(features, reefs, radius_m: float = DEFAULT_RADIUS_M) -> 
     both come out near 1.0 here, even though their `reef_area_m2_within`
     values differ by orders of magnitude.
 
-    Delegates to `reef_area_m2_within` rather than re-querying the STRtree:
-    building that tree is the expensive part (8,451 reefs), and this needs
-    nothing beyond its output divided by each buffer's own area -- a second
-    `STRtree` build already happens in `nearest_reef_m`; a third here would
-    make it worse for no benefit.
+    Pass `areas` -- `reef_area_m2_within`'s own output -- when the caller has
+    already computed it, as `build_features` does: reusing it skips a second
+    full `STRtree` build (8,451 reefs) and a second buffer/intersection pass
+    over every feature, which is real cost, not just tree-construction
+    overhead. Left unset, this calls `reef_area_m2_within` itself so the
+    function stays standalone and pure for direct callers, including this
+    module's own tests -- that call *does* redo the full computation; there
+    is no way to get the area without it when the caller has nothing cached.
     """
-    areas = reef_area_m2_within(features, reefs, radius_m)
+    if areas is None:
+        areas = reef_area_m2_within(features, reefs, radius_m)
     return [
         area / geom.buffer(radius_m).area for area, geom in zip(areas, features, strict=True)
     ]

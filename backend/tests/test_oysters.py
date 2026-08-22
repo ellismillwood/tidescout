@@ -124,6 +124,28 @@ def test_reef_density_is_zero_not_nan_when_there_are_no_reefs():
     assert got[0] == 0.0
 
 
+def test_reef_density_within_uses_precomputed_areas_when_given():
+    """build_features already has reef_area_m2_within's output in hand and
+    passes it in via `areas=` so reef_density_within doesn't redo a full
+    STRtree build + buffer/intersection pass just to get the same numbers
+    back. Pin that the parameter is actually consumed -- a deliberately
+    wrong `areas` value must change the output, not be silently ignored --
+    and that omitting it still matches the self-computed result."""
+    reef = _square(0.0, 0.0, 10.0)
+    pt = Point(0.0, 0.0)
+    buffer_area = pt.buffer(50.0).area
+
+    self_computed = reef_density_within([pt], [reef], radius_m=50.0)
+    assert self_computed[0] == pytest.approx(100.0 / buffer_area)
+
+    given_correct = reef_density_within([pt], [reef], radius_m=50.0, areas=[100.0])
+    assert given_correct[0] == pytest.approx(self_computed[0])
+
+    given_wrong = reef_density_within([pt], [reef], radius_m=50.0, areas=[9999.0])
+    assert given_wrong[0] == pytest.approx(9999.0 / buffer_area)
+    assert given_wrong[0] != self_computed[0]
+
+
 def _lonlat_square(clon, clat, side_deg):
     h = side_deg / 2.0
     return Polygon(
