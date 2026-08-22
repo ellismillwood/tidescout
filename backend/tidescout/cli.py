@@ -533,9 +533,14 @@ def flow_structure(
     fishery = load_fishery(slug)
     spec = flowlib.grid_spec(slug, fishery)
     feats = load_features(slug)["features"]
-    grid_meta = json.loads(
-        (fishery_data_dir(slug) / "flow" / regime / "grid" / "grid.json").read_text()
-    )
+    grid_path = fishery_data_dir(slug) / "flow" / regime / "grid" / "grid.json"
+    if not grid_path.exists():
+        console.print(
+            f"[red]no rasterised library for regime {regime!r}[/red] "
+            f"(expected {grid_path}).\nRun the build, then `flowlib.rasterise_regime`."
+        )
+        raise typer.Exit(1)
+    grid_meta = json.loads(grid_path.read_text())
     states = flow.tide_states(grid_meta["stage_bc_m"])
     sched = schedule.cell_schedule(slug, regime)
 
