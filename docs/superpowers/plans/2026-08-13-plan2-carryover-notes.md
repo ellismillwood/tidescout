@@ -28,3 +28,59 @@ Distilled from Plan 2's ledger and final whole-branch review (2026-08-13) before
 - ANUGA install still unattempted (Plan 3's first risk; container fallback per spec §5). THREDDS/NCEI is the bathy source of record — no CUDEM S3 bucket exists.
 - Deferred minors (final review triaged all OK-TO-DEFER): contour ring seam-splitting (~40 m loss cases, stitch recipe in ledger), hillshade nodata-vs-black collision, quicklook not georeferenced, `noaa.__all__` under-declares, `JettySeed` lacks min-2-vertex validator, 3 early-bound path value-imports (patch-target gotchas documented in test_spots.py), README section header stale, empty-feats `min()` edge, Rich-table test parse brittleness, `_write` cross-module private import (rename to `write_raster` when touched).
 - Subagent report prose can drift on specifics (bar-78 vs bar-123 attribution) — verify numbers against artifacts, not summaries. Three more API connection drops this plan; work always survived in the tree/commits — check `git log` before re-dispatching.
+
+## SCDNR intertidal oyster reef layer — OBTAINED 2026-08-14 (Plan 4 input)
+
+Spec §4 lists oyster beds as a feature class "if downloadable"; §13 treats it as optional. It was
+deferred by name in Plan 1 and recorded `oyster ✗` in Plan 2 without anyone checking obtainability.
+It has now been checked, downloaded, and characterised.
+
+**It IS publicly downloadable — no token.** An initial probe wrongly concluded otherwise: the
+service that web searches surface, `MRD/Sc_Intertidal_Oyster_Reefs20190402/MapServer`, is secured
+(HTTP 499 Token Required) and no longer listed in the public `MRD` folder. That is a stale
+endpoint. The LIVE one is found by walking the public ArcGIS Online web app to its web map to its
+operational layer:
+
+```
+scdnr.maps.arcgis.com item 5bc898b455be43bea4a908491d2b3414   (access: public)
+  -> webmap db780044ce3348e785f653a72cc6c6b7
+    -> https://arcweb.dnr.sc.gov/server/rest/services/Hosted/SCDNROyster2015Live/FeatureServer/0
+```
+
+Public, unauthenticated, `maxRecordCount` 2000 with pagination, served in Web Mercator (3857)
+despite metadata claiming UTM 17N — request `outSR=4326` to match the pipeline's GeoJSON
+convention. Fields: `objectid, id, calcgeo_ac, photoedit, photo_year, shape_leng`.
+Working downloader: `.superpowers/sdd/<plan>/fetch_oysters.py`; Plan 4 should promote it to
+`sources/scdnr.py` with the usual SQLite cache. Acknowledge SCDNR as source per their use
+constraints.
+
+**Downloaded for Winyah** to `data/winyah-bay/oyster_reefs.geojson` (gitignored, rebuildable):
+8,451 polygons in the bbox, 6,527 (77%) inside the model domain, `photo_year` uniformly 2008.
+
+**What it is good for — and what it is NOT.** These are fringing reef patches, not bars:
+
+| metric | value |
+|---|---|
+| total area, whole bbox | 0.607 km² |
+| median reef | 24 m² (~5 x 5 m) |
+| p90 | 142 m² |
+| max | 6,458 m² |
+| >= 500 m² (resolvable at the 20 m mesh / 20 m library grid) | 181 |
+| >= 2000 m² | 18 |
+
+- **NOT mesh geometry.** A 24 m² reef is far below the 20 m triangle edge and the 20 m
+  `library_cell_m` raster. Oysters cannot influence the hydrodynamics at our resolution, and
+  meshing them would be meaningless CFL cost. Do not add them to the ANUGA domain.
+- **NOT an ambush-feature class as-is.** 8,451 polygons of median 24 m² would swamp the 2,162-strong
+  feature inventory with noise, and would re-create exactly the nearest-feature problem Task 2 fixed
+  from the other direction (too many tiny features rather than one huge one). If used as features at
+  all, gate on area (>= ~500 m², i.e. 181 of them) or cluster adjacent patches into reef complexes.
+- **YES as a scoring/habitat layer (Plan 4).** Proximity-to-oyster-habitat is a legitimate
+  bite-score factor, especially for redfish. A rasterised reef-density field on the analysis grid is
+  the natural form — it degrades gracefully at any resolution and sidesteps the polygon-count problem.
+
+**Calibration note:** none of Ellis's three known spots sit near a reef — nearest reef is 1.4 km
+(Mud Bay Cut), 3.9 km (Georgetown Lighthouse), 6.5 km (North Jetty). So oyster habitat is not what
+drives his current spots, and any oyster factor should carry a small default weight until validated
+against spots he chooses specifically for oysters. Imagery is 2008, ~18 years stale; intertidal
+reefs migrate, so treat this as a prior, not ground truth.

@@ -1,8 +1,9 @@
 import numpy as np
-from shapely.geometry import Point
+from shapely.geometry import LineString, Point
 
 from tidescout.config import load_fishery
 from tidescout.engine import detect
+from tidescout.engine.detect import Feature, feature_key
 from tidescout.engine.terrain import slope_deg
 
 from . import synth
@@ -10,6 +11,25 @@ from . import synth
 
 def _thresholds():
     return load_fishery("winyah-bay").features
+
+
+def test_mask_polygons_rejects_basin_scale_blobs():
+    # a 150x150-cell blob = 2.25 km2 at 10 m cells
+    mask = np.zeros((200, 200), dtype=bool)
+    mask[20:170, 20:170] = True
+    kept = detect._mask_polygons(
+        mask, synth.TRANSFORM, min_area_m2=1500.0, cell_m=10.0, max_area_m2=1_000_000.0
+    )
+    assert kept == [], "a 2.25 km2 blob must not survive a 1 km2 cap"
+
+
+def test_mask_polygons_keeps_normal_features():
+    mask = np.zeros((200, 200), dtype=bool)
+    mask[100:120, 100:130] = True          # 200x300 m = 0.06 km2
+    kept = detect._mask_polygons(
+        mask, synth.TRANSFORM, min_area_m2=1500.0, cell_m=10.0, max_area_m2=1_000_000.0
+    )
+    assert len(kept) == 1
 
 
 def test_gate_creek_mouth_found():
@@ -37,6 +57,36 @@ def test_gate_dropoff_found_and_typed():
     assert feats
     assert {f.type for f in feats} <= {"dropoff", "wall"}
     assert any(f.type == "wall" for f in feats)  # 9 m over 10 m cell = 24 deg
+
+
+def test_steep_step_is_typed_as_wall():
+    """A polygon containing genuinely steep cells must type as wall even though
+    its mean slope is dragged down by the 8 deg boundary it is cut at.
+
+    Deviation from the brief (a bare 12 m single-column step): a lone abrupt
+    step produces a dropoff mask that is *homogeneous* -- every masked cell
+    sees the identical central-difference slope (~31 deg for a 12 m step), so
+    mean == max there and the dilution bug this test exists to catch can
+    never manifest, before or after the fix. Verified empirically: the
+    brief's literal fixture already types as "wall" under the *old*
+    mean-based estimator, so it cannot RED-fail. A gentler ramp (~10 deg,
+    above the 8 deg dropoff threshold but below the 20 deg wall threshold)
+    feeding into a sharp step (~31-35 deg), both inside the same connected
+    mask polygon, gives mean ~15 deg (typed "dropoff" by the old estimator)
+    vs p90 ~35 deg (typed "wall" by the new one) -- confirmed directly.
+    """
+    z = np.full((200, 200), -2.0, dtype="float32")
+    ramp_start, ramp_cols, d_ramp = 90, 8, 1.8  # ~10 deg/column ramp
+    for i in range(ramp_cols):
+        z[:, ramp_start + i] = -2.0 - d_ramp * (i + 1)
+    step_col = ramp_start + ramp_cols
+    z[:, step_col:] = z[0, step_col - 1] - 12.0  # sharp 12 m step after the ramp
+    from tidescout.engine.terrain import slope_deg as _slope
+    from tidescout.models import FeatureThresholds
+    slope = _slope(z, 10.0)
+    feats = detect.detect_dropoffs(z, slope, FeatureThresholds(), synth.TRANSFORM)
+    types = {f.type for f in feats}
+    assert "wall" in types, f"expected a wall, got {types}"
 
 
 def test_gate_hole_found():
@@ -112,3 +162,39 @@ def test_bar_touching_array_edge_not_boundary_biased():
     feats = detect.detect_bars(z, _thresholds(), synth.CELL, synth.TRANSFORM)
     assert feats, "ridge touching the array edge must still be detected as a bar"
     assert all(f.attrs["pct_deep_boundary"] >= 0.99 for f in feats)
+
+
+def test_feature_key_is_stable_across_rebuilds():
+    a = Feature("dropoff", LineString([(100.0, 200.0), (140.0, 260.0)]))
+    b = Feature("dropoff", LineString([(100.0, 200.0), (140.0, 260.0)]))
+    assert feature_key(a) == feature_key(b)
+
+
+def test_feature_key_is_independent_of_detection_order():
+    """The bug this replaces: ids came from a running counter, so inserting one
+    feature renumbered every later feature of that type."""
+    feats = [
+        Feature("hole", Point(10.0, 20.0)),
+        Feature("hole", Point(30.0, 40.0)),
+    ]
+    keys_forward = [feature_key(f) for f in feats]
+    keys_reversed = [feature_key(f) for f in reversed(feats)]
+    assert set(keys_forward) == set(keys_reversed)
+
+
+def test_feature_key_separates_types_at_the_same_place():
+    p = Point(10.0, 20.0)
+    assert feature_key(Feature("hole", p)) != feature_key(Feature("bar", p))
+
+
+def test_feature_key_absorbs_sub_metre_detector_jitter():
+    """A re-run that moves a centroid by 20 cm must not mint a new feature."""
+    a = Feature("bar", Point(1000.0, 2000.0))
+    b = Feature("bar", Point(1000.2, 1999.8))
+    assert feature_key(a) == feature_key(b)
+
+
+def test_feature_key_distinguishes_features_a_few_metres_apart():
+    a = Feature("bar", Point(1000.0, 2000.0))
+    b = Feature("bar", Point(1010.0, 2000.0))
+    assert feature_key(a) != feature_key(b)

@@ -1,5 +1,5 @@
 from dataclasses import dataclass
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 from statistics import fmean
 
 import httpx
@@ -8,11 +8,14 @@ from tidescout.models import Fishery
 from tidescout.sources.cache import Cache
 
 IV_URL = "https://waterservices.usgs.gov/nwis/iv/"
+DV_URL = "https://waterservices.usgs.gov/nwis/dv/"
 OBS_TTL = timedelta(minutes=15)
 
 PARAM_DISCHARGE = "00060"
 PARAM_TEMP_C = "00010"
 PARAM_SALINITY = "00480"
+
+FRESHNESS_CUTOFF = timedelta(hours=6)
 
 
 @dataclass
@@ -21,6 +24,8 @@ class DischargeSummary:
     cfs_lagged: float | None
     bucket: str
     sites: list[str]
+    contributing: list[str]
+    stale: list[str]
 
 
 @dataclass
@@ -81,6 +86,53 @@ def fetch_series(
     return {pair: sorted(pts.items()) for pair, pts in by_key.items() if pts}
 
 
+def fetch_daily(
+    sites: list[str], param: str, start: str, end: str, cache: Cache
+) -> dict[str, list[tuple[date, float]]]:
+    """Daily mean values (NWIS dv service). Immutable once published, so cached
+    with no TTL -- calibration reads a year of history and must not refetch."""
+    sites = [s for s in sites if s]
+    if not sites:
+        return {}
+    query = {
+        "format": "json",
+        "sites": ",".join(sites),
+        "parameterCd": param,
+        "startDT": start,
+        "endDT": end,
+        "statCd": "00003",  # daily mean
+        "siteStatus": "all",
+    }
+
+    def fetch() -> dict:
+        resp = httpx.get(DV_URL, params=query, timeout=60)
+        resp.raise_for_status()
+        return resp.json()
+
+    key = f"dv:{query['sites']}:{param}:{start}:{end}"
+    cached = cache.get_or_fetch("usgs-dv", key, None, fetch)
+    out: dict[str, list[tuple[date, float]]] = {}
+    for ts in cached.payload.get("value", {}).get("timeSeries", []):
+        try:
+            site = ts["sourceInfo"]["siteCode"][0]["value"]
+        except (KeyError, IndexError, TypeError):
+            continue
+        rows: list[tuple[date, float]] = []
+        for block in ts.get("values", []):
+            for p in block.get("value", []):
+                try:
+                    v = float(p["value"])
+                    d = date.fromisoformat(p["dateTime"][:10])
+                except (KeyError, TypeError, ValueError):
+                    continue
+                if v <= -999:
+                    continue
+                rows.append((d, v))
+        if rows:
+            out[site] = sorted(rows)
+    return out
+
+
 def discharge_summary(fishery: Fishery, cache: Cache) -> DischargeSummary:
     sites = [r.usgs_site for r in fishery.rivers if r.usgs_site]
     weights = {r.usgs_site: r.weight for r in fishery.rivers if r.usgs_site}
@@ -89,13 +141,21 @@ def discharge_summary(fishery: Fishery, cache: Cache) -> DischargeSummary:
     total_now = 0.0
     total_lagged = 0.0
     got_now = got_lagged = False
+    contributing: list[str] = []
+    stale: list[str] = []
     for site in sites:
         points = series.get((site, PARAM_DISCHARGE), [])
         if not points:
+            stale.append(site)
             continue
         w = weights.get(site, 1.0)
-        total_now += points[-1][1] * w
-        got_now = True
+        last_t, last_v = points[-1]
+        if now - last_t > FRESHNESS_CUTOFF:
+            stale.append(site)  # dark gauge: do not let a 4-day-old value in
+        else:
+            total_now += last_v * w
+            got_now = True
+            contributing.append(site)
         lag_window = [v for t, v in points if timedelta(hours=24) <= now - t <= timedelta(hours=48)]
         if lag_window:
             total_lagged += fmean(lag_window) * w
@@ -111,7 +171,7 @@ def discharge_summary(fishery: Fishery, cache: Cache) -> DischargeSummary:
         bucket = "high"
     else:
         bucket = "med"
-    return DischargeSummary(cfs_now, cfs_lagged, bucket, sites)
+    return DischargeSummary(cfs_now, cfs_lagged, bucket, sites, contributing, stale)
 
 
 def _daily_means(points: list[tuple[datetime, float]]) -> dict:

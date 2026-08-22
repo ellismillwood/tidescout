@@ -30,7 +30,7 @@ def build_derivatives(slug: str, fishery: Fishery) -> dict[str, Path]:
     c = terrain.curvature(z, fishery.bathymetry.cell_m)
     zn = terrain.zones(
         z, fishery.bathymetry.land_elev_m,
-        fishery.features.shallow_max_m, fishery.features.deep_min_m,
+        fishery.bathymetry.zone_shallow_max_m, fishery.bathymetry.zone_deep_min_m,
     )
     s_out = np.where(np.isnan(s), -9999.0, s)
     c_out = np.where(np.isnan(c), -9999.0, c)

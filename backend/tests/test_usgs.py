@@ -1,9 +1,11 @@
-from datetime import UTC, datetime, timedelta
+from datetime import UTC, date, datetime, timedelta
 
+import httpx as _httpx
 import respx
 from httpx import Response
 
 from tidescout.config import load_fishery
+from tidescout.sources import usgs
 from tidescout.sources.cache import Cache
 from tidescout.sources.usgs import discharge_summary, fetch_series, water_summary
 
@@ -100,7 +102,7 @@ def test_discharge_summary_buckets(tmp_path):
     summary = discharge_summary(fishery, Cache(tmp_path / "c.sqlite"))
     assert summary.cfs_now == 13000.0 * len(sites)
     assert summary.cfs_lagged == 12000.0 * len(sites)
-    assert summary.bucket == "high"  # 36000 > 25000 threshold
+    assert summary.bucket == "high"  # 36000 > 6292 threshold
 
 
 @respx.mock
@@ -109,14 +111,14 @@ def test_discharge_summary_bucket_falls_back_to_cfs_now(tmp_path):
     sites = [r.usgs_site for r in fishery.rivers]
     # Only a very-recent reading per site: nothing falls in the 24-48h lag
     # window, so cfs_lagged stays None and the bucket must fall back to cfs_now.
-    series = [_ts(site, "00060", [(_hours_ago(1), 1000.0)]) for site in sites]
+    series = [_ts(site, "00060", [(_hours_ago(1), 500.0)]) for site in sites]
     respx.get(url__regex=r"https://waterservices\.usgs\.gov/nwis/iv/.*").mock(
         return_value=Response(200, json=_iv_payload(series))
     )
     summary = discharge_summary(fishery, Cache(tmp_path / "c.sqlite"))
     assert summary.cfs_lagged is None
-    assert summary.cfs_now == 1000.0 * len(sites)
-    assert summary.bucket == "low"  # 3000 < 6000 threshold, from cfs_now
+    assert summary.cfs_now == 500.0 * len(sites)
+    assert summary.bucket == "low"  # 1500 < 2774 threshold, from cfs_now
 
 
 @respx.mock
@@ -129,6 +131,39 @@ def test_discharge_summary_bucket_med_when_no_data(tmp_path):
     assert summary.cfs_now is None
     assert summary.cfs_lagged is None
     assert summary.bucket == "med"
+
+
+def test_discharge_excludes_stale_sites(monkeypatch, fishery, cache):
+    now = datetime.now(UTC)
+    fresh = [(now - timedelta(hours=1), 5000.0)]
+    stale = [(now - timedelta(days=4), 9000.0)]
+
+    def fake_fetch(sites, params, period_days, cache):
+        return {
+            ("02131000", usgs.PARAM_DISCHARGE): fresh,
+            ("02110500", usgs.PARAM_DISCHARGE): stale,
+        }
+
+    monkeypatch.setattr(usgs, "fetch_series", fake_fetch)
+    s = usgs.discharge_summary(fishery, cache)
+    assert s.cfs_now == 5000.0            # stale site excluded, not summed
+    assert s.contributing == ["02131000"]
+    assert "02110500" in s.stale
+
+
+@respx.mock
+def test_fetch_daily_parses_and_sorts(cache):
+    payload = {"value": {"timeSeries": [{
+        "sourceInfo": {"siteCode": [{"value": "02131000"}]},
+        "values": [{"value": [
+            {"dateTime": "2026-01-02T00:00:00.000", "value": "5200"},
+            {"dateTime": "2026-01-01T00:00:00.000", "value": "4800"},
+            {"dateTime": "2026-01-03T00:00:00.000", "value": "-999999"},
+        ]}],
+    }]}}
+    respx.get(usgs.DV_URL).mock(return_value=_httpx.Response(200, json=payload))
+    out = usgs.fetch_daily(["02131000"], usgs.PARAM_DISCHARGE, "2026-01-01", "2026-01-03", cache)
+    assert out["02131000"] == [(date(2026, 1, 1), 4800.0), (date(2026, 1, 2), 5200.0)]
 
 
 @respx.mock

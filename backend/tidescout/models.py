@@ -7,6 +7,18 @@ class RiverGauge(BaseModel):
     name: str
     usgs_site: str
     weight: float = 1.0
+    # Where this river enters the model domain, lon/lat WGS84. Used to seed
+    # anuga.Inlet_operator's injection region. None => inflow is not attached
+    # for this river (see pipeline/regimes.py::_attach_river_inflows).
+    inflow_lonlat: tuple[float, float] | None = None
+    # Fraction of the composite discharge that enters the domain at THIS
+    # river's inlet. Distinct from `weight`, which says how this gauge
+    # contributes to the composite TOTAL (1.0 = include it in the sum). The
+    # two were conflated until 2026-08-16, which split the composite into
+    # equal thirds across three rivers whose measured split is 78/13/8.
+    # None on every river reproduces the old equal-share behaviour, so a
+    # fishery that has not authored shares still runs.
+    inflow_share: float | None = None
 
 
 class WaterSensor(BaseModel):
@@ -19,6 +31,9 @@ class Stations(BaseModel):
     tide: list[str] = []
     currents: list[str] = []
     water: list[WaterSensor] = []
+    # Added to CO-OPS predictions to convert MLLW -> NAVD88, the bathymetry
+    # datum. Resolved from the station's own datums endpoint, not assumed.
+    tide_datum_offset_m: float = 0.0
 
 
 class DischargeBuckets(BaseModel):
@@ -36,11 +51,23 @@ class BathymetryConfig(BaseModel):
     cell_m: float = 10.0
     land_elev_m: float = 1.5
     contour_depths_m: list[float] = [-2.0, -5.0, -10.0, -15.0]
+    static_wet_level_m: float = 0.0
+    # Deliberately NOT FeatureThresholds.shallow_max_m/deep_min_m. Those two
+    # drive bar detection; sharing them means retuning bars silently re-buckets
+    # the Manning field and changes every simulation. Defaults match the
+    # previous shared values so this split is a no-op at introduction.
+    zone_shallow_max_m: float = -0.3
+    zone_deep_min_m: float = -3.0
 
 
 class FeatureThresholds(BaseModel):
     dropoff_slope_deg: float = 8.0
     wall_slope_deg: float = 20.0
+    # Walls are typed on an upper percentile, not the mean: the polygon's own
+    # boundary is cut at dropoff_slope_deg, so its mean slope is structurally
+    # incapable of reaching wall_slope_deg. p90 is robust to the one-cell
+    # artefacts that nanmax would latch onto.
+    wall_slope_estimator: Literal["p90", "max", "mean"] = "p90"
     hole_delta_m: float = 1.5
     hole_min_area_m2: float = 2000.0
     flat_max_slope_deg: float = 1.0
@@ -49,6 +76,28 @@ class FeatureThresholds(BaseModel):
     deep_min_m: float = -3.0
     bar_min_area_m2: float = 1500.0
     mouth_search_radius_m: float = 60.0
+    # Upper bounds. A feature larger than this is a basin, not an ambush point;
+    # see the 47 km2 bar the real Winyah raster produced.
+    bar_max_area_m2: float = 500_000.0     # 0.5 km2
+    flat_max_area_m2: float = 2_000_000.0  # 2 km2 -- flats are legitimately broad
+    hole_max_area_m2: float = 200_000.0    # 0.2 km2
+
+
+class StructureThresholds(BaseModel):
+    """Derived-structure knobs. Tunable per fishery during validation."""
+
+    # Radius a fish will move to intercept bait. Matches the radius the
+    # known-spots validation gate already uses, so a spot that reads as an
+    # ambush point in the gate reads as one here too.
+    ambush_radius_m: float = 150.0
+    # Dead band on |Okubo-Weiss| below which water is "quiet" rather than
+    # seam or eddy. Not tuned to make anything pass -- it exists because
+    # uniform flow sits at W = 0 and floating-point noise would otherwise
+    # sign every cell of a featureless channel at random.
+    quiet_w: float = 1e-5
+    # Minimum convergence (negative divergence) counted as a bait-pinning
+    # front, in s^-1. 1e-4 is ~0.002 m/s of closing speed across a 20 m cell.
+    convergence_min: float = 1e-4
 
 
 class JettySeed(BaseModel):
@@ -62,6 +111,73 @@ class KnownSpot(BaseModel):
     lat: float
     kind_hint: str = ""
     notes: str = ""
+    # Machine-readable version of the tide phase the prose notes describe, so
+    # the Task 13 validation gate can ASSERT rather than merely display. The
+    # notes stay authoritative -- they carry detail this enum cannot, and the
+    # gate quotes them when it reports.
+    #
+    # "" means unspecified, and the gate reports such a spot without passing or
+    # failing it: silently treating an unfilled hint as "no expectation met" is
+    # how a go/no-go gate turns into a rubber stamp.
+    works_on: Literal["ebb", "flood", "slack", ""] = ""
+
+
+class ModelDomain(BaseModel):
+    """Outer boundary of the hydrodynamic model, authored not inferred.
+
+    Ocean and estuary are hydraulically connected through several inlets, so
+    no automatic rule separates them -- see the Plan 3 spike findings. Vertices
+    are (x_km, y_km) in the fishery's bathymetry EPSG, listed clockwise.
+    """
+
+    polygon_utm_km: list[tuple[float, float]]
+    wet_level_m: float = 1.5  # cut the shoreline at highest simulated water
+    simplify_m: float = 25.0  # shoreline generalisation before meshing
+    clean_cells: int = 3  # morphological close/open radius, in cells
+    ocean_max_z_m: float = -2.0  # boundary segments below this bed level take the tide
+    # Which boundary segments may carry the OCEAN tide. Authored, not inferred:
+    # bed depth alone cannot tell a seaward opening from a deep river channel
+    # 40 km inland, and inferring it drove the ocean tide into the Pee Dee head
+    # and destroyed two library builds. Same lesson as polygon_utm_km itself.
+    # (x_km, y_km) in the bathymetry EPSG, clockwise. Empty = no restriction.
+    ocean_boundary_utm_km: list[tuple[float, float]] = []
+    # islands at least this large become mesh holes (interior_holes) instead of
+    # being meshed as land; smaller ones are filled as sub-mesh-scale noise.
+    # Lowered 0.05 -> 0.002 2026-08-14: measured against Winyah's real 149
+    # enclosed land islands (total area 0.75 km2), 0.05 kept only 6 of them as
+    # holes (fills the other 143 -- meshed as water); 0.002 keeps 79. The
+    # remaining fill is cheap (total island area is small) and this is a
+    # fidelity INCREASE, not a mesh-cost tradeoff -- do not raise it back up.
+    min_island_hole_km2: float = 0.002
+
+
+class AnugaConfig(BaseModel):
+    base_edge_m: float = 60.0
+    jetty_edge_m: float = 15.0
+    jetty_radius_m: float = 300.0
+    manning_channel: float = 0.022
+    manning_flat: float = 0.030
+    manning_marsh: float = 0.045
+    spin_up_h: float = 6.0
+    cycle_h: float = 12.42
+    snapshot_minutes: float = 30.0
+    mass_tolerance: float = 1e-3  # measured residual is ~4e-4; 1e-6 fails healthy runs
+    max_workers: int = 6  # performance cores only -- see Task 11
+    mean_range_m: float = 1.5  # amplitude base for range-regime boundary forcing
+    # Cell size of the stored flow-state library. Deliberately coarser than
+    # bathymetry.cell_m (10 m): the naive full-grid float32 layout is ~52 GB
+    # for nine regimes x 25 phases x 3 arrays, and 20 m masked to the domain
+    # brings that to ~1.8 GB. Still inside the spec's "~10-20 m", and finer
+    # than a 60 m base mesh can actually resolve, so nothing real is lost.
+    # Matches anuga.jetty_edge_m = 20.0 by intent -- mesh structure finer than
+    # the library grid cannot survive into the output.
+    library_cell_m: float = 20.0
+    # ANUGA writes a full .sww per regime (~170 MB each, 1.5 GB per build)
+    # alongside our snap_*.npz. The pipeline consumes only the npz files, so
+    # this is pure surplus -- but it is the only full-resolution record of the
+    # run, and the frontend will likely want it for flow visualisation that a
+    # 20 m masked grid cannot reconstruct. Kept ON, made switchable.
+    store_sww: bool = True
 
 
 class Fishery(BaseModel):
@@ -77,4 +193,7 @@ class Fishery(BaseModel):
     climatology: Climatology
     bathymetry: BathymetryConfig = BathymetryConfig()
     features: FeatureThresholds = FeatureThresholds()
+    structure: StructureThresholds = StructureThresholds()
     jetties: list[JettySeed] = []
+    model_domain: ModelDomain | None = None
+    anuga: AnugaConfig = AnugaConfig()

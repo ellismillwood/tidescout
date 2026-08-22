@@ -1,3 +1,4 @@
+import hashlib
 from dataclasses import dataclass, field
 
 import numpy as np
@@ -10,7 +11,10 @@ from skimage.morphology import disk, opening, skeletonize
 
 from tidescout.models import FeatureThresholds, Fishery
 
-WET_LEVEL_M = 0.0  # approximate mean-water wetness for static detection
+# Default only. Static detectors ask "is this cell wet at a representative
+# water level"; ANUGA has a time-varying free surface, so the two notions of
+# "wet" are about to diverge. Callers pass their own.
+WET_LEVEL_M = 0.0
 
 
 @dataclass
@@ -18,6 +22,32 @@ class Feature:
     type: str
     geometry: object
     attrs: dict = field(default_factory=dict)
+
+
+def feature_key(feature: Feature, quantise_m: float = 1.0) -> str:
+    """Stable identifier: type plus quantised centroid, hashed.
+
+    Feature ids were a per-type running counter, so `bar-78` became a different
+    bar whenever detection reran and the ordering shifted. Nothing persisted a
+    feature reference, so nothing broke -- but Phase 3 scoring and the frontend's
+    user pins both key off these, and a renumbering would silently reassign
+    every one of them.
+
+    The centroid is quantised to `quantise_m` (1 m, a tenth of the 10 m analysis
+    cell) before hashing. Detector output moves by centimetres between runs from
+    floating-point ordering alone; without quantisation that jitter would mint a
+    new id every rebuild, which is the exact bug this replaces. One metre is
+    coarse enough to absorb the jitter and far finer than the spacing between
+    two genuinely distinct features.
+
+    UTM metres in, so the quantisation is isotropic and in real units -- never
+    call this with lon/lat, where 1.0 would be ~100 km.
+    """
+    c = feature.geometry.centroid
+    qx = round(c.x / quantise_m)
+    qy = round(c.y / quantise_m)
+    digest = hashlib.sha256(f"{feature.type}|{qx}|{qy}".encode()).hexdigest()[:12]
+    return f"{feature.type}-{digest}"
 
 
 def orientation_deg(geometry) -> float:
@@ -47,29 +77,58 @@ def orientation_deg(geometry) -> float:
     return float(bearing)
 
 
-def _mask_polygons(mask: np.ndarray, transform: Affine, min_area_m2: float, cell_m: float):
+def _mask_polygons(
+    mask: np.ndarray,
+    transform: Affine,
+    min_area_m2: float,
+    cell_m: float,
+    max_area_m2: float | None = None,
+):
+    """Polygonise a boolean mask, dropping components outside the size band.
+
+    The upper bound is not cosmetic: without it a single connected component
+    can span the whole estuary (a 47 km2 'bar' covering 21 x 35 km was what
+    the real Winyah raster produced), and every point-in-polygon join against
+    it returns distance 0, which destroys 'nearest feature to this cell'.
+    """
     polys = []
     cell_area = cell_m * cell_m
     for geom, val in rio_features.shapes(mask.astype("uint8"), transform=transform):
         if val != 1:
             continue
         g = shape(geom)
-        if g.area >= min_area_m2 and g.area >= cell_area:
-            polys.append(g)
+        if g.area < min_area_m2 or g.area < cell_area:
+            continue
+        if max_area_m2 is not None and g.area > max_area_m2:
+            continue
+        polys.append(g)
     return polys
 
 
 def detect_dropoffs(
-    z: np.ndarray, slope: np.ndarray, t: FeatureThresholds, transform: Affine
+    z: np.ndarray,
+    slope: np.ndarray,
+    t: FeatureThresholds,
+    transform: Affine,
+    wet_level_m: float = WET_LEVEL_M,
 ) -> list[Feature]:
-    wet = ~np.isnan(z) & (z < WET_LEVEL_M)
+    wet = ~np.isnan(z) & (z < wet_level_m)
     mask = wet & (slope >= t.dropoff_slope_deg)
     cell = abs(transform.a)
     out = []
     for g in _mask_polygons(mask, transform, t.hole_min_area_m2 / 4.0, cell):
         sel = rio_features.geometry_mask([g], z.shape, transform, invert=True)
-        mean_slope = float(np.nanmean(slope[sel])) if sel.any() else 0.0
-        ftype = "wall" if mean_slope >= t.wall_slope_deg else "dropoff"
+        vals = slope[sel]
+        vals = vals[np.isfinite(vals)]
+        if vals.size == 0:
+            continue
+        mean_slope = float(np.mean(vals))
+        p90_slope = float(np.percentile(vals, 90))
+        max_slope = float(np.max(vals))
+        stat = {"p90": p90_slope, "max": max_slope, "mean": mean_slope}[
+            t.wall_slope_estimator
+        ]
+        ftype = "wall" if stat >= t.wall_slope_deg else "dropoff"
         out.append(
             Feature(
                 ftype,
@@ -77,6 +136,8 @@ def detect_dropoffs(
                 {
                     "area_m2": float(g.area),
                     "mean_slope_deg": mean_slope,
+                    "p90_slope_deg": p90_slope,
+                    "max_slope_deg": max_slope,
                     "min_z": float(np.nanmin(z[sel])),
                     "max_z": float(np.nanmax(z[sel])),
                     "orientation_deg": orientation_deg(g),
@@ -87,14 +148,20 @@ def detect_dropoffs(
 
 
 def detect_holes(
-    z: np.ndarray, t: FeatureThresholds, cell_m: float, transform: Affine
+    z: np.ndarray,
+    t: FeatureThresholds,
+    cell_m: float,
+    transform: Affine,
+    wet_level_m: float = WET_LEVEL_M,
 ) -> list[Feature]:
     filled = np.nan_to_num(z, nan=1000.0)
     closed = ndimage.grey_closing(filled, size=15)
     pocket = (closed - filled) > t.hole_delta_m
-    pocket &= ~np.isnan(z) & (z < WET_LEVEL_M)
+    pocket &= ~np.isnan(z) & (z < wet_level_m)
     out = []
-    for g in _mask_polygons(pocket, transform, t.hole_min_area_m2, cell_m):
+    for g in _mask_polygons(
+        pocket, transform, t.hole_min_area_m2, cell_m, max_area_m2=t.hole_max_area_m2
+    ):
         sel = rio_features.geometry_mask([g], z.shape, transform, invert=True)
         rim = float(np.nanmax((closed - filled)[sel]))
         out.append(
@@ -119,14 +186,20 @@ def detect_flats(
     cell = abs(transform.a)
     return [
         Feature("flat", g, {"area_m2": float(g.area)})
-        for g in _mask_polygons(mask, transform, 4.0 * t.hole_min_area_m2, cell)
+        for g in _mask_polygons(
+            mask, transform, 4.0 * t.hole_min_area_m2, cell, max_area_m2=t.flat_max_area_m2
+        )
     ]
 
 
 def detect_creek_mouths(
-    z: np.ndarray, t: FeatureThresholds, cell_m: float, transform: Affine
+    z: np.ndarray,
+    t: FeatureThresholds,
+    cell_m: float,
+    transform: Affine,
+    wet_level_m: float = WET_LEVEL_M,
 ) -> list[Feature]:
-    wet = ~np.isnan(z) & (z < WET_LEVEL_M)
+    wet = ~np.isnan(z) & (z < wet_level_m)
     if not wet.any():
         return []
     open_radius = max(1, round(60.0 / cell_m))
@@ -236,7 +309,7 @@ def detect_bars(
         # orthogonal raster-to-vector conversion -- re-checking the same
         # threshold here would be redundant. _mask_polygons' own cell_area
         # sanity floor still applies.
-        polys = _mask_polygons(region, transform, 0.0, cell_m)
+        polys = _mask_polygons(region, transform, 0.0, cell_m, max_area_m2=t.bar_max_area_m2)
         for g in polys:
             out.append(
                 Feature(

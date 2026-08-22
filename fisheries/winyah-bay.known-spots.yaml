@@ -8,4 +8,55 @@
 #     lat: 33.2190
 #     kind_hint: rip
 #     notes: last of the ebb, trout stack on the seam
-spots: []
+#
+# YAML notes: `spots:` is a block sequence (no square brackets), and multi-line
+# `notes:` use a folded scalar (`>-`) with the text indented under the key.
+spots:
+  - name: Mud Bay Cut
+    lon: -79.221461
+    lat: 33.278208
+    kind_hint: dropoff
+    # "outgoing tide ... flow headed toward the mouth" -> unambiguously ebb.
+    works_on: ebb
+    notes: >-
+      A dropoff carved by current into mud bay that is channeled by islands.
+      Holds bull redfish. Effective on an outgoing tide or when flow is headed
+      toward the mouth of the bay.
+
+  - name: Georgetown Lighthouse
+    lon: -79.186965
+    lat: 33.222133
+    kind_hint: eddy / dropoff
+    # RESOLVED 2026-08-16. Was `flood`; Ellis, asked directly, said he does not
+    # know which half this spot works on -- he chose flood because the spot
+    # "hides from the main channel current in that situation, but it could also
+    # work on an ebb". Hiding from the current is a CONTRAST mechanism, not a
+    # peak-current one, so flood-vs-ebb was the wrong question to put to the
+    # gate. `slack` selects the CLI's contrast branch, which is what the notes
+    # actually describe.
+    # Supporting evidence: the model puts peak current on the ebb here in all
+    # nine regimes (~10% margin), which is the EXPECTED result for a
+    # river-dominated estuary mouth -- North Jetty is flood-dominant because
+    # jetty structure focuses the incoming push, a local effect that does not
+    # generalise to the north bank. The model also shows by far the largest
+    # contrast of any spot here: a 0.000 m/s pocket beside ~1 m/s water, which
+    # IS "the mouth of the bay creates a break in current". And the
+    # southern-approach boundary variant (2026-08-16) perturbs this spot by
+    # only 0.00059 m/s, ruling out the reflective wall as the cause.
+    works_on: slack
+    notes: >-
+      Works best as tide is slack and early incoming tides. The mouth of the bay
+      creates a break in current which carries down the north bank. Works best
+      for bull redfish and sharks in all except the winter months.
+
+  - name: North Jetty
+    lon: -79.166104
+    lat: 33.205355
+    kind_hint: other
+    # "Works best on an incoming tide" -> unambiguously flood.
+    works_on: flood
+    notes: >-
+      Works best on an incoming tide for a variety of species. An incoming tide
+      will push bait against the jetty. Predators tend to sit north of the wall
+      for this tide. Smaller rocks close to shore allow tide to flow over and
+      can be a good place to target trout.
