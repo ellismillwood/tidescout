@@ -164,9 +164,9 @@ def ambush_contrast(
     within a short dart, so a fish can hold out of the flow and feed in it.
 
     NaN marks out-of-domain. `maximum_filter` would propagate it across the
-    whole footprint, so the max is taken over a NaN-to--inf copy and the mask
-    is reapplied afterwards; a cell beside land is credited with no neighbour
-    rather than an infinitely fast one.
+    whole footprint, so the max is taken over a copy with every NaN replaced by
+    -inf, and the mask is reapplied afterwards; a cell beside land is credited
+    with no neighbour rather than an infinitely fast one.
     """
     invalid = ~np.isfinite(speed)
     filled = np.where(invalid, -np.inf, speed)

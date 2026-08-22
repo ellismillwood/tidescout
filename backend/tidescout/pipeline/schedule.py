@@ -48,7 +48,6 @@ the other ~87% of the early-drain cluster, whose `flood_phase` is unremarkable.
 
 import json
 from dataclasses import dataclass
-from pathlib import Path
 
 import numpy as np
 
@@ -121,21 +120,19 @@ def schedule_from_depths(depths: list[np.ndarray], phases: list[float]) -> CellS
 
 
 def cell_schedule(slug: str, regime: str) -> CellSchedule:
+    """Read a regime's whole phase series off disk and build its schedule.
+
+    Computed on demand, not cached to a file. A `write_schedule` helper used to
+    sit here and write `schedule.npz` beside the grid; nothing ever called it,
+    nothing in the Phase 2 or Phase 3 plans referenced it, and nothing would
+    have invalidated that file when the library behind it was rebuilt -- a
+    stale-cache bug waiting on the next rebuild, in exchange for one pass over
+    the regime's already-loaded depth arrays. It is in git if a caller ever
+    appears.
+    """
     grid_meta = json.loads(
         (fishery_data_dir(slug) / "flow" / regime / "grid" / "grid.json").read_text()
     )
     phases = grid_meta["phases"]
     depths = [load_state(slug, regime, i)["depth"] for i in range(len(phases))]
     return schedule_from_depths(depths, phases)
-
-
-def write_schedule(slug: str, regime: str) -> Path:
-    s = cell_schedule(slug, regime)
-    out = fishery_data_dir(slug) / "flow" / regime / "grid" / "schedule.npz"
-    np.savez_compressed(
-        out,
-        wet_fraction=s.wet_fraction,
-        flood_phase=s.flood_phase,
-        drain_phase=s.drain_phase,
-    )
-    return out
