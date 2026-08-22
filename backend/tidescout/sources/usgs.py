@@ -26,6 +26,55 @@ class DischargeSummary:
     sites: list[str]
     contributing: list[str]
     stale: list[str]
+    trend: float | None = None  # cfs_now / cfs_lagged
+    limb: str = "unknown"
+
+
+# Fractional change between today's flow and the 24-48 h lagged mean, below
+# which the river is called steady. Gauge noise and the diurnal cycle move a
+# coastal-plain river a few percent on any quiet day; 15% is comfortably above
+# that and comfortably below any real rain event.
+LIMB_DEAD_BAND = 0.15
+
+
+def classify_limb(summary: DischargeSummary) -> str:
+    """"rising" / "falling" / "steady" / "unknown".
+
+    The salt front lags discharge by days, so the same flow means different
+    things on the way up and on the way down: a rising limb is a freshet
+    arriving and fish moving down-bay ahead of it; a falling limb is the slower
+    recovery as salt creeps back. The level alone cannot distinguish them.
+    """
+    if summary.cfs_now is None or summary.cfs_lagged is None or not summary.cfs_lagged:
+        return "unknown"
+    change = (summary.cfs_now - summary.cfs_lagged) / summary.cfs_lagged
+    if change > LIMB_DEAD_BAND:
+        return "rising"
+    if change < -LIMB_DEAD_BAND:
+        return "falling"
+    return "steady"
+
+
+def branch_discharge_cfs(fishery: Fishery, summary: DischargeSummary) -> dict[str, float]:
+    """Composite discharge split across rivers by their measured share.
+
+    Uses `cfs_lagged` in preference to `cfs_now`: the bay's salinity today
+    reflects the last day or two of river flow, not this instant's reading.
+
+    Splits by `inflow_share`, not gauge `weight` -- see Phase 1 Task 2. This is
+    the runtime twin of the ANUGA forcing correction, and it matters more here:
+    intrusion length is a strong function of the discharge on each branch, so a
+    78/13/8 river system modelled as equal thirds puts the salt front in the
+    wrong place on all three.
+    """
+    basis = summary.cfs_lagged if summary.cfs_lagged is not None else summary.cfs_now
+    if basis is None:
+        return {}
+    shares = [r.inflow_share for r in fishery.rivers]
+    if any(s is None for s in shares):
+        n = len(fishery.rivers) or 1
+        shares = [1.0 / n] * len(fishery.rivers)
+    return {r.name: basis * s for r, s in zip(fishery.rivers, shares, strict=True)}
 
 
 @dataclass
@@ -171,7 +220,12 @@ def discharge_summary(fishery: Fishery, cache: Cache) -> DischargeSummary:
         bucket = "high"
     else:
         bucket = "med"
-    return DischargeSummary(cfs_now, cfs_lagged, bucket, sites, contributing, stale)
+    summary = DischargeSummary(cfs_now, cfs_lagged, bucket, sites, contributing, stale)
+    summary.trend = (
+        cfs_now / cfs_lagged if cfs_now is not None and cfs_lagged not in (None, 0.0) else None
+    )
+    summary.limb = classify_limb(summary)
+    return summary
 
 
 def _daily_means(points: list[tuple[datetime, float]]) -> dict:

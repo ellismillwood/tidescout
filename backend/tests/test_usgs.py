@@ -1,13 +1,21 @@
 from datetime import UTC, date, datetime, timedelta
 
 import httpx as _httpx
+import pytest
 import respx
 from httpx import Response
 
 from tidescout.config import load_fishery
 from tidescout.sources import usgs
 from tidescout.sources.cache import Cache
-from tidescout.sources.usgs import discharge_summary, fetch_series, water_summary
+from tidescout.sources.usgs import (
+    DischargeSummary,
+    branch_discharge_cfs,
+    classify_limb,
+    discharge_summary,
+    fetch_series,
+    water_summary,
+)
 
 
 def _ts(site: str, param: str, values: list[tuple[str, float]]) -> dict:
@@ -220,3 +228,50 @@ def test_water_summary_mixed_live_temp_climatology_salinity(tmp_path):
     assert summary.temp_f == 77.0  # 25.0 C -> F, from the live sensor
     assert summary.temp_trend_f_3d is None  # only 1 day of history
     assert summary.salinity_ppt == fishery.climatology.salinity_ppt_by_month[8]
+
+
+def _summary(now, lagged):
+    return DischargeSummary(now, lagged, "med", [], [], [])
+
+
+def test_limb_is_rising_when_todays_flow_exceeds_the_lagged_mean():
+    assert classify_limb(_summary(12000.0, 4000.0)) == "rising"
+
+
+def test_limb_is_falling_during_recovery():
+    assert classify_limb(_summary(4000.0, 12000.0)) == "falling"
+
+
+def test_limb_is_steady_inside_the_dead_band():
+    """Gauge noise and diurnal variation are not a freshet."""
+    assert classify_limb(_summary(4100.0, 4000.0)) == "steady"
+
+
+def test_limb_is_unknown_when_a_gauge_is_dark():
+    assert classify_limb(_summary(None, 4000.0)) == "unknown"
+    assert classify_limb(_summary(4000.0, None)) == "unknown"
+
+
+def test_branch_discharge_splits_by_inflow_share():
+    """The Pee Dee carries 78% of the freshwater, so it carries 78% of the
+    freshet -- the same correction Phase 1 made to the ANUGA forcing, applied
+    to the runtime path that salinity actually reads."""
+    f = load_fishery("winyah-bay")
+    branches = branch_discharge_cfs(f, _summary(10000.0, 9000.0))
+    assert branches["Pee Dee"] == pytest.approx(9000.0 * 0.783, rel=1e-6)
+    assert branches["Black"] == pytest.approx(9000.0 * 0.083, rel=1e-6)
+    assert sum(branches.values()) == pytest.approx(9000.0, rel=1e-9)
+
+
+def test_branch_discharge_prefers_lagged_flow_because_the_salt_front_lags():
+    """The bay's salinity today reflects the last day or two of river flow,
+    not this instant's gauge reading."""
+    f = load_fishery("winyah-bay")
+    branches = branch_discharge_cfs(f, _summary(20000.0, 5000.0))
+    assert sum(branches.values()) == pytest.approx(5000.0, rel=1e-9)
+
+
+def test_branch_discharge_falls_back_to_now_when_no_lagged_value_exists():
+    f = load_fishery("winyah-bay")
+    branches = branch_discharge_cfs(f, _summary(7000.0, None))
+    assert sum(branches.values()) == pytest.approx(7000.0, rel=1e-9)
