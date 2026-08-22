@@ -117,7 +117,15 @@ def blend_regimes(
     if not order:
         # No regime at this range at all: fall back to the existing nearest-
         # regime logic, which is allowed to cross the range axis as a last resort.
-        name, _ = select_regime(range_bucket, "med", available)
+        # The discharge bucket passed in for costing must be the one nearest
+        # `cfs`, not a fixed "med" -- when two range-adjacent candidates tie on
+        # range distance, hardcoding "med" scores both against the wrong
+        # discharge target and lets the alphabetic tiebreak override the real
+        # discharge distance (e.g. cfs=100 with {"neap_high", "spring_low"}
+        # available would pick neap_high, the high-discharge regime, over the
+        # discharge-correct spring_low).
+        nearest = min(DISCHARGE_ORDER, key=lambda d: abs(cfs - flows[d]))
+        name, _ = select_regime(range_bucket, nearest, available)
         return [(name, 1.0)], True
 
     lo_b, hi_b = order[0], order[-1]
