@@ -400,9 +400,23 @@ id names. Its ambush reads 0.720 under the old anchor and 0.536 under the new on
 anchor moved 56.4 m and its ambush is unchanged at 0.392.
 
 Two features (`flat-2f450ef65593`, 27 cells, and `bar-6c7aacb7308d`, 3 cells) had their centroid fall
-outside the flow domain and now report `n_cells = 0`; both were marginal edge features. Of the 529
-evaluated under both anchors, the best-phase metric changed at all for 368 (`speed`), 101 (`ambush`),
-111 (`strain`), 113 (`okubo_w`) and 93 (`convergence`).
+outside the flow domain and now report `n_cells = 0`; both were marginal edge features.
+
+Of the 529 evaluated under both anchors, comparing each feature's metric **at its own best-ambush
+phase**, the value differs at all — exact inequality, any bit — for **450** (`speed`), **127**
+(`ambush`), **136** (`strain`), **139** (`okubo_w`), **116** (`convergence`) and **50**
+(`eddy_share`).
+
+*(An earlier version of this line gave 368 / 101 / 111 / 113 / 93. Those counts came from the same
+harness with a `|Δ| > 1e-12` absolute floor, which the words "changed at all" do not describe, so the
+exact-inequality figures above are the ones of record. The gap is not noise in the fix — it is
+features whose values are themselves at the 1e-14 scale, i.e. water that is numerically motionless.
+For `speed`, all 82 of the suppressed features have a best-phase speed below 1e-13 m/s. Both
+definitions are stated so a re-measurement can land on either without looking like a contradiction.)*
+
+The 79 features whose `speed` is bit-identical across the two anchors are mostly the ones whose
+anchor could not move: 52 of them are `creek_mouth`, and every creek mouth is a Point, whose centroid
+is itself.
 
 The `oyster_density` top-5 change is a tie-breaking artifact, not a ranking change: at 2 dp the
 fourth and fifth places were tied at 0.09 and were ordered by file position. At full precision
@@ -411,7 +425,15 @@ fourth and fifth places were tied at 0.09 and were ordered by file position. At 
 
 **A third fix, `flood_phase`, has no figure above to move.** `sample_features` reduced it with an
 ordinary median of a circular quantity; it is now a circular mean. Of the 301 features carrying a
-finite `flood_phase`, 261 move at all, 19 by more than 0.05 of a cycle and 3 by more than 0.1. The
-largest is `flat-b6a1aec2d79d`, whose median read 0.0 — "floods exactly at low water" — for a cluster
-whose circular centre is 0.884, late on the ebb half.
+finite `flood_phase`, 261 move at all, 19 by more than 0.05 of a cycle and 3 by more than 0.1. Those
+three, largest first: `hole-b7ff6b2a8891` 0.443 → 0.706 (Δ 0.264), `hole-ce5d7d265ad7` 0.523 → 0.694
+(Δ 0.171), `flat-b6a1aec2d79d` 0.0 → 0.884 (Δ 0.116).
+
+The biggest is the least informative — `hole-b7ff6b2a8891`'s 55 flood phases are spread right around
+the cycle (resultant length 0.05), so neither the old statistic nor the new one means much for it,
+and `engine/activation.py`'s `_circular_mean_phase` documents that degenerate case. The clearest is
+the smallest: `flat-b6a1aec2d79d`'s median read 0.0 — "floods exactly at low water", the first
+instant of the flood half — for a cluster whose circular centre is 0.884, late on the ebb. That is
+the cut-point artifact itself rather than a shift in degree. (An earlier version of this paragraph
+called `flat-b6a1aec2d79d` the largest correction; it is the smallest of the three.)
 

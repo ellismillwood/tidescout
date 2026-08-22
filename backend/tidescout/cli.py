@@ -597,7 +597,7 @@ def flow_structure(
     )[:top]
 
     def num(value: float, spec_: str) -> str:
-        """NaN prints as an em dash, not as `nan`/`+nan`. Every one of these
+        """NaN prints as a bare `-`, not as `nan`/`+nan`. Every one of these
         columns can legitimately be NaN -- a disc that is entirely dry at its
         best phase has no speed, no strain and no tensor at all -- and only
         `wet frac` used to say so."""

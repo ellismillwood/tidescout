@@ -34,10 +34,14 @@ class FeatureMetrics:
     an eddy, that makes it a SEAM detector and nothing else: a max returns the
     most seam-like cell present, so it structurally cannot report an eddy
     unless the entire disc rotates. Measured over the shipped winyah-bay
-    `mean_med` library, all 26 phases: of 13,588 finite per-feature `okubo_w`
-    samples exactly 2 were negative, at -8.2e-7 and -4.5e-9 -- both more than
-    ten times inside the `quiet_w = 1e-5` dead band, i.e. not eddies at all.
-    Zero samples ever crossed -quiet_w.
+    `mean_med` library, all 26 phases, on the shipped sampling anchors: of
+    13,614 finite per-feature `okubo_w` samples, 54 are negative -- but 52 of
+    those are floating-point residue at or below 1e-20, and the only two of any
+    size at all are -8.2e-7 and -4.5e-9, both more than ten times inside the
+    `quiet_w = 1e-5` dead band. NOT ONE SAMPLE IN THE CYCLE CROSSES -quiet_w.
+    (At the pre-anchor-fix anchors the same measurement read 13,588 finite and
+    2 negative; the shipped numbers make the conclusion stronger, not weaker --
+    the extra negatives are 1e-34-scale noise, and the floor is still zero.)
 
     `eddy_share` is the eddy channel that leaves `okubo_w` alone: the fraction
     of the feature's WET disc cells that `structure.classify_structure` labels
@@ -229,10 +233,18 @@ def _circular_mean_phase(phases: np.ndarray) -> float:
     Measured on the shipped winyah-bay `mean_med` library, against the ordinary
     median it replaces: of the 301 features whose disc carries any finite
     `flood_phase`, 261 move at all, 159 by more than 0.01 of a cycle, 19 by
-    more than 0.05, and 3 by more than 0.1. The largest single correction is
-    `flat-b6a1aec2d79d`, where the median read 0.0 -- "floods exactly at low
-    water" -- for a cluster whose circular centre is 0.884, late on the ebb
-    half. On a 12.42 h cycle 0.1 of a phase is about 75 minutes.
+    more than 0.05, and 3 by more than 0.1. Those three, largest first:
+    `hole-b7ff6b2a8891` 0.443 -> 0.706 (0.264), `hole-ce5d7d265ad7`
+    0.523 -> 0.694 (0.171), `flat-b6a1aec2d79d` 0.0 -> 0.884 (0.116).
+
+    The biggest of the three is the least informative: `hole-b7ff6b2a8891` is
+    the degenerate resultant case described below, where neither the old
+    statistic nor the new one means much. The clearest is the smallest.
+    `flat-b6a1aec2d79d`'s median reads 0.0 -- "floods exactly at low water",
+    the first instant of the flood half -- for a cluster whose circular centre
+    is 0.884, late on the ebb. That one is the cut-point artifact itself rather
+    than a shift in degree. On a 12.42 h cycle 0.1 of a phase is about 75
+    minutes.
 
     Degenerate case, documented rather than guarded: a disc whose flood phases
     are spread right around the cycle has a resultant near zero and no
@@ -241,7 +253,14 @@ def _circular_mean_phase(phases: np.ndarray) -> float:
     resultant length below 0.2 (it is 0.05, on 55 cells), against a median
     disc resultant of 0.89 -- and adding a cutoff would mean inventing a
     threshold at the merge gate to turn a weakly-determined answer into NaN.
-    Exactly antipodal phases resolve to 0.0.
+
+    An exactly zero resultant is worse than a weak one, and does NOT resolve to
+    0.0: atan2 is then reading pure floating-point residue, so `[0.0, 0.5]`
+    returns 0.25, `[0.25, 0.75]` returns 0.5 and `[0.1, 0.6]` returns 0.25 --
+    artifacts of which residue happened to survive, not answers. Nothing in the
+    shipped library is close to that (the weakest resultant in it is 0.05), and
+    the general point stands: the angle carries exactly as much information as
+    the resultant behind it, which this function does not return.
     """
     ang = 2.0 * np.pi * np.asarray(phases, dtype="float64")
     sin_bar = float(np.nanmean(np.sin(ang)))

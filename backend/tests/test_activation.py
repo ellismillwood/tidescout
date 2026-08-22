@@ -245,9 +245,10 @@ def test_eddy_share_reports_the_rotation_that_max_reduced_okubo_w_hides():
     """W > 0 is a seam and W < 0 is an eddy, so a MAX over the disc returns the
     most seam-like cell in it and structurally cannot report an eddy. That is
     not a hypothetical: over the shipped winyah-bay `mean_med` library, all 26
-    phases, exactly 2 of 13,588 finite per-feature `okubo_w` samples were
-    negative (-8.2e-7 and -4.5e-9), both more than ten times inside the
-    `quiet_w = 1e-5` dead band -- none ever crossed -quiet_w. The feature-level
+    phases, 54 of 13,614 finite per-feature `okubo_w` samples are negative --
+    52 of them floating-point residue at or below 1e-20, and the only two of
+    any size (-8.2e-7 and -4.5e-9) more than ten times inside the
+    `quiet_w = 1e-5` dead band. Not one crosses -quiet_w. The feature-level
     eddy channel was dead by construction.
 
     `eddy_share` is that channel. Here the disc is two-thirds rotation, and
