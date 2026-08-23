@@ -70,6 +70,29 @@ stations:
     - kind: usgs
       station: "02136371"
       params: ["00010"]
+    # NDBC WYSS1 "Winyah Bay Surface" (33.309, -79.289) -- North Inlet-Winyah
+    # Bay Reserve, operated by the National Estuarine Research Reserve System
+    # (NERRS). Added Phase 2 Task 8, supplying the salinity constraint Task 5
+    # could not find: MEASURED live 2026-08-23 against the real 587,325-cell
+    # distance field (pipeline.salinity_fit.site_distances_km), independently
+    # re-derived rather than taken on trust:
+    #   projects to UTM 26917 (659284.5, 3686849.9) -- INSIDE the model domain
+    #   nearest in-domain library cell: 9.5 m away (snap_gap_m)
+    #   along-estuary distance: 15.02 km -- a distance the reach had none of
+    #     before (North Jetty 2.58, Georgetown Lighthouse 5.52, Mud Bay Cut
+    #     9.47, both USGS 00480 sites 31.57 -- see Task 5's report).
+    # Reports at 15-minute cadence to hundredths of a psu (vs USGS 00480's
+    # whole-ppt daily means), fetched and accumulated by sources/ndbc.py --
+    # NDBC's realtime2 feed is a rolling window (measured 2026-08-23: 45.6
+    # days / 4,235 rows live, not the ~13 days originally assumed), so the
+    # store persists every fetch rather than re-reading only what NDBC
+    # currently serves. `params` are this product's own `.ocean` column
+    # headers, not USGS/CO-OPS codes; nothing reads them yet -- Task 8 stores
+    # and exposes this station's history but wires it into no calibration or
+    # scoring path (that is Task 5's / Phase 3's, not this one's, to do).
+    - kind: ndbc
+      station: "WYSS1"
+      params: ["DEPTH", "OTMP", "COND", "SAL", "O2%", "O2PPM", "CLCON", "TURB", "PH", "EH"]
 rivers:
   # WARNING (root cause of the 2026-08-14 library build failure -- 6 of 9
   # regimes died with "Too small timestep"): inflow_lonlat must sit well

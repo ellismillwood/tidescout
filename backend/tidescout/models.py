@@ -22,7 +22,12 @@ class RiverGauge(BaseModel):
 
 
 class WaterSensor(BaseModel):
-    kind: Literal["usgs", "coops"]
+    # "ndbc" added Phase 2 Task 8 for buoy water-quality stations (e.g. WYSS1)
+    # -- see sources/ndbc.py. Its `params` are the station's own `.ocean`
+    # column headers (DEPTH, OTMP, COND, SAL, ...), not USGS/CO-OPS codes;
+    # nothing currently reads this list for "ndbc" sensors -- Task 8 stores
+    # and exposes an accumulating history but wires it into no scoring path.
+    kind: Literal["usgs", "coops", "ndbc"]
     station: str
     params: list[str] = []
 
