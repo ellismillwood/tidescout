@@ -1,6 +1,7 @@
 import json
 import math
 import time
+from pathlib import Path
 
 import typer
 from rich.console import Console
@@ -510,6 +511,136 @@ def salinity_calibrate(
         f"fisheries/{slug}.yaml — that edit is a human decision, with this output "
         "recorded as its provenance.[/dim]"
     )
+
+
+@salinity_app.command("import-cdmo")
+def salinity_import_cdmo(
+    slug: str,
+    path: str = typer.Option(
+        None,
+        "--path",
+        help="CDMO export: a .csv file, a directory of .csv files, or a .zip archive. "
+        "Defaults to data/<slug>/cdmo/",
+    ),
+    max_snap_m: float = typer.Option(
+        500.0,
+        "--max-snap-m",
+        help="a station further than this from any in-domain cell reads as OUT OF DOMAIN",
+    ),
+) -> None:
+    """Import a downloaded CDMO historical water-quality export, and report
+    each station's position: how far it snaps from the model domain, and
+    its along-estuary distance.
+
+    Writes into the SAME accumulating store Task 8's NDBC fetch uses
+    (`data/<slug>/ndbc.sqlite`), deduplicated by (station, timestamp) --
+    see `sources/cdmo.py`'s module docstring for why niwwswq lands under
+    the "WYSS1" key NDBC already uses, and for the QAQC flags a value must
+    carry to be admitted at all.
+    """
+    from tidescout.config import load_fishery
+    from tidescout.paths import fishery_data_dir
+    from tidescout.pipeline.salinity_fit import site_distances_km
+    from tidescout.sources import cdmo
+    from tidescout.sources.ndbc import default_store
+
+    fishery = load_fishery(slug)
+    target = Path(path) if path else fishery_data_dir(slug) / "cdmo"
+    try:
+        reports = cdmo.import_path(target, default_store(slug))
+    except (FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        console.print(
+            f"\n[dim]Place the CDMO export (a .csv file, a directory of .csv files, or "
+            f"the .zip itself) at {target}, or point at it directly:\n"
+            f"  tidescout salinity import-cdmo {slug} --path /path/to/export[/dim]"
+        )
+        raise typer.Exit(1) from exc
+
+    # Aggregate every station this run touched, across however many files
+    # the path expanded to (a directory or zip can hold several years).
+    agg: dict[str, dict] = {}
+    unknown_columns: set[str] = set()
+    for r in reports:
+        unknown_columns.update(r.unknown_columns)
+        for si in r.stations:
+            a = agg.setdefault(
+                si.canonical,
+                {"raw_codes": set(), "n_parsed": 0, "n_new": 0, "rejected": {}, "n_bad_ts": 0},
+            )
+            a["raw_codes"].add(si.raw_code)
+            a["n_parsed"] += si.n_parsed
+            a["n_new"] += si.n_new
+            a["n_bad_ts"] += si.n_bad_timestamp
+            for col, n in si.n_rejected_by_flag.items():
+                a["rejected"][col] = a["rejected"].get(col, 0) + n
+
+    console.print(f"{len(reports)} file(s) read from {target}")
+    if unknown_columns:
+        console.print(
+            f"[yellow]unrecognised column(s), reported rather than guessed at:[/yellow] "
+            f"{sorted(unknown_columns)}"
+        )
+
+    coords = {
+        s: cdmo.NIW_STATION_COORDS_LONLAT[s] for s in agg if s in cdmo.NIW_STATION_COORDS_LONLAT
+    }
+    missing_coords = sorted(set(agg) - set(coords))
+    distances = site_distances_km(slug, fishery, coords) if coords else {}
+
+    table = Table(title=f"{fishery.name} — CDMO import, per-station position")
+    for col in (
+        "station",
+        "raw code(s)",
+        "parsed",
+        "new",
+        "along-estuary km",
+        "snap gap m",
+        "in domain?",
+        "flag-rejected",
+    ):
+        table.add_column(col)
+    n_in_domain = 0
+    distinct_km: set[float] = set()
+    for station in sorted(agg):
+        a = agg[station]
+        rejected_str = ", ".join(f"{k}:{v}" for k, v in sorted(a["rejected"].items())) or "-"
+        if station in distances:
+            dist_km, gap_m = distances[station]
+            in_domain = gap_m <= max_snap_m
+            if in_domain and math.isfinite(dist_km):
+                n_in_domain += 1
+                distinct_km.add(round(dist_km, 6))
+            dist_str = f"{dist_km:.2f}"
+            gap_str = f"{gap_m:,.0f}"
+            domain_str = "[green]yes[/green]" if in_domain else "[red]no[/red]"
+        else:
+            dist_str = gap_str = "-"
+            domain_str = "[dim]no known position[/dim]"
+        table.add_row(
+            station,
+            ", ".join(sorted(a["raw_codes"])),
+            str(a["n_parsed"]),
+            str(a["n_new"]),
+            dist_str,
+            gap_str,
+            domain_str,
+            rejected_str,
+        )
+    console.print(table)
+
+    if missing_coords:
+        console.print(
+            f"\n[yellow]no known position for:[/yellow] {missing_coords} — imported and "
+            "stored, but not geolocated (only the six NIW stations in "
+            "sources.cdmo.NIW_STATION_COORDS_LONLAT have a documented position)."
+        )
+    console.print(
+        f"\n{n_in_domain} in-domain station(s), {len(distinct_km)} distinct along-estuary "
+        "distance(s) among them — the number pipeline.salinity_fit.fit_intrusion's "
+        "n_distinct_distances warning (< 3) is checking against."
+    )
+
 
 @flow_app.command("mesh")
 def flow_mesh(slug: str) -> None:

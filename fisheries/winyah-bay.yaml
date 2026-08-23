@@ -27,9 +27,13 @@ stations:
   # the ocean end-member the intrusion profile decays away from, not an
   # in-bay observation.
   # NOT AVAILABLE, probed 2026-08-16 -- do not re-litigate without new access:
-  #   - NERR North Inlet-Winyah Bay (Oyster Landing et al): the CDMO web
-  #     service returns "Invalid ip" for every method; it requires IP
-  #     registration via a form a human must submit.
+  #   - NERR North Inlet-Winyah Bay (Oyster Landing et al) live polling: the
+  #     CDMO SOAP web service returns "Invalid ip" for every method; it
+  #     requires IP registration via a form a human must submit. This does
+  #     NOT apply to CDMO's separate query interface / "zip downloads"
+  #     feature, which a human uses through a browser -- see Phase 2 Task 9
+  #     (sources/cdmo.py) for the historical importer that reads what that
+  #     feature exports.
   #   - Mid-bay USGS salinity: none exists. The only in-bbox 00480 sites are
   #     the two Waccamaw stations above, both ~30 km up-river reading 0-1 ppth.
   # STATION DOES NOT ACTUALLY SERVE SALINITY, live-probed 2026-08-22:
@@ -93,6 +97,34 @@ stations:
     - kind: ndbc
       station: "WYSS1"
       params: ["DEPTH", "OTMP", "COND", "SAL", "O2%", "O2PPM", "CLCON", "TURB", "PH", "EH"]
+    # Phase 2 Task 9 (sources/cdmo.py): NIW runs SIX water-quality stations,
+    # not the four Task 9's dispatch assumed -- Clambank Landing (CB),
+    # Debidue Creek (DC), Oyster Landing (OL), Thousand Acre (TA), and the
+    # WS/WB pair above, per the reserve's own metadata PDF. No entries are
+    # added here for the other five: unlike WYSS1, they have no NDBC mirror
+    # to poll, so there is no `kind: ndbc`/`kind: cdmo` fetch loop to
+    # declare -- CDMO import is a manual, one-shot historical backfill via
+    # `tidescout salinity import-cdmo`, run against a file the user
+    # downloads by hand, not a scheduled source. MEASURED anyway, 2026-08-23,
+    # against the real distance field, independently of whether any
+    # observation data has been imported yet (sources.cdmo.
+    # NIW_STATION_COORDS_LONLAT, all six positions sourced from the
+    # metadata PDF, run through the same site_distances_km WYSS1's own
+    # entry above used):
+    #   NIWCBWQ (Clambank Landing)   5.28 km, snap  4.2 m -- in domain
+    #   NIWOLWQ (Oyster Landing)     6.16 km, snap  5.6 m -- in domain
+    #   NIWDCWQ (Debidue Creek)      6.58 km, snap  8.0 m -- in domain
+    #   NIWTAWQ (Thousand Acre)     11.67 km, snap 12.1 m -- in domain
+    #   NIWWBWQ (Winyah Bay bottom) 15.03 km, snap  3.2 m -- in domain,
+    #     essentially the same distance as WYSS1/WS above (same piling,
+    #     surface vs. bottom -- differ in depth, not along-estuary position)
+    # All six sit inside the model domain, unlike both USGS 00480 sites --
+    # FIVE distinct along-estuary distances (WS and WB collapse to one),
+    # spanning 5.28-15.03 km, well past the fit's n_distinct_distances<3
+    # warning threshold, IF the historical observation data these positions
+    # belong to is actually imported. Geolocation alone does not supply
+    # observations -- see task-9-report.md for what CDMO's export format
+    # was established from and where to run the import.
 rivers:
   # WARNING (root cause of the 2026-08-14 library build failure -- 6 of 9
   # regimes died with "Too small timestep"): inflow_lonlat must sit well
