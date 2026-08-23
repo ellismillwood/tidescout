@@ -329,8 +329,18 @@ def build_library(
     max_workers: int | None = None,
     sim_hours: float | None = None,
     on_result: Callable[[str, dict], None] | None = None,
+    regimes: list[tuple[str, str]] | None = None,
 ) -> dict[str, dict]:
     """Run every regime, as independent processes.
+
+    `regimes` defaults to the full `REGIME_MATRIX`. Pass a subset (e.g. to
+    re-run only regimes that failed on a prior pass) and only those are
+    built -- but note `_write_manifest` still writes `{"regimes": results}`
+    with `results` scoped to *this call*, so a subset build's manifest
+    writes will not, on their own, contain entries for regimes built by a
+    previous call. A caller re-running a subset against an existing
+    `library.json` it wants to preserve must merge manifests itself, e.g.
+    via `on_result`, which fires after every write this function makes.
 
     Deliberately NOT MPI. The runs share nothing, so a process pool gets the
     same wall time as domain decomposition with none of the toolchain -- see
@@ -360,12 +370,13 @@ def build_library(
 
     fishery = load_fishery(slug)
     workers = max_workers or fishery.anuga.max_workers
+    matrix = list(regimes) if regimes is not None else REGIME_MATRIX
     results: dict[str, dict] = {}
 
     if workers == 1:
         # Serial, in-process: how you debug one misbehaving regime, and the
         # only path a test can monkeypatch (pool children see no patches).
-        for r, d in REGIME_MATRIX:
+        for r, d in matrix:
             name = regime_name(r, d)
             try:
                 out_dir = run_regime(slug, r, d, sim_hours)
@@ -382,7 +393,7 @@ def build_library(
     with ProcessPoolExecutor(max_workers=workers) as pool:
         futures = {
             pool.submit(run_regime, slug, r, d, sim_hours): regime_name(r, d)
-            for r, d in REGIME_MATRIX
+            for r, d in matrix
         }
         for fut in as_completed(futures):
             name = futures[fut]

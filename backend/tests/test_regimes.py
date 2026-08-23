@@ -403,6 +403,39 @@ def test_build_library_without_a_callback_still_runs(monkeypatch, tmp_path):
     assert sum(v["status"] == "ok" for v in results.values()) == N_REGIMES
 
 
+def test_build_library_regimes_param_runs_only_the_given_subset(monkeypatch, tmp_path):
+    """`regimes` lets a caller rebuild a subset (e.g. regimes that failed on a
+    prior pass) without re-running the rest of REGIME_MATRIX. Added for the
+    2026-08-23 recovery: three regimes died mid-build to a config mismatch
+    and the other nine, already good, were not to be re-simulated."""
+    from tidescout import paths
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+
+    seen_pairs = []
+
+    def fake_run(slug, r, d, sim_hours=None):
+        seen_pairs.append((r, d))
+        out = regimes.regime_dir(slug) / regimes.regime_name(r, d)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "regime.json").write_text(
+            json.dumps({"regime": regimes.regime_name(r, d), "snapshots": []})
+        )
+        return out
+
+    monkeypatch.setattr(regimes, "run_regime", fake_run)
+    monkeypatch.setattr(regimes, "reversal_check", lambda d: {"reversed": True})
+
+    subset = [("spring", "med"), ("spring", "high"), ("spring", "freshet")]
+    results = regimes.build_library("winyah-bay", max_workers=1, regimes=subset)
+
+    assert sorted(seen_pairs) == sorted(subset)
+    assert sorted(results) == ["spring_freshet", "spring_high", "spring_med"]
+    assert all(v["status"] == "ok" for v in results.values())
+    # The nine other regimes' full-matrix coverage (regimes=None) is already
+    # exercised by the tests above this one -- they all call build_library()
+    # with no `regimes` argument and assert N_REGIMES entries land.
+
+
 def test_store_sww_knob_defaults_on_and_can_be_disabled():
     from tidescout.models import AnugaConfig
 
