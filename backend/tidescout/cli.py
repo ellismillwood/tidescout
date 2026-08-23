@@ -566,7 +566,10 @@ def salinity_import_cdmo(
         for si in r.stations:
             a = agg.setdefault(
                 si.canonical,
-                {"raw_codes": set(), "n_parsed": 0, "n_new": 0, "rejected": {}, "n_bad_ts": 0},
+                {
+                    "raw_codes": set(), "n_parsed": 0, "n_new": 0, "rejected": {},
+                    "n_bad_ts": 0, "value_unparseable": {}, "flag_unparseable": {},
+                },
             )
             a["raw_codes"].add(si.raw_code)
             a["n_parsed"] += si.n_parsed
@@ -574,6 +577,10 @@ def salinity_import_cdmo(
             a["n_bad_ts"] += si.n_bad_timestamp
             for col, n in si.n_rejected_by_flag.items():
                 a["rejected"][col] = a["rejected"].get(col, 0) + n
+            for col, n in si.n_value_unparseable.items():
+                a["value_unparseable"][col] = a["value_unparseable"].get(col, 0) + n
+            for col, n in si.n_flag_unparseable.items():
+                a["flag_unparseable"][col] = a["flag_unparseable"].get(col, 0) + n
 
     console.print(f"{len(reports)} file(s) read from {target}")
     if unknown_columns:
@@ -581,6 +588,26 @@ def salinity_import_cdmo(
             f"[yellow]unrecognised column(s), reported rather than guessed at:[/yellow] "
             f"{sorted(unknown_columns)}"
         )
+    # Everything that could NOT be parsed -- reported explicitly rather than
+    # silently folded into "0 new", per this command's own promise (and
+    # `sources/cdmo.py`'s module docstring) not to guess at a bad cell.
+    for station in sorted(agg):
+        a = agg[station]
+        bad_bits = []
+        if a["n_bad_ts"]:
+            bad_bits.append(f"{a['n_bad_ts']} row(s) with an unreadable timestamp")
+        if a["value_unparseable"]:
+            bad_bits.append(
+                "unparseable value(s): "
+                + ", ".join(f"{k}:{v}" for k, v in sorted(a["value_unparseable"].items()))
+            )
+        if a["flag_unparseable"]:
+            bad_bits.append(
+                "unparseable flag(s): "
+                + ", ".join(f"{k}:{v}" for k, v in sorted(a["flag_unparseable"].items()))
+            )
+        if bad_bits:
+            console.print(f"[yellow]{station}[/yellow] could not parse: {'; '.join(bad_bits)}")
 
     coords = {
         s: cdmo.NIW_STATION_COORDS_LONLAT[s] for s in agg if s in cdmo.NIW_STATION_COORDS_LONLAT

@@ -182,3 +182,36 @@ def test_unknown_columns_are_surfaced_in_the_cli_output(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.exception or result.stdout
     assert "Sonde_ID" in plain(result)
+
+
+def test_unparseable_cells_and_bad_timestamps_are_surfaced_not_folded_into_new_count(
+    monkeypatch, tmp_path
+):
+    """The parser tracks bad timestamps, unparseable values, and
+    unparseable flags separately (see test_cdmo.py) -- this proves the CLI
+    actually SHOWS them rather than computing and discarding them."""
+    _patch_data_dir(monkeypatch, tmp_path)
+    _stub_distances(monkeypatch, {"WYSS1": (15.02, 9.5)})
+
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    text = (
+        HEADER
+        + _row("niwwswq", "08/22/2026 15:00", "15.2")  # one good row
+        + _row("niwwswq", "not-a-date", "16.0")  # bad timestamp
+        + _row("niwwswq", "08/22/2026 15:15", "abc", f_sal="<0> ")  # unparseable value
+        + _row("niwwswq", "08/22/2026 15:30", "16.5", f_sal="garbage")  # unparseable flag
+    )
+    (export_dir / "niwwswq2026.csv").write_text(text)
+
+    result = runner.invoke(
+        app, ["salinity", "import-cdmo", "winyah-bay", "--path", str(export_dir)], env=WIDE
+    )
+
+    assert result.exit_code == 0, result.exception or result.stdout
+    out = plain(result)
+    assert "WYSS1" in out
+    assert "could not parse" in out
+    assert "unreadable timestamp" in out
+    assert "unparseable value" in out and "sal:1" in out
+    assert "unparseable flag" in out and "sal:1" in out
