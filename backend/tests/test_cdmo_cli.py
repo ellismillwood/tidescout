@@ -105,9 +105,13 @@ def test_imports_and_reports_in_domain_station(monkeypatch, tmp_path):
 
     assert result.exit_code == 0, result.exception or result.stdout
     out = plain(result)
-    assert "WYSS1" in out
-    assert "15.02" in out
-    assert "9" in out  # snap gap, 9.5 -> displayed as "10" or "9" depending on rounding
+    # Check the WYSS1 table ROW specifically, not the whole output blob --
+    # a bare substring check against `out` risked a false pass from digits
+    # coincidentally inside the random tmp_path used elsewhere in the text.
+    wyss1_lines = [ln for ln in out.splitlines() if "WYSS1" in ln]
+    assert wyss1_lines, out
+    assert "15.02" in wyss1_lines[0]
+    assert "10" in wyss1_lines[0]  # snap gap 9.5 -> "10" (round-half-to-even)
     assert "1 in-domain station(s), 1 distinct along-estuary" in out
 
     # a second identical import must add nothing new -- the store dedupe
