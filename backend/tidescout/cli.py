@@ -613,7 +613,19 @@ def salinity_import_cdmo(
         s: cdmo.NIW_STATION_COORDS_LONLAT[s] for s in agg if s in cdmo.NIW_STATION_COORDS_LONLAT
     }
     missing_coords = sorted(set(agg) - set(coords))
-    distances = site_distances_km(slug, fishery, coords) if coords else {}
+    distances: dict[str, tuple[float, float]] = {}
+    if coords:
+        try:
+            distances = site_distances_km(slug, fishery, coords)
+        except FileNotFoundError as exc:
+            # The import itself already succeeded and is committed to the
+            # store by this point -- losing that because the (separate)
+            # along-estuary distance field hasn't been built yet would
+            # throw away real, already-durable work over a reporting
+            # nicety. Print the field's own helpful message (it already
+            # names the exact command to run) and report positions as
+            # unknown rather than aborting.
+            console.print(f"\n[yellow]{exc}[/yellow]")
 
     table = Table(title=f"{fishery.name} — CDMO import, per-station position")
     for col in (

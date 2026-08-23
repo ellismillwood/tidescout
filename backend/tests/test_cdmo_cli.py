@@ -122,6 +122,44 @@ def test_imports_and_reports_in_domain_station(monkeypatch, tmp_path):
     assert " 0 " in lines[0] or lines[0].strip().endswith("0")
 
 
+def test_missing_distance_field_does_not_lose_an_already_committed_import(monkeypatch, tmp_path):
+    """`site_distances_km` needs the along-estuary distance field
+    (`tidescout salinity field <slug>` output) on disk -- a separate build
+    step from this command. If it hasn't been run yet, the import (already
+    committed to the store by this point) must not be thrown away over a
+    reporting nicety; the command should degrade to "position unknown" and
+    still exit 0."""
+    _patch_data_dir(monkeypatch, tmp_path)
+
+    from tidescout.pipeline import salinity_fit
+
+    def missing_field(slug, fishery, sites):
+        raise FileNotFoundError(f"no along-estuary distance field for {slug}")
+
+    monkeypatch.setattr(salinity_fit, "site_distances_km", missing_field)
+
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    (export_dir / "niwwswq2026.csv").write_text(
+        HEADER + _row("niwwswq", "08/22/2026 15:00", "15.2")
+    )
+
+    result = runner.invoke(
+        app, ["salinity", "import-cdmo", "winyah-bay", "--path", str(export_dir)], env=WIDE
+    )
+
+    assert result.exit_code == 0, result.exception or result.stdout
+    out = plain(result)
+    assert "no along-estuary distance field" in out
+    assert "WYSS1" in out
+    assert "no known position" in out
+
+    # the row is durably in the store despite the distance-field failure
+    from tidescout.sources.ndbc import default_store
+
+    assert default_store("winyah-bay").count("WYSS1") == 1
+
+
 def test_out_of_domain_station_is_flagged_not_silently_admitted(monkeypatch, tmp_path):
     _patch_data_dir(monkeypatch, tmp_path)
     # A huge snap gap -- the USGS-gauge shape Task 5 documented.
