@@ -74,12 +74,53 @@ salinity) pairs at this station's one known along-estuary distance.
 called from `pipeline/salinity_fit.py` or any scoring path by this module --
 Phase 3 does not exist yet and scoring belongs there. This module stores and
 exposes; it stops at that seam on purpose.
+
+A SECOND TABLE FOR METEOROLOGICAL DATA (Task 10)
+-------------------------------------------------
+`met_observations` is a SIBLING table in the same file, not a widening of
+`observations`. Water-quality and meteorological parameters are disjoint
+sets (temperature/salinity/DO/turbidity/pH vs. air-temp/wind/pressure/
+humidity/PAR/precipitation) with disjoint station namespaces (WYSS1 and
+friends vs. the reserve's one weather station) -- see `sources/cdmo.py`'s
+"MET FILE SUPPORT" docstring section for the full reasoning (that is where
+the parsing and the decision were made; this module just owns the table,
+the same way it already owns `observations`). `MetObservation`,
+`append_met`, `read_met`, `latest_met`, and `met_time_span` mirror their
+WQ-table counterparts exactly -- same atomic-transaction dedupe contract,
+same MM/None-not-zero discipline, same "stores and exposes, nothing wired
+into scoring yet" seam.
+
+PROVENANCE AND CITATION (Task 10)
+-------------------------------------------------
+NERRS's citation requirement (nerrsdata.org/data/citation.cfm) names two
+facts only the code can honestly supply: the date the data were ACCESSED,
+and the SUBSET actually held. Neither can be read off the observation rows
+themselves -- a row's `ts` is when the water/air was measured, not when
+this program fetched it, and the subset changes every time an import runs.
+So every write path that adds real data (`fetch_and_store` here,
+`cdmo._apply`/`_apply_met` in the sibling module) also calls
+`record_provenance`, appending one row to a third table: accessed-at
+(UTC, this call's own wall-clock time), source route (`ndbc:realtime2` vs
+`cdmo:water_quality` vs `cdmo:meteorological`), the station codes touched,
+and the timestamp span of the rows in THAT call's batch. `citation()` then
+derives the citation from what is ACTUALLY on record rather than a
+hardcoded string: the accessed date is the most recent `accessed_at` across
+every provenance row (how fresh is what we hold), while the subset
+description is read LIVE from `observations`/`met_observations` (station,
+row count, date span) rather than from the provenance log's own per-import
+spans -- the live tables can never go stale relative to what a caller
+actually gets back from `read`/`read_met`, whereas summing historical
+per-import spans could silently drift from the true union. A store with no
+provenance rows at all (a raw `append` call bypassing this bookkeeping, as
+most of this module's own tests do) still produces a complete `Citation`;
+its `accessed_date` is `None` and its `.text` says so explicitly rather
+than fabricating a date.
 """
 
 import sqlite3
 from collections.abc import Sequence
 from dataclasses import dataclass
-from datetime import UTC, datetime
+from datetime import UTC, date, datetime
 from pathlib import Path
 
 import httpx
@@ -89,14 +130,26 @@ from tidescout.paths import fishery_data_dir
 
 __all__ = [
     "NDBC_URL",
+    "NERRS_ACKNOWLEDGEMENT",
+    "NERRS_CITATION_TEMPLATE",
+    "NERRS_DISCLAIMER",
+    "SOURCE_NDBC_REALTIME2",
+    "Citation",
+    "MetObservation",
     "NdbcStore",
     "Observation",
+    "ProvenanceRecord",
     "default_store",
     "fetch_and_store",
     "parse_ocean",
 ]
 
 NDBC_URL = "https://www.ndbc.noaa.gov/data/realtime2/{station}.ocean"
+
+# Provenance `source` label for a fetch through this module. cdmo.py defines
+# its own two sibling labels (`SOURCE_CDMO_WQ`, `SOURCE_CDMO_MET`) -- kept
+# next to the code that actually performs each fetch, not centralised here.
+SOURCE_NDBC_REALTIME2 = "ndbc:realtime2"
 
 # The `.ocean` product's own column order, verbatim from its header:
 # YY MM DD hh mm DEPTH OTMP COND SAL O2% O2PPM CLCON TURB PH EH
@@ -118,6 +171,34 @@ class Observation:
     turbidity_ftu: float | None
     ph: float | None
     eh_mv: float | None
+
+
+@dataclass(frozen=True)
+class MetObservation:
+    """One meteorological reading -- the reserve's single weather station
+    (see `sources/cdmo.py`'s "MET FILE SUPPORT" section: NIW runs exactly
+    one, at Oyster Landing, station code `niwolmet`). `None` means the
+    parameter was missing, rejected, or not collected -- never 0.0; see
+    `sources/cdmo.py` for how each is decided.
+
+    Units, verbatim from the reserve's own meteorological metadata PDF
+    (fetched live 2026-08-23): air_temp_c degrees C, rh_pct percent,
+    bp_mb millibars, wind speeds m/s, wind directions degrees, par_mmol_m2
+    millimoles/m^2 (a 15-minute TOTAL, not an instantaneous rate),
+    precip_mm millimeters (also a 15-minute total), solar_rad_wm2 watts/m^2.
+    """
+
+    ts: datetime  # UTC, tz-aware
+    air_temp_c: float | None
+    rh_pct: float | None
+    bp_mb: float | None
+    wind_speed_ms: float | None
+    max_wind_speed_ms: float | None
+    wind_dir_deg: float | None
+    wind_dir_sd_deg: float | None
+    par_mmol_m2: float | None
+    precip_mm: float | None
+    solar_rad_wm2: float | None
 
 
 def _val(token: str) -> float | None:
@@ -167,9 +248,82 @@ _COLUMNS = (
     "o2_pct", "o2_ppm", "chlorophyll_ug_l", "turbidity_ftu", "ph", "eh_mv",
 )
 
+_MET_COLUMNS = (
+    "ts", "air_temp_c", "rh_pct", "bp_mb", "wind_speed_ms", "max_wind_speed_ms",
+    "wind_dir_deg", "wind_dir_sd_deg", "par_mmol_m2", "precip_mm", "solar_rad_wm2",
+)
+
 
 def _parse_ts(s: str) -> datetime:
     return datetime.fromisoformat(s)
+
+
+@dataclass(frozen=True)
+class ProvenanceRecord:
+    """One import/fetch event, as recorded by `NdbcStore.record_provenance`."""
+
+    accessed_at: datetime  # UTC, tz-aware -- when THIS program touched the source
+    source: str  # e.g. "ndbc:realtime2", "cdmo:water_quality", "cdmo:meteorological"
+    stations: tuple[str, ...]  # canonical station codes this call wrote
+    span: tuple[datetime, datetime] | None  # (earliest, latest) ts in this call's batch
+    n_new: int
+
+
+# Verbatim from https://nerrsdata.org/data/citation.cfm (fetched live
+# 2026-08-23) -- the `{date}` placeholder is the only part this codebase
+# fills in; everything else is NERRS's own required wording, not paraphrased.
+NERRS_CITATION_TEMPLATE = (
+    "NOAA National Estuarine Research Reserve System (NERRS). System-wide "
+    "Monitoring Program. Data accessed from the NOAA NERRS Centralized Data "
+    "Management Office website: http://www.nerrsdata.org; accessed {date}. "
+    "doi:10.25921/vw8a-8031."
+)
+
+# This store only ever holds North Inlet-Winyah Bay (NIW) NERR data (every
+# station in `sources/cdmo.py`'s coordinate tables is NIW), so naming that
+# one reserve here is a fact, not a premature generalisation -- see NERRS's
+# distribution clause, which requires the SPECIFIC reserve be credited, not
+# NERRS-in-the-abstract. Contact per this task's dispatch.
+NERRS_ACKNOWLEDGEMENT = (
+    "The NERRS retains the right to be fully credited for having collected "
+    "and processed the data. Following academic courtesy standards, the "
+    "NERR site where the data were collected should be contacted and fully "
+    "acknowledged in any subsequent publications in which any part of the "
+    "data are used: North Inlet-Winyah Bay NERR, Baruch Marine Field "
+    "Laboratory, University of South Carolina, PO Box 1630, Georgetown, SC "
+    "29442 (cdmodata@baruch.sc.edu)."
+)
+
+# Verbatim from nerrsdata.org/data/citation.cfm AND both reserve metadata
+# PDFs' "Distribution" sections (word-for-word identical across all three,
+# cross-checked live 2026-08-23). Longer than this task's dispatch quoted --
+# the dispatch dropped the trailing "nor will the Federal government
+# reimburse or indemnify..." clause; restored here from the primary source.
+NERRS_DISCLAIMER = (
+    "The user bears all responsibility for its subsequent use/misuse in any "
+    "further analyses or comparisons. The Federal government does not "
+    "assume liability to the Recipient or third persons, nor will the "
+    "Federal government reimburse or indemnify the Recipient for its "
+    "liability due to any losses resulting in any way from the use of this "
+    "data."
+)
+
+
+@dataclass(frozen=True)
+class Citation:
+    """Everything `NdbcStore.citation()` derives from the store's own
+    provenance and data tables -- see this module's docstring, "PROVENANCE
+    AND CITATION". `text` is NERRS's exact requested citation line with the
+    access date filled in; `subset_lines` is this codebase's own answer to
+    NERRS's OTHER requirement ("the subset of data that was used"), which
+    NERRS's template has no placeholder for."""
+
+    text: str
+    acknowledgement: str
+    disclaimer: str
+    accessed_date: date | None
+    subset_lines: tuple[str, ...]
+    sources: tuple[str, ...]
 
 
 class NdbcStore:
@@ -196,6 +350,29 @@ class NdbcStore:
             " o2_pct REAL, o2_ppm REAL, chlorophyll_ug_l REAL, turbidity_ftu REAL,"
             " ph REAL, eh_mv REAL,"
             " PRIMARY KEY (station, ts))"
+        )
+        # A SIBLING table, not a widened `observations` -- see this module's
+        # docstring, "A SECOND TABLE FOR METEOROLOGICAL DATA".
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS met_observations ("
+            " station TEXT NOT NULL,"
+            " ts TEXT NOT NULL,"
+            " air_temp_c REAL, rh_pct REAL, bp_mb REAL,"
+            " wind_speed_ms REAL, max_wind_speed_ms REAL,"
+            " wind_dir_deg REAL, wind_dir_sd_deg REAL,"
+            " par_mmol_m2 REAL, precip_mm REAL, solar_rad_wm2 REAL,"
+            " PRIMARY KEY (station, ts))"
+        )
+        # See this module's docstring, "PROVENANCE AND CITATION" -- one row
+        # per real write, never per failed/aborted import.
+        self._conn.execute(
+            "CREATE TABLE IF NOT EXISTS provenance ("
+            " id INTEGER PRIMARY KEY AUTOINCREMENT,"
+            " accessed_at TEXT NOT NULL,"
+            " source TEXT NOT NULL,"
+            " stations TEXT NOT NULL,"
+            " span_start TEXT, span_end TEXT,"
+            " n_new INTEGER NOT NULL)"
         )
         self._conn.commit()
 
@@ -276,6 +453,174 @@ class NdbcStore:
         ).fetchall()
         return [(_parse_ts(ts), sal) for ts, sal in rows]
 
+    # -- met_observations: same contract as observations, sibling table ----
+
+    def append_met(self, station: str, rows: Sequence[MetObservation]) -> int:
+        """`append`'s exact contract (whole-batch-atomic, `(station, ts)`
+        dedupe), against `met_observations` instead of `observations`."""
+        before = self.count_met(station)
+        with self._conn:
+            for r in rows:
+                self._conn.execute(
+                    "INSERT OR REPLACE INTO met_observations "
+                    "(station, ts, air_temp_c, rh_pct, bp_mb, wind_speed_ms, "
+                    " max_wind_speed_ms, wind_dir_deg, wind_dir_sd_deg, "
+                    " par_mmol_m2, precip_mm, solar_rad_wm2) "
+                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
+                    (
+                        station, r.ts.astimezone(UTC).isoformat(),
+                        r.air_temp_c, r.rh_pct, r.bp_mb, r.wind_speed_ms,
+                        r.max_wind_speed_ms, r.wind_dir_deg, r.wind_dir_sd_deg,
+                        r.par_mmol_m2, r.precip_mm, r.solar_rad_wm2,
+                    ),
+                )
+        return self.count_met(station) - before
+
+    def count_met(self, station: str) -> int:
+        (n,) = self._conn.execute(
+            "SELECT COUNT(*) FROM met_observations WHERE station = ?", (station,)
+        ).fetchone()
+        return n
+
+    def met_time_span(self, station: str) -> tuple[datetime, datetime] | None:
+        row = self._conn.execute(
+            "SELECT MIN(ts), MAX(ts) FROM met_observations WHERE station = ?", (station,)
+        ).fetchone()
+        if row is None or row[0] is None:
+            return None
+        return _parse_ts(row[0]), _parse_ts(row[1])
+
+    def read_met(
+        self,
+        station: str,
+        start: datetime | None = None,
+        end: datetime | None = None,
+    ) -> list[MetObservation]:
+        """All stored MET rows for `station`, ordered by timestamp ascending."""
+        query = f"SELECT {', '.join(_MET_COLUMNS)} FROM met_observations WHERE station = ?"
+        params: list = [station]
+        if start is not None:
+            query += " AND ts >= ?"
+            params.append(start.astimezone(UTC).isoformat())
+        if end is not None:
+            query += " AND ts <= ?"
+            params.append(end.astimezone(UTC).isoformat())
+        query += " ORDER BY ts ASC"
+        rows = self._conn.execute(query, params).fetchall()
+        return [MetObservation(_parse_ts(row[0]), *row[1:]) for row in rows]
+
+    def latest_met(self, station: str) -> MetObservation | None:
+        """Most recent stored MET row -- what a future bite-score consumer
+        wants: current wind/pressure/temperature, not the history."""
+        rows = self.read_met(station)
+        return rows[-1] if rows else None
+
+    # -- provenance and citation --------------------------------------------
+
+    def record_provenance(
+        self,
+        source: str,
+        stations: Sequence[str],
+        span: tuple[datetime, datetime] | None,
+        n_new: int,
+        accessed_at: datetime | None = None,
+    ) -> None:
+        """One row per real write -- see this module's docstring,
+        "PROVENANCE AND CITATION". Callers (`fetch_and_store` here,
+        `cdmo._apply`/`_apply_met`) call this immediately AFTER a
+        successful `append`/`append_met`, never before: if the write
+        raised, this line is never reached, so a failed import records no
+        provenance for data it never actually committed.
+
+        `accessed_at` defaults to now (UTC) -- overridable only for tests
+        that need a fixed clock; every real call site uses the default.
+        """
+        at = (accessed_at or datetime.now(UTC)).astimezone(UTC)
+        with self._conn:
+            self._conn.execute(
+                "INSERT INTO provenance "
+                "(accessed_at, source, stations, span_start, span_end, n_new) "
+                "VALUES (?, ?, ?, ?, ?, ?)",
+                (
+                    at.isoformat(),
+                    source,
+                    ",".join(sorted(stations)),
+                    span[0].astimezone(UTC).isoformat() if span else None,
+                    span[1].astimezone(UTC).isoformat() if span else None,
+                    n_new,
+                ),
+            )
+
+    def provenance(self) -> list[ProvenanceRecord]:
+        """Every recorded import/fetch, oldest first."""
+        rows = self._conn.execute(
+            "SELECT accessed_at, source, stations, span_start, span_end, n_new "
+            "FROM provenance ORDER BY accessed_at ASC, id ASC"
+        ).fetchall()
+        out = []
+        for accessed_at, source, stations, span_start, span_end, n_new in rows:
+            span = (
+                (_parse_ts(span_start), _parse_ts(span_end))
+                if span_start is not None and span_end is not None
+                else None
+            )
+            out.append(
+                ProvenanceRecord(
+                    accessed_at=_parse_ts(accessed_at),
+                    source=source,
+                    stations=tuple(stations.split(",")) if stations else (),
+                    span=span,
+                    n_new=n_new,
+                )
+            )
+        return out
+
+    def citation(self) -> Citation:
+        """Generate the NERRS citation from what THIS store actually holds
+        right now -- never a hardcoded string (see this module's docstring).
+        Always returns a complete `Citation`, even for an empty store or one
+        with data but no provenance (an honest `accessed_date=None` rather
+        than a fabricated date -- see `.text`'s wording in that case).
+        """
+        prov = self.provenance()
+        accessed_dt = max((p.accessed_at for p in prov), default=None)
+        accessed_date = accessed_dt.astimezone(UTC).date() if accessed_dt is not None else None
+        sources = tuple(sorted({p.source for p in prov}))
+
+        if accessed_date is not None:
+            date_str = f"{accessed_date.day} {accessed_date:%B} {accessed_date.year}"
+        else:
+            date_str = "[NO RECORDED ACCESS -- this store predates provenance tracking]"
+        text = NERRS_CITATION_TEMPLATE.format(date=date_str)
+
+        wq_stations = [
+            r[0] for r in self._conn.execute("SELECT DISTINCT station FROM observations")
+        ]
+        met_stations = [
+            r[0] for r in self._conn.execute("SELECT DISTINCT station FROM met_observations")
+        ]
+        lines = []
+        for st in sorted(wq_stations):
+            n = self.count(st)
+            span = self.time_span(st)
+            span_str = f"{span[0].date()} to {span[1].date()}" if span else "no dated rows"
+            lines.append(f"{st} (water quality, {n:,} observation(s), {span_str})")
+        for st in sorted(met_stations):
+            n = self.count_met(st)
+            span = self.met_time_span(st)
+            span_str = f"{span[0].date()} to {span[1].date()}" if span else "no dated rows"
+            lines.append(f"{st} (meteorological, {n:,} observation(s), {span_str})")
+        subset_lines = tuple(lines) if lines else ("no observations held",)
+
+        return Citation(
+            text=text,
+            acknowledgement=NERRS_ACKNOWLEDGEMENT,
+            disclaimer=NERRS_DISCLAIMER,
+            accessed_date=accessed_date,
+            subset_lines=subset_lines,
+            sources=sources,
+        )
+
 
 def default_store(slug: str) -> NdbcStore:
     return NdbcStore(fishery_data_dir(slug) / "ndbc.sqlite")
@@ -296,10 +641,18 @@ def fetch_and_store(station: str, store: NdbcStore) -> int:
     name in `missing`, rather than a failed fetch silently leaving the store
     exactly where it was with no trace anything went wrong. A failure here
     changes nothing already committed to `store` -- see `NdbcStore.append`.
+
+    Also records provenance (see this module's docstring, "PROVENANCE AND
+    CITATION") -- but only after `append` returns successfully, so a raised
+    `SourceUnavailable` or a poisoned batch records no access to data that
+    was never actually committed.
     """
     try:
         text = _fetch_text(station)
     except Exception as exc:
         raise SourceUnavailable("ndbc", str(exc)) from exc
     rows = parse_ocean(text)
-    return store.append(station, rows)
+    n_new = store.append(station, rows)
+    span = (min(r.ts for r in rows), max(r.ts for r in rows)) if rows else None
+    store.record_provenance(SOURCE_NDBC_REALTIME2, [station], span, n_new)
+    return n_new

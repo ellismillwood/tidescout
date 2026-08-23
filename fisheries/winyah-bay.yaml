@@ -125,6 +125,19 @@ stations:
     # belong to is actually imported. Geolocation alone does not supply
     # observations -- see task-9-report.md for what CDMO's export format
     # was established from and where to run the import.
+    #
+    # Phase 2 Task 10 (sources/cdmo.py "MET FILE SUPPORT"): the reserve runs
+    # exactly ONE weather station system-wide, not one per WQ site -- at
+    # Oyster Landing, station code niwolmet, 33 20'57.85"N 79 11'20.03"W (a
+    # few feet from the OL WQ sonde above; independently sourced from the
+    # reserve's own MET metadata PDF, not copied from it). Same situation as
+    # the five non-WYSS1 WQ stations: no NDBC mirror to poll, so no `kind:`
+    # entry here -- `tidescout salinity import-cdmo` imports MET files
+    # (detected from their own header, mixed freely with WQ files in the
+    # same directory/zip) into a SIBLING sqlite table (met_observations),
+    # never the WQ one. Weather feeds the bite score directly in Phase 3's
+    # design (pressure trend, wind, air temp) but nothing reads this table
+    # yet -- stored and exposed, same seam Task 8/9 left for salinity.
 rivers:
   # WARNING (root cause of the 2026-08-14 library build failure -- 6 of 9
   # regimes died with "Too small timestep"): inflow_lonlat must sit well

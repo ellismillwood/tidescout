@@ -24,6 +24,10 @@ from httpx import ConnectError, Response
 from tidescout.errors import SourceUnavailable
 from tidescout.sources.ndbc import (
     NDBC_URL,
+    NERRS_ACKNOWLEDGEMENT,
+    NERRS_DISCLAIMER,
+    SOURCE_NDBC_REALTIME2,
+    MetObservation,
     NdbcStore,
     Observation,
     fetch_and_store,
@@ -390,3 +394,273 @@ def test_requests_the_right_station():
     _fetch_text("WYSS1")
     assert route.called
     assert "WYSS1.ocean" in str(route.calls.last.request.url)
+
+
+# -- met_observations: a sibling table, same contract ------------------------
+
+
+def _met_row(ts: datetime, air_temp_c: float = 22.0, wind_speed_ms: float = 3.5) -> MetObservation:
+    return MetObservation(
+        ts=ts, air_temp_c=air_temp_c, rh_pct=65.0, bp_mb=1015.2,
+        wind_speed_ms=wind_speed_ms, max_wind_speed_ms=wind_speed_ms + 1.0,
+        wind_dir_deg=180.0, wind_dir_sd_deg=12.0, par_mmol_m2=450.0,
+        precip_mm=0.0, solar_rad_wm2=210.0,
+    )
+
+
+def test_append_met_stores_rows_readable_back(tmp_path):
+    store = NdbcStore(tmp_path / "s.sqlite")
+    rows = [
+        _met_row(datetime(2026, 8, 23, 12, 0, tzinfo=UTC)),
+        _met_row(datetime(2026, 8, 23, 12, 15, tzinfo=UTC)),
+    ]
+    n_new = store.append_met("NIWOLMET", rows)
+    assert n_new == 2
+    assert store.count_met("NIWOLMET") == 2
+    got = store.read_met("NIWOLMET")
+    assert [r.ts for r in got] == [rows[0].ts, rows[1].ts]
+    assert got[0].air_temp_c == 22.0
+    assert got[0].wind_speed_ms == 3.5
+
+
+def test_append_met_dedupes_overlapping_batches(tmp_path):
+    store = NdbcStore(tmp_path / "s.sqlite")
+    t1 = datetime(2026, 8, 23, 12, 0, tzinfo=UTC)
+    t2 = datetime(2026, 8, 23, 12, 15, tzinfo=UTC)
+    t3 = datetime(2026, 8, 23, 12, 30, tzinfo=UTC)
+    store.append_met("NIWOLMET", [_met_row(t1), _met_row(t2)])
+    n_new = store.append_met("NIWOLMET", [_met_row(t2), _met_row(t3)])
+    assert n_new == 1  # only t3 is genuinely new
+    assert store.count_met("NIWOLMET") == 3
+
+
+def test_met_and_wq_tables_do_not_collide_even_under_the_same_station_code(tmp_path):
+    """Different parameter families, kept in different tables -- proven by
+    writing the SAME station code into both and confirming each table's
+    count is independent."""
+    store = NdbcStore(tmp_path / "s.sqlite")
+    store.append("SAME", [Observation(
+        ts=datetime(2026, 8, 23, 12, 0, tzinfo=UTC), depth_m=0.5, water_temp_c=30.0,
+        cond_ms_cm=18.0, salinity_psu=11.0, o2_pct=80.0, o2_ppm=5.5,
+        chlorophyll_ug_l=None, turbidity_ftu=10.0, ph=7.3, eh_mv=None,
+    )])
+    store.append_met("SAME", [_met_row(datetime(2026, 8, 23, 12, 0, tzinfo=UTC))])
+    assert store.count("SAME") == 1
+    assert store.count_met("SAME") == 1
+
+
+def test_latest_met_returns_the_most_recent_row(tmp_path):
+    store = NdbcStore(tmp_path / "s.sqlite")
+    store.append_met(
+        "NIWOLMET",
+        [
+            _met_row(datetime(2026, 8, 23, 12, 0, tzinfo=UTC), air_temp_c=20.0),
+            _met_row(datetime(2026, 8, 23, 12, 15, tzinfo=UTC), air_temp_c=21.0),
+        ],
+    )
+    latest = store.latest_met("NIWOLMET")
+    assert latest is not None
+    assert latest.ts == datetime(2026, 8, 23, 12, 15, tzinfo=UTC)
+    assert latest.air_temp_c == 21.0
+
+
+def test_latest_met_is_none_for_an_empty_station(tmp_path):
+    store = NdbcStore(tmp_path / "s.sqlite")
+    assert store.latest_met("NIWOLMET") is None
+
+
+def test_met_time_span_reports_min_and_max(tmp_path):
+    store = NdbcStore(tmp_path / "s.sqlite")
+    store.append_met(
+        "NIWOLMET",
+        [
+            _met_row(datetime(2026, 8, 23, 12, 0, tzinfo=UTC)),
+            _met_row(datetime(2026, 8, 23, 14, 0, tzinfo=UTC)),
+        ],
+    )
+    assert store.met_time_span("NIWOLMET") == (
+        datetime(2026, 8, 23, 12, 0, tzinfo=UTC),
+        datetime(2026, 8, 23, 14, 0, tzinfo=UTC),
+    )
+
+
+def test_met_time_span_is_none_for_an_empty_station(tmp_path):
+    store = NdbcStore(tmp_path / "s.sqlite")
+    assert store.met_time_span("NIWOLMET") is None
+
+
+def test_met_partial_write_does_not_corrupt_existing_history(tmp_path):
+    """Same standard Task 8 held `NdbcStore.append` to -- a batch where a
+    later row is unbindable rolls back in full, leaving prior MET history
+    untouched."""
+    store = NdbcStore(tmp_path / "s.sqlite")
+    store.append_met("NIWOLMET", [_met_row(datetime(2026, 8, 23, 12, 0, tzinfo=UTC))])
+    before = store.read_met("NIWOLMET")
+    assert len(before) == 1
+
+    good = _met_row(datetime(2026, 8, 23, 12, 15, tzinfo=UTC))
+    poisoned = MetObservation(
+        ts=datetime(2026, 8, 23, 12, 30, tzinfo=UTC), air_temp_c=object(), rh_pct=60.0,
+        bp_mb=1013.0, wind_speed_ms=2.0, max_wind_speed_ms=3.0, wind_dir_deg=90.0,
+        wind_dir_sd_deg=5.0, par_mmol_m2=300.0, precip_mm=0.0, solar_rad_wm2=150.0,
+    )
+    with pytest.raises(sqlite3.ProgrammingError):
+        store.append_met("NIWOLMET", [good, poisoned])
+
+    after = store.read_met("NIWOLMET")
+    assert after == before
+    assert good.ts not in {r.ts for r in after}
+
+
+# -- provenance ---------------------------------------------------------
+
+
+def test_record_provenance_and_read_back(tmp_path):
+    store = NdbcStore(tmp_path / "s.sqlite")
+    span = (
+        datetime(2026, 8, 23, 12, 0, tzinfo=UTC),
+        datetime(2026, 8, 23, 13, 0, tzinfo=UTC),
+    )
+    accessed = datetime(2026, 8, 23, 15, 0, tzinfo=UTC)
+    store.record_provenance("ndbc:realtime2", ["WYSS1"], span, 5, accessed_at=accessed)
+
+    recs = store.provenance()
+    assert len(recs) == 1
+    r = recs[0]
+    assert r.accessed_at == accessed
+    assert r.source == "ndbc:realtime2"
+    assert r.stations == ("WYSS1",)
+    assert r.span == span
+    assert r.n_new == 5
+
+
+def test_record_provenance_handles_no_span(tmp_path):
+    store = NdbcStore(tmp_path / "s.sqlite")
+    store.record_provenance("ndbc:realtime2", ["WYSS1"], None, 0)
+    recs = store.provenance()
+    assert recs[0].span is None
+
+
+def test_fetch_and_store_records_provenance(tmp_path):
+    import respx
+    from httpx import Response
+
+    with respx.mock:
+        respx.get(NDBC_URL.format(station="WYSS1")).mock(return_value=Response(200, text=LATER))
+        store = NdbcStore(tmp_path / "s.sqlite")
+        fetch_and_store("WYSS1", store)
+
+    recs = store.provenance()
+    assert len(recs) == 1
+    assert recs[0].source == SOURCE_NDBC_REALTIME2
+    assert recs[0].stations == ("WYSS1",)
+    assert recs[0].n_new == 10
+    assert recs[0].span == (min(LATER_TIMES), max(LATER_TIMES))
+
+
+def test_fetch_and_store_records_provenance_even_when_nothing_new(tmp_path):
+    """The ACCESS still happened even if every row was already known --
+    the citation's accessed date must reflect that."""
+    import respx
+    from httpx import Response
+
+    store = NdbcStore(tmp_path / "s.sqlite")
+    store.append("WYSS1", parse_ocean(LATER))
+
+    with respx.mock:
+        respx.get(NDBC_URL.format(station="WYSS1")).mock(return_value=Response(200, text=LATER))
+        fetch_and_store("WYSS1", store)
+
+    recs = store.provenance()
+    assert len(recs) == 1
+    assert recs[0].n_new == 0
+
+
+def test_fetch_failure_records_no_provenance(tmp_path):
+    import respx
+    from httpx import ConnectError
+
+    store = NdbcStore(tmp_path / "s.sqlite")
+    with respx.mock:
+        respx.get(NDBC_URL.format(station="WYSS1")).mock(side_effect=ConnectError("down"))
+        with pytest.raises(SourceUnavailable):
+            fetch_and_store("WYSS1", store)
+    assert store.provenance() == []
+
+
+# -- citation() -----------------------------------------------------------
+
+
+def test_citation_on_an_empty_store_reports_no_recorded_access(tmp_path):
+    store = NdbcStore(tmp_path / "s.sqlite")
+    c = store.citation()
+    assert c.accessed_date is None
+    assert "NO RECORDED ACCESS" in c.text
+    assert c.subset_lines == ("no observations held",)
+    assert c.sources == ()
+
+
+def test_citation_text_matches_the_nerrs_template_with_date_filled_in(tmp_path):
+    store = NdbcStore(tmp_path / "s.sqlite")
+    store.record_provenance(
+        "ndbc:realtime2", ["WYSS1"], None, 0,
+        accessed_at=datetime(2026, 8, 23, 12, 0, tzinfo=UTC),
+    )
+    c = store.citation()
+    assert c.accessed_date == datetime(2026, 8, 23, 12, 0, tzinfo=UTC).date()
+    assert "accessed 23 August 2026" in c.text
+    assert c.text.startswith("NOAA National Estuarine Research Reserve System (NERRS).")
+    assert c.text.endswith("doi:10.25921/vw8a-8031.")
+
+
+def test_citation_accessed_date_is_the_most_recent_provenance_record(tmp_path):
+    store = NdbcStore(tmp_path / "s.sqlite")
+    store.record_provenance(
+        "ndbc:realtime2", ["WYSS1"], None, 0,
+        accessed_at=datetime(2026, 8, 1, tzinfo=UTC),
+    )
+    store.record_provenance(
+        "cdmo:water_quality", ["NIWCBWQ"], None, 0,
+        accessed_at=datetime(2026, 8, 23, tzinfo=UTC),
+    )
+    c = store.citation()
+    assert c.accessed_date == datetime(2026, 8, 23, tzinfo=UTC).date()
+
+
+def test_citation_subset_lines_describe_each_held_station(tmp_path):
+    store = NdbcStore(tmp_path / "s.sqlite")
+    store.append("WYSS1", parse_ocean(LATER))
+    store.append_met(
+        "NIWOLMET",
+        [_met_row(datetime(2026, 8, 23, 12, 0, tzinfo=UTC))],
+    )
+    store.record_provenance("ndbc:realtime2", ["WYSS1"], None, 10)
+    store.record_provenance("cdmo:meteorological", ["NIWOLMET"], None, 1)
+
+    c = store.citation()
+    wq_line = next(ln for ln in c.subset_lines if ln.startswith("WYSS1"))
+    met_line = next(ln for ln in c.subset_lines if ln.startswith("NIWOLMET"))
+    assert "water quality" in wq_line
+    assert "10 observation" in wq_line
+    assert "meteorological" in met_line
+    assert "1 observation" in met_line
+
+
+def test_citation_sources_lists_distinct_routes(tmp_path):
+    store = NdbcStore(tmp_path / "s.sqlite")
+    store.record_provenance("ndbc:realtime2", ["WYSS1"], None, 1)
+    store.record_provenance("cdmo:water_quality", ["NIWCBWQ"], None, 1)
+    store.record_provenance("ndbc:realtime2", ["WYSS1"], None, 0)
+    c = store.citation()
+    assert c.sources == ("cdmo:water_quality", "ndbc:realtime2")
+
+
+def test_citation_includes_the_disclaimer_and_niw_acknowledgement(tmp_path):
+    store = NdbcStore(tmp_path / "s.sqlite")
+    c = store.citation()
+    assert c.disclaimer == NERRS_DISCLAIMER
+    assert c.acknowledgement == NERRS_ACKNOWLEDGEMENT
+    assert "North Inlet-Winyah Bay NERR" in c.acknowledgement
+    assert "cdmodata@baruch.sc.edu" in c.acknowledgement
+    assert "Federal government does not assume liability" in c.disclaimer
+    assert "reimburse or indemnify" in c.disclaimer  # the clause the dispatch's quote dropped

@@ -557,11 +557,22 @@ def salinity_import_cdmo(
         )
         raise typer.Exit(1) from exc
 
-    # Aggregate every station this run touched, across however many files
-    # the path expanded to (a directory or zip can hold several years).
+    # A directory/zip can freely mix water-quality and meteorological
+    # files (this task's dispatch: "the CDMO export will contain
+    # meteorological files alongside water quality files"). Split by
+    # report type BEFORE aggregating: MET's along-estuary-distance/domain
+    # concept doesn't apply to a single fixed weather station, so folding
+    # it into the WQ table would misreport "no along-estuary distance" as
+    # a data gap rather than what it actually is -- a different kind of
+    # station entirely. See `sources/cdmo.py`'s "MET FILE SUPPORT".
+    wq_reports = [r for r in reports if isinstance(r, cdmo.ImportReport)]
+    met_reports = [r for r in reports if isinstance(r, cdmo.MetImportReport)]
+
+    # Aggregate every WQ station this run touched, across however many
+    # files the path expanded to (a directory or zip can hold several years).
     agg: dict[str, dict] = {}
     unknown_columns: set[str] = set()
-    for r in reports:
+    for r in wq_reports:
         unknown_columns.update(r.unknown_columns)
         for si in r.stations:
             a = agg.setdefault(
@@ -679,6 +690,103 @@ def salinity_import_cdmo(
         "distance(s) among them — the number pipeline.salinity_fit.fit_intrusion's "
         "n_distinct_distances warning (< 3) is checking against."
     )
+
+    if met_reports:
+        _print_met_import_summary(met_reports)
+
+
+def _print_met_import_summary(met_reports: list) -> None:
+    """Meteorological stations this run touched -- a separate, simpler
+    table than the WQ one above: along-estuary distance and domain
+    membership are salinity-model concepts that don't apply to the
+    reserve's one fixed weather station. Store and expose; nothing here
+    feeds a score (Phase 3 does not exist yet) -- see `sources/cdmo.py`'s
+    "MET FILE SUPPORT".
+    """
+    from tidescout.sources import cdmo
+
+    agg: dict[str, dict] = {}
+    unknown_columns: set[str] = set()
+    for r in met_reports:
+        unknown_columns.update(r.unknown_columns)
+        for si in r.stations:
+            a = agg.setdefault(
+                si.canonical, {"raw_codes": set(), "n_parsed": 0, "n_new": 0}
+            )
+            a["raw_codes"].add(si.raw_code)
+            a["n_parsed"] += si.n_parsed
+            a["n_new"] += si.n_new
+
+    console.print(f"\n[bold]{len(agg)} meteorological station(s)[/bold]")
+    if unknown_columns:
+        console.print(
+            f"[yellow]unrecognised MET column(s), reported rather than guessed at:[/yellow] "
+            f"{sorted(unknown_columns)}"
+        )
+    table = Table(title="CDMO import — meteorological")
+    for col in ("station", "raw code(s)", "position", "parsed", "new"):
+        table.add_column(col)
+    for station in sorted(agg):
+        a = agg[station]
+        if station in cdmo.NIW_MET_STATION_COORDS_LONLAT:
+            lon, lat = cdmo.NIW_MET_STATION_COORDS_LONLAT[station]
+            pos_str = f"{lat:.4f}, {lon:.4f}"
+        else:
+            pos_str = "[dim]no known position[/dim]"
+        table.add_row(
+            station, ", ".join(sorted(a["raw_codes"])), pos_str,
+            str(a["n_parsed"]), str(a["n_new"]),
+        )
+    console.print(table)
+
+
+@salinity_app.command("citation")
+def salinity_citation(slug: str) -> None:
+    """Print the NERRS citation, acknowledgement, and disclaimer this data
+    store actually earns -- generated from what is held, not hardcoded.
+
+    WYSS1 (NDBC-mirrored) and every CDMO station this store has ever
+    imported are NERRS System-wide Monitoring Program data; the citation
+    obligation applies from the first row on, not only once a CDMO export
+    arrives (see `sources/ndbc.py`'s "PROVENANCE AND CITATION"). Anything
+    that later publishes or displays a value derived from this store
+    should call `NdbcStore.citation()` too -- this command is the human-
+    readable front of the same function.
+    """
+    from tidescout.config import load_fishery
+    from tidescout.sources.ndbc import default_store
+
+    # Validated the same way every sibling `salinity` command validates
+    # `slug` -- without this, a typo'd slug would silently create a fresh,
+    # empty `data/<typo>/ndbc.sqlite` rather than failing the way `salinity
+    # field`/`salinity calibrate`/`salinity import-cdmo` all do.
+    fishery = load_fishery(slug)
+    store = default_store(slug)
+    c = store.citation()
+
+    # `soft_wrap=True`: this is citation text a human may copy into a
+    # publication -- Rich hard-wrapping it mid-word at whatever the
+    # terminal's column width happens to be would make that copy awkward
+    # (and, in the CLI test suite, made a substring assertion straddle an
+    # inserted newline).
+    console.print(f"[bold]{fishery.name}[/bold]")
+    console.print("[bold]Citation[/bold]")
+    console.print(c.text, soft_wrap=True)
+    console.print("\n[bold]Acknowledgement[/bold]")
+    console.print(c.acknowledgement, soft_wrap=True)
+    console.print("\n[bold]Disclaimer[/bold]")
+    console.print(c.disclaimer, soft_wrap=True)
+    console.print("\n[bold]Subset of data used[/bold]")
+    for line in c.subset_lines:
+        console.print(f"  {line}", soft_wrap=True)
+    if c.sources:
+        console.print(f"\n[dim]accessed via: {', '.join(c.sources)}[/dim]")
+    if c.accessed_date is None:
+        console.print(
+            "\n[yellow]No provenance is on record for this store -- data may predate "
+            "provenance tracking, or was written by a raw append call that bypassed "
+            "it. The access date above is a placeholder, not a real fact.[/yellow]"
+        )
 
 
 @flow_app.command("mesh")

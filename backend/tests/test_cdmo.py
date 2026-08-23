@@ -20,14 +20,20 @@ import pytest
 from tidescout.sources.cdmo import (
     ACCEPTED_FLAGS,
     FLAG_MEANINGS,
+    MET_ACCEPTED_FLAGS,
+    MET_FLAG_MEANINGS,
+    NIW_MET_STATION_COORDS_LONLAT,
     NIW_STATION_COORDS_LONLAT,
+    SOURCE_CDMO_MET,
+    SOURCE_CDMO_WQ,
     STATION_ALIASES,
     canonical_station,
     import_file,
     import_path,
     parse_cdmo_csv,
+    parse_cdmo_met_csv,
 )
-from tidescout.sources.ndbc import NdbcStore, Observation, parse_ocean
+from tidescout.sources.ndbc import MetObservation, NdbcStore, Observation, parse_ocean
 
 # The real header, verbatim from the real zip_ex example fetched from
 # https://s3.amazonaws.com/swmpexdata/zip_ex.zip (linked from SWMPr's
@@ -549,3 +555,372 @@ def test_poisoned_observation_mid_batch_does_not_corrupt_existing_history(tmp_pa
 
     after = store.read("WYSS1")
     assert after == before
+
+
+# =============================================================================
+# MET (meteorological) file support -- Task 10
+#
+# The reserve's own meteorological metadata PDF (fetched live 2026-08-23:
+# https://cdmo.baruch.sc.edu/waf/YearlyFiles/North%20Inlet%20Winyah%20Bay/
+# meteorological/metadata/niwmet01-12.24m.pdf) plus SWMPr's own
+# `R/param_names.R` (fetched live from github.com/fawda123/SWMPr) are what
+# the header/flag/coordinate fixtures below are built to -- see
+# `sources/cdmo.py`'s "MET FILE SUPPORT" docstring section for the full
+# derivation. No real MET export was available (same situation Task 9 was
+# in for water quality); every row below is synthetic.
+# =============================================================================
+
+# The real MET column order, per SWMPr's `param_names.R` MET list (atemp,
+# rh, bp, wspd, maxwspd, wdir, sdwdir, totpar, totprcp, cumprcp, totsorad),
+# title-cased to CDMO's export convention and paired with F_ flag columns
+# exactly like the WQ header above.
+MET_HEADER = (
+    "StationCode,isSWMP,DateTimeStamp,Historical,ProvisionalPlus,F_Record,"
+    "ATemp,F_ATemp,RH,F_RH,BP,F_BP,WSpd,F_WSpd,MaxWSpd,F_MaxWSpd,"
+    "Wdir,F_Wdir,SDWDir,F_SDWDir,TotPAR,F_TotPAR,TotPrcp,F_TotPrcp,"
+    "CumPrcp,F_CumPrcp,TotSoRad,F_TotSoRad,\n"
+)
+
+
+def _met_row(
+    station="niwolmet",
+    ts="08/22/2026 15:00",
+    atemp="28.4",
+    f_atemp="<0> ",
+    rh="71.2",
+    f_rh="<0> ",
+    bp="1015.3",
+    f_bp="<0> ",
+    wspd="3.4",
+    f_wspd="<0> ",
+    maxwspd="5.1",
+    f_maxwspd="<0> ",
+    wdir="182.0",
+    f_wdir="<0> ",
+    sdwdir="14.2",
+    f_sdwdir="<0> ",
+    totpar="612.0",
+    f_totpar="<0> ",
+    totprcp="0.0",
+    f_totprcp="<0> ",
+    cumprcp="",
+    f_cumprcp="<-1> ",
+    totsorad="285.0",
+    f_totsorad="<0> ",
+) -> str:
+    """One realistic MET row, defaults all "good" -- same fixture style as
+    the WQ `_row()` above."""
+    return (
+        f'"{station}   ","P",{ts},0,1,"",'
+        f"{atemp},{f_atemp},{rh},{f_rh},{bp},{f_bp},"
+        f"{wspd},{f_wspd},{maxwspd},{f_maxwspd},"
+        f"{wdir},{f_wdir},{sdwdir},{f_sdwdir},"
+        f"{totpar},{f_totpar},{totprcp},{f_totprcp},"
+        f'"{cumprcp}",{f_cumprcp},'
+        f"{totsorad},{f_totsorad},\n"
+    )
+
+
+# -- MET_FLAG_MEANINGS / MET_ACCEPTED_FLAGS ----------------------------------
+
+
+def test_met_flag_meanings_covers_the_documented_vocabulary():
+    assert set(MET_FLAG_MEANINGS) == {-5, -4, -3, -2, -1, 0, 1, 2, 3, 4, 5}
+
+
+def test_met_accepted_flags_excludes_reserved_flags_2_and_3():
+    """A real difference from WQ: the MET metadata PDF's own QAQC section
+    documents flags 2 and 3 as "Open - reserved for later flag" for MET
+    parameters (WQ uses them for depth-surface/barometric-correction
+    meanings that don't apply to weather data at all). Admitting them here
+    would invent a meaning CDMO has not assigned."""
+    assert 2 not in MET_ACCEPTED_FLAGS
+    assert 3 not in MET_ACCEPTED_FLAGS
+    assert MET_ACCEPTED_FLAGS == {0, 5}
+
+
+def test_met_flag_meanings_2_and_3_say_reserved_not_a_wq_meaning():
+    assert "reserved" in MET_FLAG_MEANINGS[2].lower()
+    assert "reserved" in MET_FLAG_MEANINGS[3].lower()
+
+
+def test_met_accepted_flags_still_excludes_suspect_and_rejected():
+    assert 1 not in MET_ACCEPTED_FLAGS
+    assert -3 not in MET_ACCEPTED_FLAGS
+    assert 0 in MET_ACCEPTED_FLAGS
+
+
+# -- station coordinates ------------------------------------------------------
+
+
+def test_niw_met_station_coords_has_exactly_one_station():
+    """NIW runs ONE weather station system-wide (Oyster Landing), unlike
+    the six WQ stations -- see the met metadata PDF's own "SWMP station
+    timeline" table."""
+    assert set(NIW_MET_STATION_COORDS_LONLAT) == {"NIWOLMET"}
+
+
+def test_met_station_position_is_near_but_not_identical_to_ol_wq_position():
+    """Same pier, independently surveyed sensor mounts -- the met metadata
+    PDF's own coordinates (33 20'57.85"N, 79 11'20.03"W) differ from the WQ
+    metadata PDF's Oyster Landing coordinates (33 20'57.70"N, 79 11'19.97"W)
+    by a few feet. Close enough to agree it's the same pier, not so close
+    that collapsing them onto one shared position would be honest."""
+    met_lon, met_lat = NIW_MET_STATION_COORDS_LONLAT["NIWOLMET"]
+    wq_lon, wq_lat = NIW_STATION_COORDS_LONLAT["NIWOLWQ"]
+    assert met_lon == pytest.approx(wq_lon, abs=0.001)
+    assert met_lat == pytest.approx(wq_lat, abs=0.001)
+    assert (met_lon, met_lat) != (wq_lon, wq_lat)
+
+
+# -- parse_cdmo_met_csv: header / structure -----------------------------------
+
+
+def test_met_missing_required_columns_raises():
+    with pytest.raises(ValueError, match="missing required column"):
+        parse_cdmo_met_csv("ATemp,F_ATemp\n28.0,<0>\n")
+
+
+def test_met_unknown_column_is_reported_not_silently_dropped():
+    text = MET_HEADER.replace(
+        "TotSoRad,F_TotSoRad,", "TotSoRad,F_TotSoRad,Battery,"
+    ) + _met_row().replace("\n", ",12.1\n")
+    result = parse_cdmo_met_csv(text)
+    assert "Battery" in result.unknown_columns
+
+
+def test_cumprcp_is_dropped_not_reported_as_unknown():
+    """No longer available via CDMO export (met metadata PDF remark 13.d) --
+    deliberately dropped, same treatment as WQ's cDepth/Level/cLevel."""
+    result = parse_cdmo_met_csv(MET_HEADER + _met_row())
+    assert "CumPrcp" not in result.unknown_columns
+
+
+# -- parse_cdmo_met_csv: values -----------------------------------------------
+
+
+def test_parses_a_good_met_row():
+    result = parse_cdmo_met_csv(MET_HEADER + _met_row())
+    sp = result.stations["niwolmet"]
+    assert sp.n_rows == 1
+    obs = sp.observations[0]
+    assert obs.air_temp_c == 28.4
+    assert obs.rh_pct == 71.2
+    assert obs.bp_mb == 1015.3
+    assert obs.wind_speed_ms == 3.4
+    assert obs.max_wind_speed_ms == 5.1
+    assert obs.wind_dir_deg == 182.0
+    assert obs.wind_dir_sd_deg == 14.2
+    assert obs.par_mmol_m2 == 612.0
+    assert obs.precip_mm == 0.0
+    assert obs.solar_rad_wm2 == 285.0
+
+
+def test_met_timestamp_is_fixed_est_converted_to_utc():
+    result = parse_cdmo_met_csv(MET_HEADER + _met_row(ts="08/22/2026 15:00"))
+    obs = result.stations["niwolmet"].observations[0]
+    assert obs.ts == datetime(2026, 8, 22, 20, 0, tzinfo=UTC)
+
+
+def test_met_flag_0_and_5_admit_the_value():
+    result = parse_cdmo_met_csv(MET_HEADER + _met_row(atemp="30.0", f_atemp="<5> "))
+    assert result.stations["niwolmet"].observations[0].air_temp_c == 30.0
+
+
+def test_met_flag_1_suspect_rejects_the_value():
+    result = parse_cdmo_met_csv(MET_HEADER + _met_row(wspd="99.0", f_wspd="<1> "))
+    sp = result.stations["niwolmet"]
+    assert sp.observations[0].wind_speed_ms is None
+    assert sp.n_rejected_by_flag["wspd"] == 1
+
+
+def test_met_flag_2_is_rejected_unlike_wq():
+    """The load-bearing MET-vs-WQ difference under test."""
+    result = parse_cdmo_met_csv(MET_HEADER + _met_row(bp="1099.0", f_bp="<2> "))
+    sp = result.stations["niwolmet"]
+    assert sp.observations[0].bp_mb is None
+    assert sp.n_rejected_by_flag["bp"] == 1
+
+
+def test_met_flag_3_is_rejected_unlike_wq():
+    result = parse_cdmo_met_csv(MET_HEADER + _met_row(rh="150.0", f_rh="<3> "))
+    sp = result.stations["niwolmet"]
+    assert sp.observations[0].rh_pct is None
+    assert sp.n_rejected_by_flag["rh"] == 1
+
+
+def test_met_groups_rows_by_their_own_stationcode():
+    text = MET_HEADER + _met_row(station="niwolmet")
+    result = parse_cdmo_met_csv(text)
+    assert set(result.stations) == {"niwolmet"}
+
+
+def test_met_bad_timestamp_row_is_dropped_and_counted_not_fatal():
+    text = MET_HEADER + _met_row(ts="not-a-date") + _met_row(ts="08/22/2026 16:00")
+    result = parse_cdmo_met_csv(text)
+    sp = result.stations["niwolmet"]
+    assert sp.n_bad_timestamp == 1
+    assert len(sp.observations) == 1
+
+
+def test_met_unparseable_value_cell_is_counted_not_fatal():
+    result = parse_cdmo_met_csv(MET_HEADER + _met_row(wspd="abc", f_wspd="<0> "))
+    sp = result.stations["niwolmet"]
+    assert sp.observations[0].wind_speed_ms is None
+    assert sp.n_value_unparseable["wspd"] == 1
+    assert sp.observations[0].air_temp_c == 28.4  # rest of the row still parsed
+
+
+# -- import_file: routes to the MET store path --------------------------------
+
+
+def test_import_file_detects_a_met_file_and_writes_into_met_observations(tmp_path):
+    path = tmp_path / "niwolmet2026.csv"
+    path.write_text(MET_HEADER + _met_row())
+    store = NdbcStore(tmp_path / "s.sqlite")
+
+    report = import_file(path, store)
+
+    assert store.count_met("NIWOLMET") == 1
+    assert store.count("NIWOLMET") == 0  # never written to the WQ table
+    assert report.stations[0].canonical == "NIWOLMET"
+    assert report.stations[0].raw_code == "niwolmet"
+    assert report.stations[0].n_new == 1
+
+
+def test_reimporting_the_same_met_file_adds_nothing(tmp_path):
+    path = tmp_path / "niwolmet2026.csv"
+    path.write_text(MET_HEADER + _met_row())
+    store = NdbcStore(tmp_path / "s.sqlite")
+
+    import_file(path, store)
+    report2 = import_file(path, store)
+
+    assert store.count_met("NIWOLMET") == 1
+    assert report2.stations[0].n_new == 0
+
+
+def test_bad_met_header_raises_and_does_not_touch_the_store(tmp_path):
+    path = tmp_path / "broken_met.csv"
+    path.write_text("ATemp,F_ATemp\n28.0,<0>\n")
+    store = NdbcStore(tmp_path / "s.sqlite")
+
+    with pytest.raises(ValueError, match="missing required column"):
+        import_file(path, store)
+
+    assert store.count_met("NIWOLMET") == 0
+
+
+def test_import_path_directory_with_mixed_wq_and_met_files(tmp_path):
+    """An importer that chokes on or ignores MET files wastes the one human
+    action this whole data path depends on -- the central proof this task
+    asked for."""
+    d = tmp_path / "cdmo"
+    d.mkdir()
+    (d / "niwwswq2026.csv").write_text(HEADER + _row(sal="15.2"))
+    (d / "niwolmet2026.csv").write_text(MET_HEADER + _met_row())
+    store = NdbcStore(tmp_path / "s.sqlite")
+
+    reports = import_path(d, store)
+
+    assert len(reports) == 2
+    assert store.count("WYSS1") == 1
+    assert store.count_met("NIWOLMET") == 1
+
+
+def test_import_path_zip_with_mixed_wq_and_met_files(tmp_path):
+    zip_path = tmp_path / "cdmo_export.zip"
+    with zipfile.ZipFile(zip_path, "w") as zf:
+        zf.writestr("niwwswq2026.csv", HEADER + _row(sal="16.5"))
+        zf.writestr("niwolmet2026.csv", MET_HEADER + _met_row())
+    store = NdbcStore(tmp_path / "s.sqlite")
+
+    reports = import_path(zip_path, store)
+
+    assert len(reports) == 2
+    assert store.count("WYSS1") == 1
+    assert store.count_met("NIWOLMET") == 1
+
+
+# -- MET dedupe against a pre-existing store, and atomicity -------------------
+
+
+def test_met_import_file_dedupes_across_a_second_pass(tmp_path):
+    store = NdbcStore(tmp_path / "s.sqlite")
+    path = tmp_path / "niwolmet2026.csv"
+    path.write_text(
+        MET_HEADER
+        + _met_row(ts="08/22/2026 15:00")
+        + _met_row(ts="08/22/2026 15:15")
+    )
+
+    r1 = import_file(path, store)
+    r2 = import_file(path, store)
+
+    assert sum(s.n_new for s in r1.stations) == 2
+    assert sum(s.n_new for s in r2.stations) == 0
+    assert store.count_met("NIWOLMET") == 2
+
+
+def test_poisoned_met_observation_mid_batch_does_not_corrupt_existing_history(tmp_path):
+    """Same standard Task 8/9 held the WQ path to, exercised for MET
+    through `import_file`'s own call path."""
+    store = NdbcStore(tmp_path / "s.sqlite")
+    path = tmp_path / "niwolmet2026.csv"
+    path.write_text(MET_HEADER + _met_row(ts="08/22/2026 15:00"))
+    import_file(path, store)
+    before = store.read_met("NIWOLMET")
+    assert len(before) == 1
+
+    poisoned = MetObservation(
+        ts=datetime(2026, 8, 22, 21, 0, tzinfo=UTC), air_temp_c=object(), rh_pct=60.0,
+        bp_mb=1013.0, wind_speed_ms=2.0, max_wind_speed_ms=3.0, wind_dir_deg=90.0,
+        wind_dir_sd_deg=5.0, par_mmol_m2=300.0, precip_mm=0.0, solar_rad_wm2=150.0,
+    )
+    with pytest.raises(sqlite3.ProgrammingError):
+        store.append_met("NIWOLMET", [poisoned])
+
+    after = store.read_met("NIWOLMET")
+    assert after == before
+
+
+# -- provenance is recorded through the CDMO import path ----------------------
+
+
+def test_cdmo_wq_import_records_provenance(tmp_path):
+    store = NdbcStore(tmp_path / "s.sqlite")
+    path = tmp_path / "niwwswq2026.csv"
+    path.write_text(HEADER + _row(sal="15.2"))
+
+    import_file(path, store)
+
+    recs = store.provenance()
+    assert len(recs) == 1
+    assert recs[0].source == SOURCE_CDMO_WQ
+    assert recs[0].stations == ("WYSS1",)
+    assert recs[0].n_new == 1
+
+
+def test_cdmo_met_import_records_provenance(tmp_path):
+    store = NdbcStore(tmp_path / "s.sqlite")
+    path = tmp_path / "niwolmet2026.csv"
+    path.write_text(MET_HEADER + _met_row())
+
+    import_file(path, store)
+
+    recs = store.provenance()
+    assert len(recs) == 1
+    assert recs[0].source == SOURCE_CDMO_MET
+    assert recs[0].stations == ("NIWOLMET",)
+    assert recs[0].n_new == 1
+
+
+def test_cdmo_import_failure_records_no_provenance(tmp_path):
+    store = NdbcStore(tmp_path / "s.sqlite")
+    path = tmp_path / "broken.csv"
+    path.write_text("Temp,F_Temp\n30.0,<0>\n")
+
+    with pytest.raises(ValueError):
+        import_file(path, store)
+
+    assert store.provenance() == []

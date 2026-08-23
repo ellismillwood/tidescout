@@ -63,6 +63,26 @@ def _row(station, ts, sal, f_sal="<0> "):
     )
 
 
+MET_HEADER = (
+    "StationCode,isSWMP,DateTimeStamp,Historical,ProvisionalPlus,F_Record,"
+    "ATemp,F_ATemp,RH,F_RH,BP,F_BP,WSpd,F_WSpd,MaxWSpd,F_MaxWSpd,"
+    "Wdir,F_Wdir,SDWDir,F_SDWDir,TotPAR,F_TotPAR,TotPrcp,F_TotPrcp,"
+    "CumPrcp,F_CumPrcp,TotSoRad,F_TotSoRad,\n"
+)
+
+
+def _met_row(station, ts):
+    return (
+        f'"{station}   ","P",{ts},0,1,"",'
+        f"28.4,<0> ,71.2,<0> ,1015.3,<0> ,"
+        f"3.4,<0> ,5.1,<0> ,"
+        f"182.0,<0> ,14.2,<0> ,"
+        f"612.0,<0> ,0.0,<0> ,"
+        f'"",<-1> ,'
+        f"285.0,<0> ,\n"
+    )
+
+
 def _patch_data_dir(monkeypatch, tmp_path):
     from tidescout import paths
 
@@ -257,3 +277,60 @@ def test_unparseable_cells_and_bad_timestamps_are_surfaced_not_folded_into_new_c
     assert "unreadable timestamp" in out
     assert "unparseable value" in out and "sal:1" in out
     assert "unparseable flag" in out and "sal:1" in out
+
+
+# -- MET files: the central proof this task asked for -------------------
+
+
+def test_met_file_is_imported_and_reported_separately_from_wq(monkeypatch, tmp_path):
+    """An importer that chokes on or silently ignores MET files wastes the
+    one human action this whole data path depends on -- proved here via
+    the CLI end to end, not just `sources.cdmo` directly."""
+    _patch_data_dir(monkeypatch, tmp_path)
+    _stub_distances(monkeypatch, {"WYSS1": (15.02, 9.5)})
+
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    (export_dir / "niwwswq2026.csv").write_text(
+        HEADER + _row("niwwswq", "08/22/2026 15:00", "15.2")
+    )
+    (export_dir / "niwolmet2026.csv").write_text(
+        MET_HEADER + _met_row("niwolmet", "08/22/2026 15:00")
+    )
+
+    result = runner.invoke(
+        app, ["salinity", "import-cdmo", "winyah-bay", "--path", str(export_dir)], env=WIDE
+    )
+
+    assert result.exit_code == 0, result.exception or result.stdout
+    out = plain(result)
+    assert "2 file(s) read from" in out
+    wyss1_lines = [ln for ln in out.splitlines() if "WYSS1" in ln]
+    assert wyss1_lines, out
+    assert "NIWOLMET" in out
+    assert "meteorolog" in out.lower()
+
+    from tidescout.sources.ndbc import default_store
+
+    store = default_store("winyah-bay")
+    assert store.count("WYSS1") == 1
+    assert store.count_met("NIWOLMET") == 1
+
+
+def test_met_only_import_does_not_break_the_wq_table(monkeypatch, tmp_path):
+    _patch_data_dir(monkeypatch, tmp_path)
+
+    export_dir = tmp_path / "export"
+    export_dir.mkdir()
+    (export_dir / "niwolmet2026.csv").write_text(
+        MET_HEADER + _met_row("niwolmet", "08/22/2026 15:00")
+    )
+
+    result = runner.invoke(
+        app, ["salinity", "import-cdmo", "winyah-bay", "--path", str(export_dir)], env=WIDE
+    )
+
+    assert result.exit_code == 0, result.exception or result.stdout
+    out = plain(result)
+    assert "NIWOLMET" in out
+    assert "0 in-domain station(s)" in out  # the WQ table's own summary, unaffected
