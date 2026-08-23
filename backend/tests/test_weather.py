@@ -37,7 +37,14 @@ def _fixture(n_hours: int) -> dict:
 
 
 @respx.mock
-def test_fetch_weather_forecast(tmp_path):
+def test_fetch_weather_forecast(tmp_path, monkeypatch):
+    # Pin "today", as test_archive_cutoff_uses_fishery_local_today already
+    # does. Without it this test asserted that a HARDCODED date routes to the
+    # forecast API, which was true only while the wall clock sat within
+    # ARCHIVE_CUTOFF_DAYS of 2026-08-15; past that the request correctly went
+    # to the archive host, which this test does not mock, and it began failing
+    # on a calendar roll rather than on any code change.
+    monkeypatch.setattr(weather, "_today", lambda tz: date(2026, 8, 15))
     route = respx.get(url__regex=r"https://api\.open-meteo\.com/v1/forecast.*").mock(
         return_value=Response(200, json=_fixture(48))
     )

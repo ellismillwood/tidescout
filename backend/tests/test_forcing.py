@@ -80,9 +80,56 @@ def test_inflow_total_still_matches_the_composite_bucket():
     for bucket, cfs in (
         ("low", f.discharge_buckets.low_below_cfs),
         ("high", f.discharge_buckets.high_above_cfs),
+        ("freshet", f.discharge_buckets.freshet_cfs),
     ):
         total = sum(forcing.river_inflow_m3s(f, bucket).values())
         assert total == pytest.approx(cfs * forcing.CFS_TO_M3S, rel=1e-9)
+
+
+def test_the_freshet_bucket_forces_the_observed_maximum():
+    """The regime the library is built at must be the flow it is indexed by.
+
+    Pinned against the measured probe rather than against the config alone:
+    `data/winyah-bay/flow-variant-freshet-split/mean_high` was run at
+    22,996 cfs with the 78/13/8 split and recorded Pee Dee 509.87 m3/s. If
+    this drifts, the rebuilt library is indexed to a flow it was not run at.
+    """
+    f = load_fishery("winyah-bay")
+    inflows = forcing.river_inflow_m3s(f, "freshet")
+    assert sum(inflows.values()) == pytest.approx(22996.0 * forcing.CFS_TO_M3S, rel=1e-9)
+    assert inflows["Pee Dee"] == pytest.approx(509.8686, abs=1e-3)
+    # 3.65x the `high` regime -- the extrapolation this bucket removes.
+    high = sum(forcing.river_inflow_m3s(f, "high").values())
+    assert sum(inflows.values()) / high == pytest.approx(3.65, abs=0.01)
+
+
+def test_the_bucket_to_cfs_map_is_shared_with_the_runtime_lookup():
+    """One source of truth, not two literals that can drift.
+
+    `river_inflow_m3s` decides what the library is BUILT at; `bucket_flows`
+    decides what the runtime READS it as. When these were separate dicts a
+    typo in either would have indexed every lookup to a flow the water was
+    never run at, with nothing anywhere to catch it.
+    """
+    from tidescout.engine.flow import bucket_flows
+
+    f = load_fishery("winyah-bay")
+    for bucket, cfs in bucket_flows(f.discharge_buckets).items():
+        total = sum(forcing.river_inflow_m3s(f, bucket).values())
+        assert total == pytest.approx(cfs * forcing.CFS_TO_M3S, rel=1e-9)
+
+
+def test_an_unmeasured_freshet_names_the_config_field_it_needs():
+    """A fishery that has not measured a freshet must fail loudly and usefully.
+
+    "unknown bucket" alone would read as a typo and send whoever hits it
+    looking in the wrong place; the bucket name is fine, the fishery just has
+    no flow to force it at.
+    """
+    f = load_fishery("winyah-bay")
+    f.discharge_buckets.freshet_cfs = None
+    with pytest.raises(ValueError, match="freshet_cfs"):
+        forcing.river_inflow_m3s(f, "freshet")
 
 
 def test_inflow_shares_are_rejected_when_they_do_not_sum_to_one():

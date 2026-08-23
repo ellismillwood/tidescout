@@ -178,6 +178,27 @@ discharge_buckets:
   # low threshold, and 25000 is above the observed max).
   low_below_cfs: 2774
   high_above_cfs: 6292
+  # NOT a bucket edge -- the flow the `freshet` regime is simulated AT, and the
+  # observed maximum of the same 365-day composite record as the two edges
+  # above (min 1232 / p25 2774 / median 3866 / p75 6292 / max 22996 cfs).
+  #
+  # Added 2026-08-23 (Plan 4 Task 7). Before it, the simulated axis stopped at
+  # the p75 while real freshets run 3.65x past it, so `blend_regimes` clamped
+  # every flow above 6292 cfs onto the `high` regime. MEASURED, not assumed:
+  # a full mean_high run at 22996 cfs differenced against production mean_high
+  # over 26 phases and 5.48M wet-centroid samples moves the velocity field by
+  # 17.20% of per-phase p99 speed -- 22x the 0.77% floor of the
+  # southern-approach variant, a change known to be negligible -- and by 0.054
+  # m/s at Georgetown against flows of ~1 m/s. Reproduce with
+  # `backend/tools/compare_variant.py`.
+  #
+  # This does NOT contradict Plan 3's finding that the discharge axis barely
+  # moves speed. That was measured across 2774 -> 6292 cfs, a 2.3x span
+  # entirely inside the p25-p75 band. The axis was never weak; it was too
+  # short to show its own effect. RANGE_STEP_COST/DISCHARGE_STEP_COST stay as
+  # they are -- see engine/flow.py for what the fourth bucket does to their
+  # tie-breaking, which is now a tie rather than a win.
+  freshet_cfs: 22996
 salinity:
   # CALIBRATION ATTEMPTED AND DECLINED 2026-08-22 (Task 5). Every value below
   # is still THEORETICAL, not fitted. `tidescout salinity calibrate` runs and

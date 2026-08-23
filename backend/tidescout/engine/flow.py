@@ -8,7 +8,15 @@ function of its arguments so it can be property-tested cheaply.
 import numpy as np
 
 RANGE_ORDER = ["neap", "mean", "spring"]
-DISCHARGE_ORDER = ["low", "med", "high"]
+# `freshet` is the observed maximum of the composite record, not a fourth
+# evenly-spaced step: on Winyah the four flows are 2,774 / 4,533 / 6,292 /
+# 22,996 cfs, so the last gap is nine times the first two. It exists because
+# the axis used to stop at the p75 while real freshets run 3.65x past it, and
+# a 22,996 cfs run differs from `high` by 17.20% of p99 speed -- 22x the
+# floor of a change known to be negligible. It is optional per fishery: a
+# fishery with no `discharge_buckets.freshet_cfs` has no such regime, and
+# `bucket_flows` omits it rather than inventing a flow for it.
+DISCHARGE_ORDER = ["low", "med", "high", "freshet"]
 
 # Cost of substituting one bucket step on each axis, when the exact regime is
 # missing. These are deliberately NOT equal.
@@ -22,9 +30,30 @@ DISCHARGE_ORDER = ["low", "med", "high"]
 # then breaks ties alphabetically) will happily swap the range bucket to
 # preserve discharge -- exactly backwards.
 #
-# 3 is the smallest integer that makes one range step cost more than the
-# widest possible discharge gap (2), which is the property that matters:
-# never trade range for discharge.
+# 3 was the smallest integer that made one range step cost more than the
+# widest possible discharge gap, which was 2 on a three-bucket axis: never
+# trade range for discharge.
+#
+# THAT INVARIANT IS NOW A TIE, NOT A WIN, and the honest thing is to say so
+# rather than leave the claim above standing. `freshet` makes the widest
+# discharge gap 3 (low <-> freshet), which EQUALS RANGE_STEP_COST, so
+# select_regime("spring", "low", {"mean_low", "spring_freshet"}) scores both
+# candidates at 3 and falls through to the alphabetical tiebreak.
+#
+# Left at 3 deliberately, on two grounds. First, the tie is only reachable in
+# a PARTIAL library -- with all twelve regimes present the exact match always
+# wins and no cost is ever computed. Second, and more substantively, the
+# premise that made "never trade range for discharge" obviously right no
+# longer holds at the top of the axis: it was measured across 2,774-6,292
+# cfs, where a discharge step moves domain-mean depth ~1 cm, but a low <->
+# freshet step is an 8.3x change in discharge that moves the velocity field
+# by 17.20% of p99 speed. Trading three discharge steps to keep the range
+# bucket is not clearly the better answer any more, so a tie is arguably the
+# correct expression of the uncertainty. Raising this to 4 would assert the
+# opposite on evidence that does not exist.
+#
+# `test_a_three_step_discharge_gap_now_ties_one_range_step` pins the resulting
+# behaviour so it cannot change silently.
 RANGE_STEP_COST = 3
 DISCHARGE_STEP_COST = 1
 
@@ -81,15 +110,27 @@ def select_regime(
 def bucket_flows(buckets) -> dict[str, float]:
     """The cfs each simulated discharge bucket actually represents.
 
-    These are the values `forcing.river_inflow_m3s` injects, not the bucket
-    EDGES: 'med' is the midpoint of low and high, which is 4,533 cfs and not
-    the record's median of 3,866.
+    THE single source of truth for these values: `forcing.river_inflow_m3s`
+    calls this to decide what to inject at the ANUGA boundary, so the flow the
+    library is indexed by and the flow it was built at cannot drift apart.
+
+    These are the values injected, not the bucket EDGES: 'med' is the midpoint
+    of low and high, which is 4,533 cfs and not the record's median of 3,866.
+
+    'freshet' is present only when the fishery measured one. It is the
+    observed maximum of the composite record rather than a midpoint or an
+    edge, so it is read straight off `freshet_cfs`. Keys come out in
+    DISCHARGE_ORDER, which callers rely on for a deterministic tiebreak.
     """
-    return {
+    flows = {
         "low": buckets.low_below_cfs,
         "med": 0.5 * (buckets.low_below_cfs + buckets.high_above_cfs),
         "high": buckets.high_above_cfs,
     }
+    freshet = getattr(buckets, "freshet_cfs", None)
+    if freshet is not None:
+        flows["freshet"] = freshet
+    return flows
 
 
 def blend_regimes(
@@ -97,11 +138,17 @@ def blend_regimes(
 ) -> tuple[list[tuple[str, float]], bool]:
     """Weights over regimes bracketing `cfs` on the discharge axis.
 
-    The library holds three discharge values spanning 2,774-6,292 cfs while the
-    observed record runs 1,232-22,996, so snapping to the nearest bucket throws
-    away most of the axis. Blending recovers it within the simulated span --
-    justified by Plan 3's measurement that depth rises monotonically and
-    near-linearly with discharge at every inflow.
+    Snapping to the nearest bucket throws away most of the axis, so this
+    interpolates along it -- justified by Plan 3's measurement that depth rises
+    monotonically and near-linearly with discharge at every inflow.
+
+    With `freshet` simulated the four bucket flows span 2,774-22,996 cfs
+    against an observed record of 1,232-22,996, so the ramp now covers the
+    whole upper record instead of stopping at the p75. The spacing is very
+    uneven (1,759 / 1,759 / 16,704 cfs), which is fine here because the
+    bracket is chosen by cfs and the weight is linear in cfs -- but it does
+    mean the top interval interpolates across a much larger jump in forcing
+    than the two below it.
 
     The RANGE axis is deliberately not blended. One range step rescales the
     entire tidal forcing (~15 cm of amplitude on a 1.10 m mean range) against a
@@ -109,11 +156,31 @@ def blend_regimes(
     being traded away, and a blend that crossed it would be the same mistake.
 
     Outside the simulated span this CLAMPS and returns True. Extrapolating a
-    shallow-water solution 3.7x past any flow it was run at would be inventing
-    data, and the caller needs to know the difference.
+    shallow-water solution past any flow it was run at would be inventing data,
+    and the caller needs to know the difference.
     """
     flows = bucket_flows(buckets)
-    order = [b for b in DISCHARGE_ORDER if f"{range_bucket}_{b}" in available]
+    # A bucket only joins the ramp if BOTH a regime exists for it and the
+    # fishery says what flow that regime represents.
+    order = [b for b in DISCHARGE_ORDER if b in flows and f"{range_bucket}_{b}" in available]
+    # ...and if a regime exists whose flow is NOT configured, that is a
+    # library/config mismatch, not something to quietly route around. Dropping
+    # it would silently clamp the axis back to `high` and throw away the very
+    # regimes a rebuild was spent on -- the failure mode this whole task
+    # exists to remove. Junk names in `available` are still ignored, exactly
+    # as select_regime ignores them; only a RECOGNISED bucket is an error.
+    unpriced = [
+        b
+        for b in DISCHARGE_ORDER
+        if b not in flows and f"{range_bucket}_{b}" in available
+    ]
+    if unpriced:
+        raise ValueError(
+            f"the flow library has {range_bucket} regimes at discharge buckets "
+            f"{unpriced} but the fishery's discharge_buckets does not say what "
+            "flow they were run at -- add the matching *_cfs value (e.g. "
+            "freshet_cfs) rather than leaving the regime unusable"
+        )
     if not order:
         # No regime at this range at all: fall back to the existing nearest-
         # regime logic, which is allowed to cross the range axis as a last resort.
@@ -124,7 +191,10 @@ def blend_regimes(
         # discharge distance (e.g. cfs=100 with {"neap_high", "spring_low"}
         # available would pick neap_high, the high-discharge regime, over the
         # discharge-correct spring_low).
-        nearest = min(DISCHARGE_ORDER, key=lambda d: abs(cfs - flows[d]))
+        # Ranges over `flows`, not DISCHARGE_ORDER: a bucket with no
+        # configured flow has no cfs to measure a distance against. `flows`
+        # is built in DISCHARGE_ORDER, so the tiebreak stays deterministic.
+        nearest = min(flows, key=lambda d: abs(cfs - flows[d]))
         name, _ = select_regime(range_bucket, nearest, available)
         return [(name, 1.0)], True
 

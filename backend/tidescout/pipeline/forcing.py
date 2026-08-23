@@ -11,6 +11,7 @@ import math
 from collections.abc import Callable
 from datetime import datetime
 
+from tidescout.engine.flow import DISCHARGE_ORDER, bucket_flows
 from tidescout.engine.tides import TideEvent, _cosine_height
 from tidescout.models import Fishery
 
@@ -83,13 +84,27 @@ def river_inflow_m3s(fishery: Fishery, bucket: str) -> dict[str, float]:
     gauge `weight`, which serves the different job of building the composite.
     The split (and its guards against partial or mis-summed authorship) lives
     on `Fishery.branch_shares()`, shared with the runtime salinity path.
+
+    The bucket -> cfs map is `engine.flow.bucket_flows` rather than a copy of
+    it. This function decides what the library is BUILT at and bucket_flows
+    decides what the runtime READS it as; when they were two literals they
+    could disagree by a typo and every lookup would then be indexed to a flow
+    the water was never run at, with nothing anywhere to catch it.
     """
-    b = fishery.discharge_buckets
-    composite_cfs = {
-        "low": b.low_below_cfs,
-        "med": 0.5 * (b.low_below_cfs + b.high_above_cfs),
-        "high": b.high_above_cfs,
-    }[bucket]
+    flows = bucket_flows(fishery.discharge_buckets)
+    if bucket not in flows:
+        known = ", ".join(flows)
+        extra = ""
+        if bucket in DISCHARGE_ORDER:
+            # A real bucket the fishery just hasn't measured -- name the fix,
+            # because "unknown bucket" would read as a typo and send whoever
+            # hits it looking in the wrong place entirely.
+            extra = (
+                f" -- {bucket!r} is a recognised bucket but this fishery has no "
+                f"discharge_buckets.{bucket}_cfs, so there is no flow to force it at"
+            )
+        raise ValueError(f"unknown discharge bucket {bucket!r}; have {known}{extra}")
+    composite_cfs = flows[bucket]
 
     shares = fishery.branch_shares()
     return {

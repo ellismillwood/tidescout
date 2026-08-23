@@ -48,6 +48,20 @@ class Stations(BaseModel):
 class DischargeBuckets(BaseModel):
     low_below_cfs: float
     high_above_cfs: float
+    # The observed maximum of the composite record -- the flow the `freshet`
+    # regime is simulated at, NOT a bucket edge like the two above. Optional
+    # because it is a per-fishery measurement and there is no defensible
+    # default: guessing one would put a simulated regime at a discharge this
+    # river system has never produced. A fishery that leaves it unset simply
+    # has no freshet bucket, and `engine.flow.bucket_flows` omits it.
+    #
+    # Winyah's axis without it spans 2,774-6,292 cfs against an observed
+    # 1,232-22,996, so the top of the simulated range sat at the p75 while
+    # real freshets run 3.65x past it. That extrapolation is not small:
+    # differencing a 22,996 cfs run against production `mean_high` moves the
+    # velocity field by 17.20% (per-phase p99), 22x the 0.77% floor of a
+    # change known to be negligible.
+    freshet_cfs: float | None = None
 
 
 class Climatology(BaseModel):
