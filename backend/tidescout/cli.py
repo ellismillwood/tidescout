@@ -406,7 +406,12 @@ def salinity_calibrate(
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
-    table = Table(title=f"{fishery.name} — 00480 sensors over the last {days} days")
+    table = Table(
+        title=(
+            f"{fishery.name} — salinity sensors "
+            f"(USGS 00480: last {days} days; NERRS store: full held history)"
+        )
+    )
     for col in ("site", "along-estuary km", "snap gap m", "days", "ppt min", "ppt max", "used"):
         table.add_column(col)
     for r in data.sites:
@@ -425,9 +430,10 @@ def salinity_calibrate(
         console.print(f"discharge paired over {data.day_span[0]} .. {data.day_span[1]}")
     console.print(
         f"{len(data.observations)} salinity observations, "
-        f"{len(data.swings)} tidal-swing observations "
-        f"(swings from the last {data.swing_days} days — USGS keeps instantaneous "
-        "values for 120)"
+        f"{len(data.swings)} tidal-swing observations. USGS swings cover the last "
+        f"{data.swing_days} days (that service keeps instantaneous values for 120); "
+        "NERRS-store swings cover everything the store holds, since it accumulates "
+        "rather than serving a rolling window."
     )
 
     try:

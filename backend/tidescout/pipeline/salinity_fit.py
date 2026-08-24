@@ -67,6 +67,7 @@ statement about the data, not about the optimizer.
 from collections.abc import Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
+from zoneinfo import ZoneInfo
 
 import numpy as np
 from scipy.optimize import least_squares
@@ -92,6 +93,17 @@ INTERIOR_BAND = (0.10, 0.90)
 # resolve a power law in discharge: a factor of 2 is already a thin lever on
 # an exponent, and anything less is arithmetic rather than evidence.
 MIN_CFS_RATIO = 2.0
+
+# Readings a day needs before its mean and range are usable. A full day at
+# 15-minute cadence is 96; 40 is ~10 hours, most of a 12.42 h tidal cycle.
+# Below that the day is not merely thinner, it is BIASED -- see
+# `daily_means_and_swings`.
+MIN_DAILY_READINGS = 40
+
+# Water-sensor kinds whose history lives in the local NERRS store rather than
+# behind a live parameter feed. Both routes write the same table (cdmo.py
+# aliases `niwwswq` onto WYSS1), so one reader covers them.
+_STORE_KINDS = ("ndbc", "cdmo")
 
 # USGS serves INSTANTANEOUS values for 120 days. Past that the IV endpoint
 # answers 301 to a different host, and httpx does not follow redirects by
@@ -543,6 +555,7 @@ def build_site_record(
     distance_km: float,
     snap_gap_m: float,
     max_snap_m: float,
+    off_axis: bool = False,
 ) -> SiteRecord:
     """One sensor's admission decision, and the REASON, which must be the
     real one.
@@ -555,7 +568,16 @@ def build_site_record(
     therefore tested FIRST, before anything that depends on having asked.
     """
     ppt = [v for _, v in rows]
-    if not located:
+    if off_axis:
+        # Tested BEFORE `located`, and before anything about data, because
+        # this exclusion holds however good the station is: it is about
+        # which estuary the reading belongs to, not whether it exists. A
+        # station reporting perfectly at a well-known position is still
+        # unusable here if the coordinate cannot place it -- and reporting
+        # "no history" for it would be a false explanation of a real
+        # modelling decision.
+        note = "off the salt-intrusion axis -- a separate branch the 1-D coordinate cannot place"
+    elif not located:
         note = "USGS gave no coordinates for this site"
     elif not np.isfinite(distance_km):
         note = "no water route to the sea from the nearest in-domain cell"
@@ -686,25 +708,63 @@ class CalibrationInput:
     swing_days: int = 0
 
 
-def collect_observations(
-    slug: str,
-    fishery: Fishery,
-    cache,
-    days: int = 90,
-    max_snap_m: float = 500.0,
-) -> CalibrationInput:
-    """Real USGS observations, paired with distance and composite discharge.
+def daily_means_and_swings(
+    series: Sequence[tuple[datetime, float]],
+    tz: ZoneInfo,
+    min_readings: int = MIN_DAILY_READINGS,
+) -> tuple[dict[date, float], dict[date, float]]:
+    """15-minute readings -> that day's mean and its within-day range.
 
-    Only USGS `00480` -- specific conductance (`00095`) is a different
-    quantity and is not interchangeable with it. CO-OPS supplies no ocean
-    end-member (Task 4 verified this live against every station within
-    250 km), so `ocean_ppt` is held rather than fitted; nothing here fetches
-    one, and no default silently stands in for one.
+    LOCAL days, not UTC. The store keeps UTC; grouping on the UTC date would
+    push the four hours after 20:00 local into the next day, splitting every
+    day's tidal cycle across two means and pairing each half with the wrong
+    day's discharge.
 
-    A site further than `max_snap_m` from any in-domain cell is recorded and
-    EXCLUDED, not quietly snapped: its along-estuary distance would be the
-    nearest cell's, which is a different place on the estuary.
+    Both outputs are gated on the SAME reading count, for two reasons that
+    point the same way. A partial day understates the RANGE, which would drag
+    the fitted excursion down. It also biases the MEAN, because these readings
+    are tidal: a handful of samples landing on one phase is offset by up to
+    the full swing. Winyah's measured daily swing is 11.9 ppt median, so that
+    bias is larger than the entire signal the fit is trying to resolve.
     """
+    by_day: dict[date, list[float]] = {}
+    for t, v in series:
+        by_day.setdefault(t.astimezone(tz).date(), []).append(v)
+    means, swings = {}, {}
+    for day, values in by_day.items():
+        if len(values) < min_readings:
+            continue
+        means[day] = float(np.mean(values))
+        swings[day] = float(max(values) - min(values))
+    return means, swings
+
+
+def _open_store(slug: str):
+    from tidescout.sources.ndbc import default_store
+
+    return default_store(slug)
+
+
+def _store_distances(
+    slug: str, fishery: Fishery, sites: Sequence[str]
+) -> dict[str, tuple[float, float]]:
+    """Along-estuary distance for each store station, from its own surveyed
+    position -- no discovery call, because these are not USGS sites and
+    nothing serves their coordinates as data."""
+    from tidescout.sources import cdmo
+
+    known = {
+        s: cdmo.NIW_STATION_COORDS_LONLAT[s]
+        for s in sites
+        if s in cdmo.NIW_STATION_COORDS_LONLAT
+    }
+    return site_distances_km(slug, fishery, known) if known else {}
+
+
+def _usgs_inputs(slug, fishery, cache, days, start, end, max_snap_m):
+    """The USGS half: salinity daily means, composite discharge, the sensors
+    and their distances. Unchanged in behaviour from before the store
+    existed -- it is still the only source with a live 00480 feed."""
     from tidescout.sources import discovery, usgs
 
     sensors = [
@@ -712,44 +772,139 @@ def collect_observations(
         for w in fishery.stations.water
         if w.kind == "usgs" and usgs.PARAM_SALINITY in w.params
     ]
-    if not sensors:
-        return CalibrationInput([], [], [], days, None)
-    known = {s.id: (s.lon, s.lat) for s in discovery.find_usgs_sites(fishery, cache, "00480")}
-    wanted = {w.station: known[w.station] for w in sensors if w.station in known}
-    distances = site_distances_km(slug, fishery, wanted) if wanted else {}
-
-    end = datetime.now(UTC).date()
-    start = end - timedelta(days=days)
-    sites = sorted(wanted)
-    salinity_daily = usgs.fetch_daily(sites, usgs.PARAM_SALINITY, str(start), str(end), cache)
     river_sites = [r.usgs_site for r in fishery.rivers if r.usgs_site]
     discharge_daily = usgs.fetch_daily(
         river_sites, usgs.PARAM_DISCHARGE, str(start), str(end), cache
     )
     by_day = composite_discharge_by_day(fishery, discharge_daily)
+    if not sensors:
+        return {}, by_day, [], {}
+    known = {s.id: (s.lon, s.lat) for s in discovery.find_usgs_sites(fishery, cache, "00480")}
+    wanted = {w.station: known[w.station] for w in sensors if w.station in known}
+    distances = site_distances_km(slug, fishery, wanted) if wanted else {}
+    salinity_daily = usgs.fetch_daily(
+        sorted(wanted), usgs.PARAM_SALINITY, str(start), str(end), cache
+    )
+    return salinity_daily, by_day, sensors, distances
 
-    usable, records = {}, []
-    for w in sensors:
-        site = w.station
+
+def collect_observations(
+    slug: str,
+    fishery: Fishery,
+    cache,
+    days: int = 90,
+    max_snap_m: float = 500.0,
+) -> CalibrationInput:
+    """Real observations from both routes, paired with distance and discharge.
+
+    TWO SOURCES, deliberately different in how far back they reach:
+
+    * USGS `00480`, fetched live over the last `days`. Specific conductance
+      (`00095`) is a different quantity and is not interchangeable with it.
+    * The NERRS store (`sources/ndbc.py`), read in FULL, whatever `days`
+      says. That store exists to accumulate permanently -- NDBC's own feed
+      is a ~45-day rolling window, so history not captured is gone -- and
+      truncating it to a rolling window here would defeat the point of
+      having it. The discharge series is then fetched to cover whichever
+      route reaches furthest back, so both are paired against the same days.
+
+    CO-OPS supplies no ocean end-member (Task 4 verified this live against
+    every station within 250 km), so `ocean_ppt` is held rather than fitted;
+    nothing here fetches one, and no default silently stands in for one.
+
+    Two exclusions, both RECORDED rather than silent, because a fit that
+    quietly narrows its own inputs looks identical to one that had less data:
+
+    * A site further than `max_snap_m` from any in-domain cell -- its
+      along-estuary distance would be the nearest cell's, which is a
+      different place on the estuary.
+    * A station marked `off_axis` -- see `build_site_record`. On Winyah that
+      is North Inlet's three, which read 31.4-32.0 ppt where the bay's own
+      read 6.0-9.6 at distances that order them the wrong way round.
+    """
+    from tidescout.sources.ndbc import PARAM_SALINITY as STORE_SALINITY
+
+    store_sensors = [
+        w
+        for w in fishery.stations.water
+        if w.kind in _STORE_KINDS and STORE_SALINITY in w.params
+    ]
+    on_axis = [w for w in store_sensors if not w.off_axis]
+
+    tz = ZoneInfo(fishery.timezone)
+    store_means: dict[str, dict[date, float]] = {}
+    store_swings: dict[str, dict[date, float]] = {}
+    if on_axis:
+        store = _open_store(slug)
+        for w in on_axis:
+            means, swings = daily_means_and_swings(store.salinity_series(w.station), tz)
+            store_means[w.station] = means
+            store_swings[w.station] = swings
+
+    end = datetime.now(UTC).date()
+    start = end - timedelta(days=days)
+    # The store reaches back further than `days` by design, so the discharge
+    # window has to reach back with it or every older reading pairs with
+    # nothing and is silently dropped.
+    earliest = [min(m) for m in store_means.values() if m]
+    if earliest:
+        start = min(start, min(earliest))
+
+    salinity_daily, by_day, usgs_sensors, usgs_dist = _usgs_inputs(
+        slug, fishery, cache, days, start, end, max_snap_m
+    )
+    store_dist = _store_distances(slug, fishery, [w.station for w in store_sensors])
+
+    usable: dict[str, float] = {}
+    records: list[SiteRecord] = []
+    for w in usgs_sensors:
         record = build_site_record(
-            site,
-            salinity_daily.get(site, []),
-            located=site in distances,
-            distance_km=distances.get(site, (float("nan"), float("inf")))[0],
-            snap_gap_m=distances.get(site, (float("nan"), float("inf")))[1],
+            w.station,
+            salinity_daily.get(w.station, []),
+            located=w.station in usgs_dist,
+            distance_km=usgs_dist.get(w.station, (float("nan"), float("inf")))[0],
+            snap_gap_m=usgs_dist.get(w.station, (float("nan"), float("inf")))[1],
             max_snap_m=max_snap_m,
         )
         if record.used:
-            usable[site] = record.distance_km
+            usable[w.station] = record.distance_km
+        records.append(record)
+
+    store_usable: dict[str, float] = {}
+    for w in store_sensors:
+        rows = sorted(store_means.get(w.station, {}).items())
+        record = build_site_record(
+            w.station,
+            rows,
+            located=w.station in store_dist,
+            distance_km=store_dist.get(w.station, (float("nan"), float("inf")))[0],
+            snap_gap_m=store_dist.get(w.station, (float("nan"), float("inf")))[1],
+            max_snap_m=max_snap_m,
+            off_axis=w.off_axis,
+        )
+        if record.used:
+            store_usable[w.station] = record.distance_km
         records.append(record)
 
     observations = pair_daily_means(salinity_daily, by_day, usable)
+    observations += pair_daily_means(
+        {s: sorted(store_means[s].items()) for s in store_usable}, by_day, store_usable
+    )
+
     swing_days = min(days, MAX_IV_DAYS)
+    from tidescout.sources import usgs
+
     iv = (
         usgs.fetch_series(sorted(usable), [usgs.PARAM_SALINITY], swing_days, cache)
         if usable
         else {}
     )
     swings = daily_swings(iv, usgs.PARAM_SALINITY, by_day, usable)
+    swings += [
+        (store_usable[s], by_day[d], v)
+        for s in sorted(store_usable)
+        for d, v in sorted(store_swings.get(s, {}).items())
+        if d in by_day
+    ]
     span = (min(by_day), max(by_day)) if by_day else None
     return CalibrationInput(observations, swings, records, days, span, swing_days)

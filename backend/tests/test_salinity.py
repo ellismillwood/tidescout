@@ -749,3 +749,177 @@ def test_calibrate_refuses_and_names_every_rejected_site(monkeypatch):
     # suggest 9498 and never 9497.
     assert "--max-snap-m 9498" in out
     assert "fitted" in out
+
+
+# -- Reading the NERRS store into the fit -----------------------------------
+# The store holds 15-minute readings; the fit wants daily means (and daily
+# swings, which are what free `excursion_km`). Aggregating them is pure and
+# is tested as such -- the network and the sqlite file stay in
+# `collect_observations`.
+
+
+def _series(day, hours, value_fn, tz_offset=0):
+    from datetime import datetime, timedelta, timezone
+
+    tz = timezone(timedelta(hours=tz_offset))
+    return [
+        (datetime(day.year, day.month, day.day, 0, 0, tzinfo=tz) + timedelta(hours=h),
+         value_fn(h))
+        for h in hours
+    ]
+
+
+def test_daily_means_and_swings_aggregates_a_full_day():
+    from zoneinfo import ZoneInfo
+
+    day = date(2026, 5, 1)
+    # 96 readings, a clean 10 ppt swing about a mean of 20.
+    series = _series(day, [i * 0.25 for i in range(96)],
+                     lambda h: 20.0 + 5.0 * np.sin(2 * np.pi * h / 12.42),
+                     tz_offset=-4)
+
+    means, swings = salinity_fit.daily_means_and_swings(
+        series, ZoneInfo("America/New_York"), min_readings=40
+    )
+
+    assert means[day] == pytest.approx(20.0, abs=0.2)
+    assert swings[day] == pytest.approx(10.0, abs=0.2)
+
+
+def test_a_thin_day_yields_neither_a_mean_nor_a_swing():
+    """A partial day understates the RANGE, and -- because these readings
+    are tidal -- it also biases the MEAN, by up to the full swing if the few
+    readings happen to land on one phase. Winyah's measured daily swing is
+    11.9 ppt median, so that bias is larger than the whole signal the fit is
+    trying to resolve. Both outputs are gated on the same count."""
+    from zoneinfo import ZoneInfo
+
+    day = date(2026, 5, 1)
+    series = _series(day, [0.0, 0.25, 0.5], lambda h: 30.0, tz_offset=-4)
+
+    means, swings = salinity_fit.daily_means_and_swings(
+        series, ZoneInfo("America/New_York"), min_readings=40
+    )
+
+    assert day not in means
+    assert day not in swings
+
+
+def test_days_are_local_not_utc():
+    """The store keeps UTC. Grouping on the UTC date would put the four
+    hours after 20:00 local into the NEXT day, splitting every day's tidal
+    cycle across two means and pairing them with the wrong day's discharge.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    # 2026-05-02 01:00 UTC is 2026-05-01 21:00 in New York (EDT, UTC-4).
+    series = [(datetime(2026, 5, 2, 1, 0, tzinfo=UTC), 12.0)]
+
+    means, _ = salinity_fit.daily_means_and_swings(
+        series, ZoneInfo("America/New_York"), min_readings=1
+    )
+
+    assert list(means) == [date(2026, 5, 1)]
+
+
+def test_store_stations_are_read_and_off_axis_ones_are_skipped(monkeypatch):
+    """`collect_observations` must read the declared store stations, and
+    must not read the ones marked off_axis -- that flag is the only thing
+    standing between the fit and a second estuary's worth of 32 ppt data."""
+    from datetime import datetime, timedelta
+
+    from tidescout.config import load_fishery
+
+    fishery = load_fishery("winyah-bay")
+    asked: list[str] = []
+
+    class _Store:
+        def salinity_series(self, station):
+            asked.append(station)
+            base = datetime(2026, 5, 1, 4, 0, tzinfo=UTC)
+            return [(base + timedelta(minutes=15 * i), 10.0 + (i % 8)) for i in range(96)]
+
+    monkeypatch.setattr(salinity_fit, "_open_store", lambda slug: _Store())
+    monkeypatch.setattr(
+        salinity_fit, "_store_distances",
+        lambda slug, fishery, sites: {s: (19.03, 5.0) for s in sites},
+    )
+    monkeypatch.setattr(
+        salinity_fit, "_usgs_inputs",
+        lambda *a, **k: ({}, {date(2026, 5, 1): 4000.0, date(2026, 5, 2): 4200.0}, [], {}),
+    )
+
+    data = salinity_fit.collect_observations("winyah-bay", fishery, cache=None, days=90)
+
+    assert set(asked) == {"WYSS1", "NIWWBWQ", "NIWTAWQ"}
+    assert "NIWCBWQ" not in asked and "NIWOLWQ" not in asked and "NIWDCWQ" not in asked
+    assert data.observations, "store observations must reach the fit"
+
+
+def test_off_axis_stations_are_still_reported_as_sites(monkeypatch):
+    """Excluded is not invisible. A station dropped from the fit must still
+    appear in the site table with the REASON, the same contract
+    `build_site_record` already holds for out-of-domain USGS sites --
+    otherwise the fit silently narrows and the report looks complete."""
+    from tidescout.config import load_fishery
+
+    fishery = load_fishery("winyah-bay")
+
+    class _Store:
+        def salinity_series(self, station):
+            return []
+
+    monkeypatch.setattr(salinity_fit, "_open_store", lambda slug: _Store())
+    monkeypatch.setattr(
+        salinity_fit, "_store_distances",
+        lambda slug, fishery, sites: {s: (19.03, 5.0) for s in sites},
+    )
+    monkeypatch.setattr(salinity_fit, "_usgs_inputs", lambda *a, **k: ({}, {}, [], {}))
+
+    data = salinity_fit.collect_observations("winyah-bay", fishery, cache=None, days=90)
+    notes = {r.site: r.note for r in data.sites}
+
+    for station in ("NIWCBWQ", "NIWOLWQ", "NIWDCWQ"):
+        assert station in notes, f"{station} must still be reported"
+        assert "off" in notes[station].lower() or "branch" in notes[station].lower()
+
+
+def test_calibrate_reports_both_sources_not_just_the_usgs_window(monkeypatch):
+    """The header claimed "00480 sensors over the last N days". Once the
+    NERRS store contributes its full held history that is wrong twice over:
+    these are not all 00480 sensors, and the store's decade is not `--days`
+    long. A report that misstates its own provenance is worse than a terse
+    one -- this output is what gets pasted into the fishery YAML."""
+    from typer.testing import CliRunner
+
+    from tidescout.cli import app
+
+    records = [
+        salinity_fit.build_site_record(
+            "WYSS1", [(date(2016, 1, 1), 6.0), (date(2026, 8, 22), 7.0)],
+            located=True, distance_km=19.03, snap_gap_m=5.0, max_snap_m=500.0,
+        ),
+        salinity_fit.build_site_record(
+            "NIWCBWQ", [], located=True, distance_km=12.88, snap_gap_m=4.0,
+            max_snap_m=500.0, off_axis=True,
+        ),
+    ]
+    monkeypatch.setattr(
+        salinity_fit,
+        "collect_observations",
+        lambda *a, **k: salinity_fit.CalibrationInput(
+            [(19.03, 4000.0, 6.0), (16.68, 9000.0, 3.0), (19.03, 9000.0, 2.0)],
+            [],
+            records,
+            90,
+            (date(2016, 1, 1), date(2026, 8, 22)),
+            90,
+        ),
+    )
+    result = CliRunner().invoke(app, ["salinity", "calibrate", "winyah-bay"])
+    out = re.sub(r"\s+", " ", re.sub(r"\x1b\[[0-9;]*m", "", result.output))
+
+    assert "00480 sensors over the last 90 days" not in out
+    assert "NERRS store" in out
+    assert "2016-01-01 .. 2026-08-22" in out

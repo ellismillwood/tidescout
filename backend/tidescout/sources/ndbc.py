@@ -146,6 +146,12 @@ __all__ = [
     "parse_ocean",
 ]
 
+# The `.ocean` column header for salinity, and the name a fishery uses in a
+# water sensor's `params` to say "this station reports salinity". CDMO's
+# own column is `Sal`; `sources/cdmo.py` maps it onto this same field, so
+# one name covers both routes into the store.
+PARAM_SALINITY = "SAL"
+
 NDBC_URL = "https://www.ndbc.noaa.gov/data/realtime2/{station}.ocean"
 
 # Provenance `source` label for a fetch through this module. cdmo.py defines
