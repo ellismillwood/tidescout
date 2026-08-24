@@ -860,6 +860,7 @@ def salinity_import_wqp(slug: str) -> None:
         ("rejected — unreviewed status", p.n_bad_status),
         ("rejected — QC activity", p.n_qc_activity),
         ("rejected — no value", p.n_no_value),
+        ("rejected — implausible value", p.n_implausible),
     ]:
         table.add_row(label, f"{n:,}")
     console.print(table)
@@ -867,6 +868,8 @@ def salinity_import_wqp(slug: str) -> None:
         console.print(f"[yellow]unknown units seen:[/yellow] {p.unknown_units}")
     if p.unknown_statuses:
         console.print(f"[yellow]unknown statuses seen:[/yellow] {p.unknown_statuses}")
+    if p.implausible_values:
+        console.print(f"[yellow]implausible values seen:[/yellow] {p.implausible_values}")
     console.print(f"{len(rep.stations)} station(s) with admitted salinity; span {rep.span}")
 
     # `admitted` routinely exceeds `new to the store`: a first import can

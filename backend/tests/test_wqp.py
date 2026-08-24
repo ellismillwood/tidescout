@@ -14,6 +14,7 @@ import pytest
 from tidescout.sources import wqp
 
 FIXTURE = Path(__file__).parent / "fixtures" / "wqp_results_excerpt.csv"
+STATIONS_FIXTURE = Path(__file__).parent / "fixtures" / "wqp_stations_excerpt.csv"
 
 
 def _report():
@@ -70,6 +71,29 @@ def test_per_mille_and_ppt_are_both_admitted_unchanged():
         [head, "S1,Salinity,20.0,0/00,2014-06-12,11:35:00,EDT,Sample-Routine,Final,,,"]
     )
     assert a.samples[0].salinity_psu == b.samples[0].salinity_psu == 20.0
+
+
+def test_ppth_is_admitted_as_the_same_unit_as_ppt():
+    """`ppth` (parts per thousand) is `ppt` under a third spelling, not a
+    different unit -- see `ACCEPTED_UNITS`'s comment for the measured
+    distribution evidence (ppth: 0.00-66.00 median 32.00, n=3,785; ppt:
+    -0.01-107.00 median 8.61, n=3,644 -- same physical scale). Admitting it
+    recovers 40.7% of real salinity rows that were previously rejected."""
+    head = (
+        "MonitoringLocationIdentifier,CharacteristicName,ResultMeasureValue,"
+        "ResultMeasure/MeasureUnitCode,ActivityStartDate,ActivityStartTime/Time,"
+        "ActivityStartTime/TimeZoneCode,ActivityTypeCode,ResultStatusIdentifier,"
+        "ResultDetectionConditionText,ActivityDepthHeightMeasure/MeasureValue,"
+        "ActivityDepthHeightMeasure/MeasureUnitCode"
+    )
+    a = wqp.parse_results(
+        [head, "S1,Salinity,20.0,ppt,2014-06-12,11:35:00,EDT,Sample-Routine,Final,,,"]
+    )
+    b = wqp.parse_results(
+        [head, "S1,Salinity,20.0,ppth,2014-06-12,11:35:00,EDT,Sample-Routine,Final,,,"]
+    )
+    assert a.samples[0].salinity_psu == b.samples[0].salinity_psu == 20.0
+    assert b.n_bad_unit == 0
 
 
 def test_an_unknown_unit_is_rejected_and_counted_never_coerced():
@@ -141,6 +165,36 @@ def test_a_different_characteristic_is_excluded_and_counted():
     assert "SYNTH-OTHER-CHARACTERISTIC-STATION" not in {s.station for s in r.samples}
 
 
+def test_an_implausible_value_is_rejected_and_counted_not_a_unit_problem():
+    """A valid, accepted unit but a value no real estuary water can have
+    (e.g. 107 ppt) is a DIFFERENT rejection reason than an unrecognized
+    unit, and needs its own counter -- a single 100+ psu point would
+    otherwise dominate a least-squares fit (see `_MAX_PLAUSIBLE_PSU`'s
+    comment for the measured evidence: 8 rows over 40 psu, 2 negative,
+    among 9,306 real rows). The boundary itself (45.0, inclusive) must
+    still admit, not reject -- see `_MAX_PLAUSIBLE_PSU`'s comment on why
+    the four 40.77-43.50 readings are kept as credible."""
+    head = (
+        "MonitoringLocationIdentifier,CharacteristicName,ResultMeasureValue,"
+        "ResultMeasure/MeasureUnitCode,ActivityStartDate,ActivityStartTime/Time,"
+        "ActivityStartTime/TimeZoneCode,ActivityTypeCode,ResultStatusIdentifier,"
+        "ResultDetectionConditionText,ActivityDepthHeightMeasure/MeasureValue,"
+        "ActivityDepthHeightMeasure/MeasureUnitCode"
+    )
+    rows = [
+        head,
+        "S1,Salinity,107.0,ppt,2015-05-12,11:35:00,EDT,Sample-Routine,Final,,,",
+        "S1,Salinity,-0.01,ppt,2018-10-02,11:35:00,EDT,Sample-Routine,Final,,,",
+        "S1,Salinity,45.01,ppt,2018-10-02,11:35:00,EDT,Sample-Routine,Final,,,",
+        "S1,Salinity,45.0,ppt,2018-10-02,11:35:00,EDT,Sample-Routine,Final,,,",
+    ]
+    r = wqp.parse_results(rows)
+    assert r.n_implausible == 3
+    assert r.n_admitted == 1
+    assert r.samples[0].salinity_psu == 45.0
+    assert "107" in r.implausible_values
+
+
 def test_counters_account_for_every_row():
     """A rejection path with no counter is a silent drop. This must account
     for every row read from the file -- including rows for a different
@@ -151,7 +205,7 @@ def test_counters_account_for_every_row():
     accounted = (
         r.n_admitted + r.n_no_time + r.n_bad_unit
         + r.n_bad_status + r.n_qc_activity + r.n_no_value
-        + r.n_other_characteristic
+        + r.n_other_characteristic + r.n_implausible
     )
     assert accounted == r.n_rows
 
@@ -234,3 +288,75 @@ def test_fetch_builds_a_bbox_query_without_a_key(monkeypatch):
     assert seen["params"]["bBox"] == "-79.45,33.15,-79.05,33.60"
     assert seen["params"]["characteristicName"] == "Salinity"
     assert "key" not in seen["params"] and "apiKey" not in seen["params"]
+
+
+def test_fetch_stations_builds_a_bbox_query_without_a_key(monkeypatch):
+    """Mirrors `test_fetch_builds_a_bbox_query_without_a_key` for the
+    sibling Station endpoint -- a wrong URL constant or a dropped
+    `raise_for_status()` here would silently return zero station
+    coordinates rather than failing loudly."""
+    from tidescout.sources import wqp
+
+    seen = {}
+
+    class _Resp:
+        text = "MonitoringLocationIdentifier,LatitudeMeasure,LongitudeMeasure\n"
+
+        def raise_for_status(self):
+            seen["raise_for_status_called"] = True
+
+    def fake_get(url, params=None, timeout=None):
+        seen["url"] = url
+        seen["params"] = params
+        return _Resp()
+
+    monkeypatch.setattr(wqp.httpx, "get", fake_get)
+    text = wqp.fetch_stations((-79.45, 33.15, -79.05, 33.60))
+
+    assert seen["url"] == wqp.WQP_STATION_URL
+    assert seen["params"]["bBox"] == "-79.45,33.15,-79.05,33.60"
+    assert seen["params"]["characteristicName"] == "Salinity"
+    assert "key" not in seen["params"] and "apiKey" not in seen["params"]
+    assert seen.get("raise_for_status_called") is True
+    assert text == _Resp.text
+
+
+def test_parse_stations_parses_a_real_station_export():
+    """`parse_stations`' column names, proven against a verbatim excerpt of
+    a real `Station/search` response -- the same standard Task 1 set for
+    `parse_results` (`cdmo.py` had four documentation-derived inferences
+    turn out wrong; a parser here isn't trusted on a live-run observation
+    alone)."""
+    coords = wqp.parse_stations(STATIONS_FIXTURE.read_text().splitlines())
+    assert coords["21SC60WQ_WQX-WB-06"] == pytest.approx((-79.18695, 33.2225))
+    assert len(coords) == 6
+    for lon, lat in coords.values():
+        assert -79.45 <= lon <= -79.05, "lon out of the winyah-bay bbox this fixture came from"
+        assert 33.15 <= lat <= 33.60, "lat out of the winyah-bay bbox this fixture came from"
+
+
+def test_station_coords_returns_empty_when_the_store_does_not_exist_yet(tmp_path, monkeypatch):
+    """`station_coords`'s explicit contract: no `wqp.sqlite` on disk -> `{}`,
+    without creating one as a side effect of merely reading."""
+    from tidescout.sources import wqp
+
+    monkeypatch.setattr("tidescout.sources.wqp.fishery_data_dir", lambda slug: tmp_path)
+    assert wqp.station_coords("winyah-bay") == {}
+    assert not (tmp_path / "wqp.sqlite").exists()
+
+
+def test_station_coords_reads_back_a_populated_store(tmp_path, monkeypatch):
+    """The other half of `station_coords`'s contract: once a store exists
+    and has been imported into, it reads the coordinates back."""
+    from tidescout.sources import wqp
+
+    monkeypatch.setattr("tidescout.sources.wqp.fishery_data_dir", lambda slug: tmp_path)
+    store = wqp.default_store("winyah-bay")
+    stations_csv = (
+        "MonitoringLocationIdentifier,LatitudeMeasure,LongitudeMeasure\n"
+        "21SC60WQ_WQX-WB-06,33.2795,-79.2210\n"
+    )
+    wqp.import_results(FIXTURE.read_text(), store, stations_csv=stations_csv)
+
+    coords = wqp.station_coords("winyah-bay")
+    assert coords["21SC60WQ_WQX-WB-06"] == pytest.approx((-79.2210, 33.2795))

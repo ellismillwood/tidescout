@@ -532,6 +532,22 @@ class NdbcStore:
         )
         self._conn.commit()
 
+    def connection(self) -> sqlite3.Connection:
+        """The sanctioned seam for a caller that owns an AUXILIARY table in
+        this same store file -- one `NdbcStore` doesn't know about and has
+        no reason to (e.g. `sources/wqp.py`'s `wqp_stations`, discovered
+        station positions kept alongside the readings they belong to).
+
+        `NdbcStore` stays generic: it is never taught about any particular
+        caller's table. What it DOES guarantee is that this is the same
+        connection `bulk_writer`'s transaction commits/rolls back, so DDL
+        and DML a caller issues here through the returned connection share
+        that same atomicity for free -- write into it inside a
+        `with store.bulk_writer(...)` block and a rollback takes it with
+        the rest of that batch.
+        """
+        return self._conn
+
     def append(self, station: str, rows: Sequence[Observation]) -> int:
         """Insert `rows`, de-duplicated by (station, timestamp).
 

@@ -45,10 +45,46 @@ from tidescout.sources.ndbc import NdbcStore, Observation
 CHARACTERISTIC = "Salinity"
 
 # Unit code -> multiplier onto psu. `0/00` is per-mille, numerically identical
-# to ppt (81 ppt rows and 42 `0/00` rows in one real response). Anything not
-# in here is REJECTED AND COUNTED: WQP serves mg/l and uS/cm under neighbouring
-# characteristics and coercing one would inject nonsense at full confidence.
-ACCEPTED_UNITS: dict[str, float] = {"ppt": 1.0, "0/00": 1.0, "psu": 1.0, "PSU": 1.0}
+# to ppt (81 ppt rows and 42 `0/00` rows in one real response).
+#
+# `ppth` is the SAME quantity (parts per thousand) under a third spelling,
+# not a different unit -- verified by measuring the distributions rather
+# than trusting the name, against the full winyah-bay bbox pull
+# (2026-08-24, `fetch_results`): `ppth` spans 0.00-66.00, median 32.00
+# (n=3,785, 40.7% of all Salinity rows); `ppt` spans -0.01-107.00, median
+# 8.61 (n=3,644). Same physical scale -- parts-per-trillion would differ
+# by ~1e9, not overlap like this -- and `fisheries/winyah-bay.yaml` (see
+# its USGS 00480 discharge-site notes) already records readings from this
+# same estuary in "ppth", corroborating the reading independently of this
+# module. Admitting it recovers 40.7% of real salinity rows that were
+# previously rejected outright.
+#
+# Anything NOT in here is REJECTED AND COUNTED: WQP serves mg/l and uS/cm
+# under neighbouring characteristics and coercing one would inject nonsense
+# at full confidence.
+ACCEPTED_UNITS: dict[str, float] = {
+    "ppt": 1.0, "0/00": 1.0, "psu": 1.0, "PSU": 1.0, "ppth": 1.0,
+}
+
+# A salinity reading outside this range is not a unit problem (that's
+# ACCEPTED_UNITS's job) -- it's a value no real estuary water can have.
+# Measured against the same full bbox pull, across every accepted unit
+# (9,306 rows): 2 negative (-0.01, both 2018-10-02) and 8 above 40 psu
+# (40.77-107.00, 0.09% of rows). The single 107 psu point alone
+# contributes ~(107-30)^2 to a least-squares sum against typical residuals
+# of ~16 psu -- it weighs like ~370 ordinary observations in a fit whose
+# entire purpose is measuring rmse in ppt; six such points among ~9,300
+# would move the fit measurably.
+#
+# The cutoff is 45, not 40: the four readings from 40.77-43.50 (stations
+# RT-14065, RT-052198, RO-06301, RO-06317 -- all `MonitoringLocationTypeName
+# = Estuary`; dates 2014-06-10, 2005-08-17, 2006-07-11, 2006-07-11, all
+# summer) are kept -- they read as credible evaporative hypersalinity at
+# shallow, restricted stations in warm months, not instrument error, and
+# 45 excludes only the four clearly-implausible readings (47.10 and above)
+# plus both negatives.
+_MIN_PLAUSIBLE_PSU = 0.0
+_MAX_PLAUSIBLE_PSU = 45.0
 
 # `ResultStatusIdentifier` values admitted. "Final", "Accepted" and "Validated"
 # are reviewed; "Preliminary" and "Provisional" are not, and are blocked --
@@ -103,8 +139,10 @@ class ParseReport:
     n_qc_activity: int = 0
     n_no_value: int = 0
     n_other_characteristic: int = 0
+    n_implausible: int = 0
     unknown_units: dict[str, int] = field(default_factory=dict)
     unknown_statuses: dict[str, int] = field(default_factory=dict)
+    implausible_values: dict[str, int] = field(default_factory=dict)
 
 
 def _bump(counter: dict[str, int], key: str) -> None:
@@ -180,6 +218,17 @@ def parse_results(fh: Iterable[str]) -> ParseReport:
             _bump(report.unknown_units, unit or "<blank>")
             continue
 
+        salinity_psu = value * ACCEPTED_UNITS[unit]
+        if salinity_psu < _MIN_PLAUSIBLE_PSU or salinity_psu > _MAX_PLAUSIBLE_PSU:
+            # A valid unit but a value no real estuary water can have (see
+            # `_MIN_PLAUSIBLE_PSU`/`_MAX_PLAUSIBLE_PSU`'s comment for the
+            # measured evidence). Rejected and counted the same way as
+            # every other path -- a thin tail, but a single 100+ psu point
+            # would otherwise dominate a least-squares fit.
+            report.n_implausible += 1
+            _bump(report.implausible_values, f"{salinity_psu:g}")
+            continue
+
         ts = _timestamp(
             row.get("ActivityStartDate", ""),
             row.get("ActivityStartTime/Time", ""),
@@ -193,7 +242,7 @@ def parse_results(fh: Iterable[str]) -> ParseReport:
             Sample(
                 station=(row.get("MonitoringLocationIdentifier") or "").strip(),
                 ts=ts,
-                salinity_psu=value * ACCEPTED_UNITS[unit],
+                salinity_psu=salinity_psu,
                 depth_m=_depth_m(
                     row.get("ActivityDepthHeightMeasure/MeasureValue", ""),
                     row.get("ActivityDepthHeightMeasure/MeasureUnitCode", ""),
@@ -343,11 +392,12 @@ def import_results(
             )
         )
     coords = parse_stations(stations_csv.splitlines()) if stations_csv else {}
+    conn = store.connection()  # the sanctioned seam -- see `NdbcStore.connection`
 
     # DDL is idempotent and carries no data of its own, so it is harmless
     # for it to land ahead of (and outside) the transaction below; only the
     # coordinate ROWS need the same all-or-nothing guarantee as the readings.
-    store._conn.execute(_CREATE_STATIONS_TABLE)
+    conn.execute(_CREATE_STATIONS_TABLE)
 
     n_new = 0
     with store.bulk_writer(batch_rows=BATCH_ROWS) as writer:
@@ -364,9 +414,9 @@ def import_results(
         if coords:
             # Same connection `bulk_writer` commits/rolls back below, so
             # these rows share its atomicity even though they go through
-            # `store._conn` rather than `writer` (which only knows about
+            # `conn` rather than `writer` (which only knows about
             # `observations`/`met_observations`).
-            store._conn.executemany(
+            conn.executemany(
                 "INSERT OR REPLACE INTO wqp_stations (station, lon, lat) VALUES (?, ?, ?)",
                 [(sid, lon, lat) for sid, (lon, lat) in coords.items()],
             )
@@ -384,12 +434,13 @@ def station_coords_from_store(store: NdbcStore) -> dict[str, tuple[float, float]
     written into), not an error -- the same "no data yet" posture as an
     empty `citation()`.
     """
-    exists = store._conn.execute(
+    conn = store.connection()
+    exists = conn.execute(
         "SELECT 1 FROM sqlite_master WHERE type = 'table' AND name = 'wqp_stations'"
     ).fetchone()
     if exists is None:
         return {}
-    rows = store._conn.execute("SELECT station, lon, lat FROM wqp_stations").fetchall()
+    rows = conn.execute("SELECT station, lon, lat FROM wqp_stations").fetchall()
     return {station: (lon, lat) for station, lon, lat in rows}
 
 
