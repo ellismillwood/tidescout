@@ -58,6 +58,7 @@ Each of these was measured, not assumed:
 | fact | value |
 |---|---|
 | WQP grab samples in the store | 8,208 |
+| ...of which reach the fit (on-axis, after screening) | **1,860** |
 | unique local dates needing a phase | **1,260** |
 | date range | 1999-01-04 .. 2026-06-24 (27.5 years) |
 | CO-OPS yearly fetches required | **28** |
@@ -105,6 +106,11 @@ least known.
 
 ### 4a. Phase derivation
 
+Note the two counts above are both real and not in conflict: 8,208 grab rows are STORED, and
+1,860 of them reach the fit after the on-axis screen. Phase must be computed for the rows that
+reach the fit; computing it for all stored rows is harmless (the same 1,260 dates cover both) but
+the exclusion counter in §4c refers to the fitted population.
+
 A function mapping a tz-aware timestamp to a model phase in [0, 1), where **0 = low water and
 0.5 = high water** — the convention `engine/salinity.py` already uses and which
 `.superpowers`-recorded project notes pin as "phase 0 is LOW water (flood = first half)".
@@ -130,6 +136,11 @@ pre-filter observation list, same `ValueError` on mismatch, same backward compat
   existing grouping by discharge must not silently collapse observations that now differ in phase.
 - `_swing` is **untouched**. It already evaluates at 0.0 and 0.5 deliberately, and swings are a
   different quantity from levels.
+- **`phases` aligns with `observations` ONLY, never with `swings`.** This must be explicit in the
+  signature's docstring and enforced by the length check, because the two sequences are already
+  different lengths in practice (12,725 vs 10,865) and silently validating against the wrong one
+  would either reject valid input or, worse, misalign every phase by an unknown offset. A swing
+  observation has no single phase by construction — it is a difference BETWEEN two phases.
 
 ### 4c. Which observations get a real phase
 
