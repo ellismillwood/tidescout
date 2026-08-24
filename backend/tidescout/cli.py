@@ -464,6 +464,13 @@ def salinity_calibrate(
         f"(main-stem distance > {ON_AXIS_MAX_KM} km, or the YAML's declared "
         "off_axis: true) -- see the site table above for which and why."
     )
+    from tidescout.pipeline.salinity_fit import WQP_COLOCATION_RADIUS_M
+
+    console.print(
+        f"{data.n_colocated} WQP station(s) excluded as co-located with an "
+        f"already-declared station (within {WQP_COLOCATION_RADIUS_M:.0f} m) -- "
+        "the same physical site's record, not a second one."
+    )
     if data.stem_field_missing:
         console.print(
             f"[yellow]distance-to-stem field not built[/yellow] -- run "
@@ -475,7 +482,8 @@ def salinity_calibrate(
 
     try:
         fitted, diag = salinity_fit.fit_intrusion(
-            data.observations, cfg=fishery.salinity, swings=data.swings
+            data.observations, cfg=fishery.salinity, swings=data.swings,
+            sources=data.observation_sources,
         )
     except ValueError as exc:
         console.print(f"\n[red]CANNOT CALIBRATE[/red]: {exc}")

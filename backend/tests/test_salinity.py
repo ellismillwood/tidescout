@@ -459,6 +459,61 @@ def test_fit_refuses_an_empty_observation_set():
         fit_intrusion([], cfg=TRUTH)
 
 
+# -- rmse split by observation source ----------------------------------------
+# Measured 2026-08-24 on the real Winyah run: NERRS daily means (n=10,880)
+# rmse 4.061 ppt, WQP grab samples (n=1,860) rmse 6.102 ppt -- two
+# populations that residualise very differently must not hide behind one
+# headline number.
+
+
+def test_fit_reports_rmse_split_by_source():
+    distances = [2.0, 6.0, 10.0, 15.0, 20.0, 25.0, 35.0]
+    flows = [1500.0, 4000.0, 12000.0]
+    clean = _synthetic_obs(TRUTH, distances, flows)
+    biased = [(d, q, y + 3.0) for d, q, y in clean]
+    obs = clean + biased
+    sources = ["clean"] * len(clean) + ["biased"] * len(biased)
+
+    _, diag = fit_intrusion(
+        obs, cfg=TRUTH.model_copy(update={"l0_km": 20.0}), sources=sources
+    )
+
+    by_source = diag["rmse_by_source_ppt"]
+    assert set(by_source) == {"clean", "biased"}
+    assert by_source["biased"] > by_source["clean"]
+
+
+def test_fit_omits_rmse_by_source_when_no_sources_are_given():
+    obs = _synthetic_obs(TRUTH, [2.0, 8.0, 15.0], [2000.0, 6000.0])
+    _, diag = fit_intrusion(obs, cfg=TRUTH)
+    assert diag["rmse_by_source_ppt"] == {}
+
+
+def test_fit_rejects_a_sources_list_the_wrong_length():
+    obs = _synthetic_obs(TRUTH, [2.0, 8.0, 15.0], [2000.0, 6000.0])
+    with pytest.raises(ValueError, match="same length"):
+        fit_intrusion(obs, cfg=TRUTH, sources=["only_one"])
+
+
+def test_fit_rmse_by_source_matches_a_hand_computed_group_rmse():
+    """Not just "different from each other" -- the split rmse must equal the
+    rmse of exactly the rows tagged with that source, computed the same way
+    the headline `rmse_ppt` is."""
+    distances = [2.0, 10.0, 25.0]
+    flows = [2000.0, 8000.0]
+    a = _synthetic_obs(TRUTH, distances, flows)
+    b = [(d, q, y - 1.5) for d, q, y in a]
+    fitted, diag = fit_intrusion(
+        a + b, cfg=TRUTH.model_copy(update={"l0_km": 20.0}),
+        sources=["a"] * len(a) + ["b"] * len(b),
+    )
+    resid_b = [
+        y - float(salinity.salinity_at(np.array([d]), q, 0.25, fitted)[0]) for d, q, y in b
+    ]
+    expected_b = float(np.sqrt(np.mean(np.square(resid_b))))
+    assert diag["rmse_by_source_ppt"]["b"] == pytest.approx(expected_b, rel=1e-9)
+
+
 # -- Assembling real observations -------------------------------------------
 
 from datetime import UTC, date, datetime  # noqa: E402
@@ -915,6 +970,7 @@ def test_calibrate_reports_both_sources_not_just_the_usgs_window(monkeypatch):
             90,
             (date(2016, 1, 1), date(2026, 8, 22)),
             90,
+            observation_sources=["nerrs", "nerrs", "nerrs"],
         ),
     )
     result = CliRunner().invoke(app, ["salinity", "calibrate", "winyah-bay"])
@@ -1066,6 +1122,8 @@ def test_calibrate_reports_off_axis_count_and_stem_fallback(monkeypatch):
             90,
             n_off_axis=1,
             stem_field_missing=True,
+            observation_sources=["nerrs", "nerrs", "nerrs"],
+            n_colocated=2,
         ),
     )
     result = CliRunner().invoke(app, ["salinity", "calibrate", "winyah-bay"])
@@ -1073,6 +1131,8 @@ def test_calibrate_reports_off_axis_count_and_stem_fallback(monkeypatch):
 
     assert "1 station" in out
     assert "stem field not built" in out.lower()
+    assert "2 WQP station" in out
+    assert "co-located" in out.lower()
 
 
 def test_wqp_stations_enter_as_individual_grab_samples_not_daily_means(monkeypatch):
@@ -1129,3 +1189,130 @@ def test_wqp_stations_enter_as_individual_grab_samples_not_daily_means(monkeypat
     assert "WB-06" in notes and notes["WB-06"] == ""
     assert "axis" in notes["OFFSTA"].lower()
     assert "coordinates" in notes["NOCOORD"].lower()
+
+
+# -- Cross-store co-location: WQP-to-STORE only, never WQP-to-WQP -----------
+# Reviewer-found (2026-08-24): WQP `21SC60WQ_WQX-WB-08` sits 2 m from
+# WYSS1's declared coordinates -- the same physical platform, sampled by a
+# different agency, not a second site. Its 15 grab rows double-represent
+# WYSS1's own daily means on the same dates, at the same distance and the
+# same day's discharge. This must NOT generalise to WQP-to-WQP pairs like
+# the legacy/WQX ID split, which are also 0 m apart but hold disjoint
+# halves of one record (zero shared (timestamp, value) rows measured across
+# all 48 such pairs) -- collapsing those would discard real observations.
+
+
+def test_colocated_wqp_stations_flags_a_station_near_a_declared_store_station(monkeypatch):
+    import rasterio.warp
+
+    from tidescout.config import load_fishery
+
+    # Identity transform: treat the raw coordinates as already being in the
+    # projected frame, so the metres math is exact and decoupled from the
+    # real CRS -- same technique test_estuary.py uses for its synthetic grids.
+    monkeypatch.setattr(rasterio.warp, "transform", lambda f, t, lons, lats: (lons, lats))
+    fishery = load_fishery("winyah-bay")
+    store_coords = {"WYSS1": (500000.0, 3700000.0)}
+    wqp_coords = {"21SC60WQ_WQX-WB-08": (500000.0 + 2.0, 3700000.0)}  # 2 m away
+
+    out = salinity_fit._colocated_wqp_stations(fishery, store_coords, wqp_coords)
+
+    assert out == {"21SC60WQ_WQX-WB-08"}
+
+
+def test_colocated_wqp_stations_leaves_a_genuinely_separate_station_alone(monkeypatch):
+    import rasterio.warp
+
+    from tidescout.config import load_fishery
+
+    monkeypatch.setattr(rasterio.warp, "transform", lambda f, t, lons, lats: (lons, lats))
+    fishery = load_fishery("winyah-bay")
+    store_coords = {"WYSS1": (500000.0, 3700000.0)}
+    wqp_coords = {"FAR-STATION": (500000.0 + 5000.0, 3700000.0)}  # 5 km away
+
+    out = salinity_fit._colocated_wqp_stations(fishery, store_coords, wqp_coords)
+
+    assert out == set()
+
+
+def test_colocated_wqp_stations_never_flags_a_wqp_to_wqp_pair(monkeypatch):
+    """The legacy/WQX ID split puts two WQP stations at 0 m of each other
+    holding DISJOINT halves of one record -- this function must only ever
+    compare WQP coordinates against DECLARED store coordinates, never WQP
+    against WQP, or it would collapse exactly the pair Task 5 was told not
+    to."""
+    import rasterio.warp
+
+    from tidescout.config import load_fishery
+
+    monkeypatch.setattr(rasterio.warp, "transform", lambda f, t, lons, lats: (lons, lats))
+    fishery = load_fishery("winyah-bay")
+    store_coords = {"WYSS1": (0.0, 0.0)}  # far from the pair below
+    wqp_coords = {
+        "21SCSHL-05-24": (600000.0, 3800000.0),
+        "21SCSHL_WQX-05-24": (600000.0, 3800000.0),  # identical coords, 0 m apart
+    }
+
+    out = salinity_fit._colocated_wqp_stations(fishery, store_coords, wqp_coords)
+
+    assert out == set()
+
+
+def test_colocated_wqp_station_is_excluded_and_not_double_counted(monkeypatch):
+    """End to end through `collect_observations`: a WQP station
+    `_colocated_wqp_stations` flags must be reported with the colocation
+    reason and its observations must NOT enter the fit alongside the
+    declared station's own record -- otherwise one site's reading counts
+    twice on the same day, at the same distance, against the same
+    discharge."""
+    from datetime import datetime, timedelta
+
+    fishery = load_fishery("winyah-bay")
+    d1 = date(2026, 5, 1)
+
+    class _NerrsStore:
+        def salinity_series(self, station):
+            if station != "WYSS1":
+                return []
+            base = datetime(2026, 5, 1, 4, 0, tzinfo=UTC)
+            return [(base + timedelta(minutes=15 * i), 12.0) for i in range(96)]
+
+    monkeypatch.setattr(salinity_fit, "_open_store", lambda slug: _NerrsStore())
+    monkeypatch.setattr(
+        salinity_fit, "_store_distances",
+        lambda slug, fishery, sites: {s: (19.03, 5.0) for s in sites},
+    )
+    monkeypatch.setattr(
+        salinity_fit, "_usgs_inputs",
+        lambda *a, **k: ({}, {d1: 4000.0}, [], {}),
+    )
+    monkeypatch.setattr(
+        salinity_fit, "_wqp_sites",
+        lambda slug: {"WB08": [(datetime(2026, 5, 1, 15, 0, tzinfo=UTC), 11.69)]},
+    )
+    monkeypatch.setattr(
+        "tidescout.sources.wqp.station_coords",
+        lambda slug: {"WB08": (-79.30, 33.36)},
+    )
+    monkeypatch.setattr(
+        salinity_fit, "site_distances_km",
+        lambda slug, fishery, sites: {s: (19.03, 5.0) for s in sites},
+    )
+    monkeypatch.setattr(
+        salinity_fit, "station_stem_km",
+        lambda slug, fishery, sites: dict.fromkeys(sites, 0.5),
+    )
+    monkeypatch.setattr(
+        salinity_fit, "_colocated_wqp_stations",
+        lambda fishery, store_coords, wqp_coords: (
+            {"WB08"} if "WB08" in wqp_coords else set()
+        ),
+    )
+
+    data = salinity_fit.collect_observations("winyah-bay", fishery, cache=None, days=90)
+
+    notes = {r.site: r.note for r in data.sites}
+    assert "co-located" in notes["WB08"].lower()
+    assert data.n_colocated == 1
+    # Only WYSS1's own daily mean enters -- WB08's duplicate grab does not.
+    assert data.observations == [(19.03, 4000.0, 12.0)]
