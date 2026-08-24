@@ -305,21 +305,58 @@ def main_stem_mask(fishery: Fishery, spec, field: np.ndarray) -> np.ndarray:
     `Inlet_operator` injects discharge), so this adds no new hand-authored
     geometry. Walking downhill from each one traces the channel the river
     water actually takes, which is the line the salt front advances along.
+
+    Mirrors the guard `regimes.py::_attach_river_inflows` already applies to
+    the same `fishery.rivers` list for the ANUGA mesh: a river with no
+    inflow point is skipped, not treated as an error (`inflow_lonlat=None`
+    means "inflow is not attached for this river", per `RiverGauge`'s own
+    docstring); a river whose point does NOT skip must land somewhere the
+    descent is well-defined, or it fails loudly and specifically rather than
+    silently. Here that means the along-estuary FIELD value at the snapped
+    cell must be finite: `along_estuary_km` only ever assigns a finite value
+    to a cell with a real water route to the sea, so a NaN there means the
+    point sits on water disconnected from the mouth. Feeding that into
+    `descent_path` would either return a single orphan cell (silently
+    contributing nothing to the stem) or wander through undefined territory,
+    because every comparison against NaN is False, so `descent_path`'s "am I
+    at a local minimum" check never fires.
     """
     from rasterio.warp import transform as warp_transform
 
     grid = to_grid(field, spec.flat_index, spec.shape, fill=np.nan)
-    lons = [r.inflow_lonlat[0] for r in fishery.rivers]
-    lats = [r.inflow_lonlat[1] for r in fishery.rivers]
-    xs, ys = warp_transform("EPSG:4326", f"EPSG:{fishery.bathymetry.epsg}", lons, lats)
-
+    epsg = fishery.bathymetry.epsg
     stem = np.zeros(spec.shape, dtype=bool)
-    for x, y in zip(xs, ys, strict=True):
+    seeded = False
+    for river in fishery.rivers:
+        seed = getattr(river, "inflow_lonlat", None)
+        if seed is None:
+            continue
+        lon, lat = seed
+        xs, ys = warp_transform("EPSG:4326", f"EPSG:{epsg}", [lon], [lat])
+        x, y = xs[0], ys[0]
         d2 = (spec.xs - x) ** 2 + (spec.ys - y) ** 2
         i = int(np.argmin(d2))
-        start = np.unravel_index(spec.flat_index[i], spec.shape)
-        for rr, cc in descent_path(grid, (int(start[0]), int(start[1]))):
+        r, c = (int(v) for v in np.unravel_index(spec.flat_index[i], spec.shape))
+        if not np.isfinite(grid[r, c]):
+            raise RuntimeError(
+                f"river inflow for {river.name!r} at inflow_lonlat=({lon}, {lat}) "
+                f"(utm=({x:.0f}, {y:.0f})) snaps to library cell ({r}, {c}), which "
+                "has no water route to the sea (along-estuary distance is NaN) -- "
+                "the coordinate does not land on the connected main channel, so "
+                "this river's inflow point would silently contribute nothing to "
+                "the main stem, or make descent_path wander through undefined "
+                "NaN comparisons instead of descending to the mouth"
+            )
+        for rr, cc in descent_path(grid, (r, c)):
             stem[rr, cc] = True
+        seeded = True
+    if not seeded:
+        raise RuntimeError(
+            "no river inflow point produced a usable main-stem seed -- every "
+            "river in fishery.rivers has inflow_lonlat=None (or fishery.rivers "
+            "is empty), so there is no channel to walk downhill from and the "
+            "main stem would otherwise come back empty"
+        )
     return from_grid(stem, spec.flat_index)
 
 
