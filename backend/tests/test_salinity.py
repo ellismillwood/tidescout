@@ -1387,3 +1387,65 @@ def test_salinity_field_coverage_dtype_holds_the_longest_labels_exactly():
     assert str(f.coverage[0]) == str(Coverage.MEASURED)
     assert str(f.coverage[1]) == str(Coverage.INTERPOLATED)
     assert str(f.coverage[2]) == str(Coverage.EXTRAPOLATED)
+
+
+# -- Review fix round (2026-08-24): scalar shape, boundary semantics, and the
+# coverage-vs-fitted conflation -----------------------------------------
+
+
+def test_coverage_matches_ppt_shape_for_a_scalar_distance():
+    """`salinity_at` returns a 0-d array for a bare scalar `distance_km` (no
+    `atleast_1d` anywhere in it). `classify_coverage` used to force
+    `atleast_1d` on its own input, so `f.coverage.shape` came back `(1,)`
+    while `f.ppt.shape` came back `()` -- a caller zipping the two arrays
+    together for a scalar evaluation got silently misaligned results. Pin
+    both the bare-Python-float and the 0-d-numpy-array cases."""
+    from tidescout.engine.salinity import salinity_field
+
+    f = salinity_field(10.0, 4000.0, 0.25, CFG, observed_km=[5.56, 10.28])
+    assert f.coverage.shape == f.ppt.shape == ()
+
+    f2 = salinity_field(np.asarray(10.0), 4000.0, 0.25, CFG, observed_km=[5.56, 10.28])
+    assert f2.coverage.shape == f2.ppt.shape == ()
+
+
+def test_classify_coverage_scalar_output_still_classifies_correctly():
+    """The shape fix must not have changed what a scalar call reports --
+    only its shape."""
+    from tidescout.engine.salinity import Coverage, classify_coverage
+
+    assert classify_coverage(5.56, observed_km=[5.56, 10.28], near_km=1.0) == Coverage.MEASURED
+    assert classify_coverage(8.0, observed_km=[5.56, 10.28], near_km=1.0) == Coverage.INTERPOLATED
+    assert classify_coverage(30.0, observed_km=[5.56, 10.28], near_km=1.0) == Coverage.EXTRAPOLATED
+
+
+def test_a_cell_just_outside_the_span_but_near_an_edge_reads_measured():
+    """Pinned as intended, not a bug: MEASURED is checked -- and applied --
+    AFTER "inside the span", so it is not a subset of it. A cell 1.0 km
+    short of the first observation (5.56 km) sits outside [5.56, 10.28] yet
+    is still within `near_km` of that observation, so it reads MEASURED, not
+    EXTRAPOLATED. Along a single 1-D coordinate, proximity to an observation
+    is what carries information -- the alternative would call a cell 0.1 km
+    beyond the span EXTRAPOLATED while calling one 0.9 km inside it
+    MEASURED, a discontinuity with no real difference in what is known."""
+    from tidescout.engine.salinity import Coverage, classify_coverage
+
+    cov = classify_coverage(np.array([4.56]), observed_km=[5.56, 10.28], near_km=1.0)
+    assert cov[0] == Coverage.MEASURED
+
+
+def test_measured_coverage_does_not_imply_the_config_was_fitted():
+    """`coverage=MEASURED` and `fitted=False` are meant to coexist -- that is
+    Winyah Bay's real, current situation (78.6% of cells MEASURED, 0% of the
+    fishery `fitted`). MEASURED says a raw observation sat near this
+    position; it says nothing about whether the model producing this number
+    was ever calibrated against anything. A caller that reads only
+    `coverage` must not be able to mistake one for the other."""
+    from tidescout.engine.salinity import Coverage, salinity_field
+
+    assert CFG.fitted is False
+    f = salinity_field(
+        np.array([5.56]), 4000.0, 0.25, CFG, observed_km=[5.56, 10.28]
+    )
+    assert f.coverage[0] == Coverage.MEASURED
+    assert f.fitted is False
