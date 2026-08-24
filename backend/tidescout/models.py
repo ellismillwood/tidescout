@@ -27,9 +27,24 @@ class WaterSensor(BaseModel):
     # column headers (DEPTH, OTMP, COND, SAL, ...), not USGS/CO-OPS codes;
     # nothing currently reads this list for "ndbc" sensors -- Task 8 stores
     # and exposes an accumulating history but wires it into no scoring path.
-    kind: Literal["usgs", "coops", "ndbc"]
+    # "cdmo" added Phase 2 Task 12 for the five NERRS water-quality stations
+    # that have no NDBC mirror. Unlike the others this is not a polled feed:
+    # CDMO history arrives via `tidescout salinity import-cdmo`, a manual
+    # one-shot backfill. The entry still earns its place, because the
+    # calibration path reads this list to decide which stations to look for
+    # in the store -- a station nobody declares is a station nobody fits.
+    kind: Literal["usgs", "coops", "ndbc", "cdmo"]
     station: str
     params: list[str] = []
+    # True when the station sits on a branch the 1-D along-estuary coordinate
+    # cannot place: it is stored, served and citable like any other, but the
+    # salt-intrusion fit must not read it. Measured on Winyah 2026-08-23 --
+    # North Inlet's three stations average 31.4-32.0 ppt where the bay's own
+    # three average 6.0-9.6, at distances that order them the wrong way round
+    # (North Inlet 12.88-14.18 km, the bay 16.68-19.03). Both branches
+    # respond to discharge, so this is not "no signal"; it is a 25 ppt
+    # baseline offset that one distance axis cannot carry.
+    off_axis: bool = False
 
 
 class Stations(BaseModel):

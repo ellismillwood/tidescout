@@ -74,70 +74,79 @@ stations:
     - kind: usgs
       station: "02136371"
       params: ["00010"]
-    # NDBC WYSS1 "Winyah Bay Surface" (33.309, -79.289) -- North Inlet-Winyah
-    # Bay Reserve, operated by the National Estuarine Research Reserve System
-    # (NERRS). Added Phase 2 Task 8, supplying the salinity constraint Task 5
-    # could not find: MEASURED live 2026-08-23 against the real 587,325-cell
-    # distance field (pipeline.salinity_fit.site_distances_km), independently
-    # re-derived rather than taken on trust:
-    #   projects to UTM 26917 (659284.5, 3686849.9) -- INSIDE the model domain
-    #   nearest in-domain library cell: 9.5 m away (snap_gap_m)
-    #   along-estuary distance: 15.02 km -- a distance the reach had none of
-    #     before (North Jetty 2.58, Georgetown Lighthouse 5.52, Mud Bay Cut
-    #     9.47, both USGS 00480 sites 31.57 -- see Task 5's report).
-    # Reports at 15-minute cadence to hundredths of a psu (vs USGS 00480's
-    # whole-ppt daily means), fetched and accumulated by sources/ndbc.py --
-    # NDBC's realtime2 feed is a rolling window (measured 2026-08-23: 45.6
-    # days / 4,235 rows live, not the ~13 days originally assumed), so the
-    # store persists every fetch rather than re-reading only what NDBC
-    # currently serves. `params` are this product's own `.ocean` column
-    # headers, not USGS/CO-OPS codes; nothing reads them yet -- Task 8 stores
-    # and exposes this station's history but wires it into no calibration or
-    # scoring path (that is Task 5's / Phase 3's, not this one's, to do).
-    - kind: ndbc
-      station: "WYSS1"
-      params: ["DEPTH", "OTMP", "COND", "SAL", "O2%", "O2PPM", "CLCON", "TURB", "PH", "EH"]
-    # Phase 2 Task 9 (sources/cdmo.py): NIW runs SIX water-quality stations,
-    # not the four Task 9's dispatch assumed -- Clambank Landing (CB),
-    # Debidue Creek (DC), Oyster Landing (OL), Thousand Acre (TA), and the
-    # WS/WB pair above, per the reserve's own metadata PDF. No entries are
-    # added here for the other five: unlike WYSS1, they have no NDBC mirror
-    # to poll, so there is no `kind: ndbc`/`kind: cdmo` fetch loop to
-    # declare -- CDMO import is a manual, one-shot historical backfill via
-    # `tidescout salinity import-cdmo`, run against a file the user
-    # downloads by hand, not a scheduled source. MEASURED anyway, 2026-08-23,
-    # against the real distance field, independently of whether any
-    # observation data has been imported yet (sources.cdmo.
-    # NIW_STATION_COORDS_LONLAT, all six positions sourced from the
-    # metadata PDF, run through the same site_distances_km WYSS1's own
-    # entry above used):
-    #   NIWCBWQ (Clambank Landing)   5.28 km, snap  4.2 m -- in domain
-    #   NIWOLWQ (Oyster Landing)     6.16 km, snap  5.6 m -- in domain
-    #   NIWDCWQ (Debidue Creek)      6.58 km, snap  8.0 m -- in domain
-    #   NIWTAWQ (Thousand Acre)     11.67 km, snap 12.1 m -- in domain
-    #   NIWWBWQ (Winyah Bay bottom) 15.03 km, snap  3.2 m -- in domain,
-    #     essentially the same distance as WYSS1/WS above (same piling,
-    #     surface vs. bottom -- differ in depth, not along-estuary position)
-    # All six sit inside the model domain, unlike both USGS 00480 sites --
-    # FIVE distinct along-estuary distances (WS and WB collapse to one),
-    # spanning 5.28-15.03 km, well past the fit's n_distinct_distances<3
-    # warning threshold, IF the historical observation data these positions
-    # belong to is actually imported. Geolocation alone does not supply
-    # observations -- see task-9-report.md for what CDMO's export format
-    # was established from and where to run the import.
+    # ---- NERRS North Inlet-Winyah Bay reserve, six water-quality stations ----
+    # All six are STORED (data/winyah-bay/ndbc.sqlite, 2.05 M salinity
+    # readings over 2016-01-01..2026-08-23) and all six are covered by the
+    # NERRS citation. `off_axis` decides only whether the salt-intrusion fit
+    # may read them.
     #
-    # Phase 2 Task 10 (sources/cdmo.py "MET FILE SUPPORT"): the reserve runs
-    # exactly ONE weather station system-wide, not one per WQ site -- at
-    # Oyster Landing, station code niwolmet, 33 20'57.85"N 79 11'20.03"W (a
-    # few feet from the OL WQ sonde above; independently sourced from the
-    # reserve's own MET metadata PDF, not copied from it). Same situation as
-    # the five non-WYSS1 WQ stations: no NDBC mirror to poll, so no `kind:`
-    # entry here -- `tidescout salinity import-cdmo` imports MET files
-    # (detected from their own header, mixed freely with WQ files in the
-    # same directory/zip) into a SIBLING sqlite table (met_observations),
-    # never the WQ one. Weather feeds the bite score directly in Phase 3's
-    # design (pressure trend, wind, air temp) but nothing reads this table
-    # yet -- stored and exposed, same seam Task 8/9 left for salinity.
+    # WYSS1 is the one with an NDBC mirror, so it alone is polled live
+    # (sources/ndbc.py, 15-minute cadence, hundredths of a psu). NDBC's
+    # realtime2 feed is a rolling window -- measured 45.6 days / 4,235 rows
+    # on 2026-08-23 -- so the store accumulates every fetch rather than
+    # re-reading only what NDBC currently serves. Its `params` are that
+    # product's own `.ocean` column headers, not USGS/CO-OPS codes.
+    #
+    # The other five have no mirror: their history is a manual one-shot
+    # backfill via `tidescout salinity import-cdmo`. They are declared
+    # anyway because the calibration path reads this list to decide what to
+    # look for in the store.
+    #
+    # DISTANCES RE-MEASURED 2026-08-23 against the corrected distance field
+    # (see model_domain.salt_source_boundary_utm_km -- the old figures were
+    # measured along a route that exited through North Inlet, understating
+    # the bay by 27-43%). Format: along-estuary km, snap gap m.
+    #
+    # WINYAH BAY PROPER -- on the salt-intrusion axis, fitted:
+    - kind: cdmo                       # Thousand Acre    16.68 km, snap 12.1 m
+      station: "NIWTAWQ"               # mean salinity  7.12 ppt
+      params: ["SAL"]
+      off_axis: false
+    - kind: ndbc                       # Winyah Bay SURFACE 19.03 km, snap 5.0 m
+      station: "WYSS1"                 # mean salinity  5.96 ppt
+      params: ["DEPTH", "OTMP", "COND", "SAL", "O2%", "O2PPM", "CLCON", "TURB", "PH", "EH"]
+      off_axis: false
+    - kind: cdmo                       # Winyah Bay BOTTOM  19.03 km, snap 3.2 m
+      station: "NIWWBWQ"               # mean salinity  9.60 ppt
+      params: ["SAL"]
+      off_axis: false
+    # The WS/WB pair share one piling and one along-estuary distance, and
+    # differ only in depth. Bottom is saltier than surface by a median
+    # +3.30 ppt (Task 11, 337,891 paired instants; bottom saltier 86.8% of
+    # the time). A depth-averaged single-layer model cannot be both, and that
+    # is a real part of why it does not fit -- dropping to surface-only alone
+    # takes the fit rmse from 4.07 to 3.37 ppt.
+    #
+    # NORTH INLET -- a SEPARATE BRANCH, stored but NOT fitted:
+    # These three average 31.4-32.0 ppt where the bay's own three average
+    # 6.0-9.6, at distances that order them the wrong way round (12.88-14.18
+    # vs 16.68-19.03 km). They are NOT hydrologically isolated -- all six
+    # respond to discharge, r(S, logQ) = -0.66 to -0.79, 9.4-15.9 ppt from
+    # low to high flow -- North Inlet simply takes the Winyah plume on the
+    # flood while being flushed by its own ocean inlet. A single distance
+    # axis cannot carry a 25 ppt baseline offset between two branches, so
+    # including them would clear n_distinct_distances>=3 only by counting two
+    # branches as one profile.
+    # Their distances also MOVE with the seed polygon's northern cut, while
+    # the bay's do not -- they route to the seed's EDGE rather than to a
+    # mouth, which is further evidence they are off this axis.
+    - kind: cdmo                       # Clambank Landing 12.88 km, snap  4.3 m
+      station: "NIWCBWQ"               # mean salinity 31.91 ppt
+      params: ["SAL"]
+      off_axis: true
+    - kind: cdmo                       # Oyster Landing  13.76 km, snap  5.6 m
+      station: "NIWOLWQ"               # mean salinity 32.04 ppt
+      params: ["SAL"]
+      off_axis: true
+    - kind: cdmo                       # Debidue Creek   14.18 km, snap  8.0 m
+      station: "NIWDCWQ"               # mean salinity 31.38 ppt
+      params: ["SAL"]
+      off_axis: true
+    # The reserve runs exactly ONE weather station system-wide, at Oyster
+    # Landing (niwolmet). It is not a water sensor and is not declared here;
+    # `import-cdmo` routes MET files into the sibling met_observations table
+    # by their own header. Weather feeds the bite score in Phase 3's design,
+    # but nothing reads that table yet.
 rivers:
   # WARNING (root cause of the 2026-08-14 library build failure -- 6 of 9
   # regimes died with "Too small timestep"): inflow_lonlat must sit well
