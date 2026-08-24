@@ -90,6 +90,79 @@ def test_citation_skips_the_wqp_store_when_it_was_never_imported(monkeypatch, tm
     assert not (paths.DATA_DIR / "winyah-bay" / "wqp.sqlite").exists()
 
 
+def test_citation_does_not_attribute_an_empty_wqp_store_to_nerrs(monkeypatch, tmp_path):
+    """`salinity_import_wqp` constructs the WQP store (which creates
+    `wqp.sqlite` and its empty schema as a side effect of mere construction,
+    `NdbcStore.__init__`) BEFORE its network calls. If `fetch_results`/
+    `fetch_stations` then raises, the file is left on disk with zero rows
+    and zero provenance. Gating the WQP block on `wqp_path.exists()` alone
+    would open that empty store, whose `.citation()` takes the `sources ==
+    ()` fallback and returns the NERRS template -- printing NERRS
+    boilerplate, including its DOI, under the "Water Quality Portal store"
+    heading. That is a misattribution of exactly the kind the citation work
+    exists to prevent, so the gate must be on the store actually holding
+    something, not on the file merely existing."""
+    _patch_data_dir(monkeypatch, tmp_path)
+    from tidescout.sources import wqp
+
+    # Schema only, no provenance and no rows -- simulates a failed
+    # `import-wqp` that got as far as constructing the store and no further.
+    wqp.default_store("winyah-bay")
+
+    result = runner.invoke(app, ["salinity", "citation", "winyah-bay"], env=WIDE)
+    assert result.exit_code == 0, result.exception or result.stdout
+    out = plain(result)
+    # Reported as empty, not printed as a second "Water Quality Portal
+    # store" citation block at all -- no heading, and definitely no NERRS
+    # attribution appearing a second time under a WQP label.
+    assert "Water Quality Portal store (wqp.sqlite)" not in out
+    assert "no rows or provenance" in out
+    # The NERRS store's own (legitimate) citation appears exactly once --
+    # not duplicated under a WQP heading.
+    assert out.count("doi:10.25921/vw8a-8031") == 1
+    assert out.count("North Inlet-Winyah Bay NERR") == 1
+
+
+def test_citation_omits_the_disclaimer_heading_for_a_wqp_only_store(monkeypatch, tmp_path):
+    """`_DISCLAIMER_BY_SOURCE_PREFIX` deliberately has no `"wqp:"` entry --
+    WQP contributes no disclaimer, and inventing one was explicitly
+    forbidden (see `ndbc.py`). So a WQP-only store's `citation().disclaimer`
+    is `""` by design, and `_print_citation_block` printing the "Disclaimer"
+    heading unconditionally left an empty labelled section that reads like
+    something failed to load. The heading must be suppressed, mirroring the
+    existing `if c.sources:` pattern already in the same function."""
+    _patch_data_dir(monkeypatch, tmp_path)
+    from tidescout.sources import wqp
+    from tidescout.sources.ndbc import Observation
+
+    wqp_store = wqp.default_store("winyah-bay")
+    wqp_store.append(
+        "21SC60WQ_WQX-WB-06",
+        [
+            Observation(
+                ts=datetime(2018, 7, 18, 12, 0, tzinfo=UTC),
+                depth_m=None, water_temp_c=None, cond_ms_cm=None,
+                salinity_psu=11.69, o2_pct=None, o2_ppm=None,
+                chlorophyll_ug_l=None, turbidity_ftu=None, ph=None, eh_mv=None,
+            )
+        ],
+    )
+    wqp_store.record_provenance(
+        "wqp:salinity", ["21SC60WQ_WQX-WB-06"], None, 1,
+        accessed_at=datetime(2026, 8, 24, 12, 0, tzinfo=UTC),
+    )
+
+    result = runner.invoke(app, ["salinity", "citation", "winyah-bay"], env=WIDE)
+    assert result.exit_code == 0, result.exception or result.stdout
+    out = plain(result)
+    wqp_block = out.split("Water Quality Portal store (wqp.sqlite)", 1)[1]
+    assert "Disclaimer" not in wqp_block
+    # The NERRS block above it still has one -- only the empty WQP one is
+    # suppressed, not the heading itself everywhere.
+    nerrs_block = out.split("Water Quality Portal store (wqp.sqlite)", 1)[0]
+    assert "Disclaimer" in nerrs_block
+
+
 def test_citation_includes_both_stores_when_both_exist(monkeypatch, tmp_path):
     """This is the whole point of Task 3's WQP ingestion: SC DES, SCDHEC and
     Coastal Carolina supply the large majority of this fishery's distinct

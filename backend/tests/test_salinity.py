@@ -1098,6 +1098,55 @@ def test_store_station_with_no_known_position_reports_no_coordinates_not_off_axi
         assert "axis" not in notes[station].lower()
 
 
+def test_store_station_declared_off_axis_true_and_unlocated_reports_no_coordinates(
+    monkeypatch,
+):
+    """The other half of the truth table the previous test does not cover.
+    `store_stem_ok and w.station in store_coords` correctly guards the
+    `off_axis: false` case (previous test), but the `else` branch used to
+    fall back to `w.off_axis` -- the DECLARED flag -- which can be `True`.
+    `NIWCBWQ`/`NIWOLWQ`/`NIWDCWQ` are declared `off_axis: true` in
+    `winyah-bay.yaml` (North Inlet, a separate branch); simulated here with
+    no surveyed position at all. Before the fix, `is_off_axis` was never
+    even consulted -- the bare `w.off_axis` fallback handed `True` straight
+    to `build_site_record`, which tests `off_axis` BEFORE `located`, so the
+    station reported "off the salt-intrusion axis" instead of the true
+    reason: nobody knows where it is. Being unplaceable is a fact about the
+    station; the YAML flag is a claim about which branch it sits on, and
+    that claim cannot be asserted for a station whose position is unknown.
+    Not reachable on Winyah today (every declared store station has a
+    surveyed position) but simulated here for the stamp-out fisheries the
+    spec names (Charleston, Awendaw, Murrells Inlet)."""
+    from datetime import datetime, timedelta
+
+    from tidescout.config import load_fishery
+
+    fishery = load_fishery("winyah-bay")
+
+    class _Store:
+        def salinity_series(self, station):
+            base = datetime(2026, 5, 1, 4, 0, tzinfo=UTC)
+            return [(base + timedelta(minutes=15 * i), 32.0 + (i % 8)) for i in range(96)]
+
+    monkeypatch.setattr(salinity_fit, "_open_store", lambda slug: _Store())
+    monkeypatch.setattr(salinity_fit, "_store_coords", lambda sites: {})
+    monkeypatch.setattr(salinity_fit, "_store_distances", lambda slug, fishery, sites: {})
+    monkeypatch.setattr(
+        salinity_fit, "_usgs_inputs",
+        lambda *a, **k: ({}, {date(2026, 5, 1): 4000.0, date(2026, 5, 2): 4200.0}, [], {}),
+    )
+    monkeypatch.setattr(salinity_fit, "_wqp_sites", lambda slug: {})
+
+    data = salinity_fit.collect_observations("winyah-bay", fishery, cache=None, days=90)
+    notes = {r.site: r.note for r in data.sites}
+
+    # Declared off_axis=True in the YAML, and now unlocatable -- must
+    # report "no coordinates", never "off axis".
+    for station in ("NIWCBWQ", "NIWOLWQ", "NIWDCWQ"):
+        assert "coordinates" in notes[station].lower()
+        assert "axis" not in notes[station].lower()
+
+
 def test_calibrate_reports_both_sources_not_just_the_usgs_window(monkeypatch):
     """The header claimed "00480 sensors over the last N days". Once the
     NERRS store contributes its full held history that is wrong twice over:

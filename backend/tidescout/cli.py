@@ -991,8 +991,9 @@ def _print_citation_block(label: str, c) -> None:
     console.print(c.text, soft_wrap=True)
     console.print("\n[bold]Acknowledgement[/bold]")
     console.print(c.acknowledgement, soft_wrap=True)
-    console.print("\n[bold]Disclaimer[/bold]")
-    console.print(c.disclaimer, soft_wrap=True)
+    if c.disclaimer:
+        console.print("\n[bold]Disclaimer[/bold]")
+        console.print(c.disclaimer, soft_wrap=True)
     console.print("\n[bold]Subset of data used[/bold]")
     for line in c.subset_lines:
         console.print(f"  {line}", soft_wrap=True)
@@ -1051,8 +1052,30 @@ def salinity_citation(slug: str) -> None:
 
     wqp_path = fishery_data_dir(slug) / "wqp.sqlite"
     if wqp_path.exists():
+        # `wqp_path.exists()` alone is not enough: `NdbcStore.__init__`
+        # creates the file and its (empty) schema as a side effect of mere
+        # construction, and `salinity_import_wqp` constructs the store
+        # BEFORE its network calls. If `fetch_results`/`fetch_stations`
+        # then raises `SourceUnavailable`, the file is left on disk with
+        # zero rows and zero provenance. Opening THAT store and calling
+        # `.citation()` takes the `sources == ()` branch and returns the
+        # NERRS template (`NdbcStore.citation`'s honest fallback for "no
+        # provenance to generate from") -- printing it under this heading
+        # would misattribute NERRS's citation, including its DOI, to the
+        # Water Quality Portal store. So the gate is on the store actually
+        # HOLDING something (`c.sources` non-empty), not on the file
+        # existing -- a file that exists but holds nothing is reported as
+        # empty, never silently given another organisation's citation.
         wqp_store = wqp.default_store(slug)
-        _print_citation_block("Water Quality Portal store (wqp.sqlite)", wqp_store.citation())
+        wqp_citation = wqp_store.citation()
+        if wqp_citation.sources:
+            _print_citation_block("Water Quality Portal store (wqp.sqlite)", wqp_citation)
+        else:
+            console.print(
+                "\n[dim]wqp.sqlite exists but holds no rows or provenance for this "
+                f"fishery -- a prior `tidescout salinity import-wqp {slug}` likely "
+                "failed before writing anything. No citation to print.[/dim]"
+            )
     else:
         console.print(
             "\n[dim]No WQP store for this fishery yet (`wqp.sqlite` does not exist) -- "

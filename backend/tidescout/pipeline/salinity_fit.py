@@ -1322,26 +1322,34 @@ def collect_observations(
     store_usable: dict[str, float] = {}
     for w in store_sensors:
         rows = sorted(store_means.get(w.station, {}).items())
-        off_axis = (
-            is_off_axis(store_stem.get(w.station, float("nan")), w.off_axis)
-            if store_stem_ok and w.station in store_coords
-            # Either no computed distance available at all, or -- the guard
-            # `w.station in store_coords` added here -- no SURVEYED POSITION
-            # for this station in the first place (not in
-            # `cdmo.NIW_STATION_COORDS_LONLAT`). Without it `store_stem.get`
-            # would default to NaN and `is_off_axis` reads NaN as "off the
-            # axis", which is the wrong REASON: NaN there means "nobody
-            # knows where this sonde is," not "a real branch the coordinate
-            # cannot place." Falling back to the declared flag alone (same
-            # posture as the stem-field-missing case) lets `located` below
-            # name the true failure instead -- the same guard the WQP path
-            # already applies over `wqp_known` (see `wqp_off_axis` below).
-            # Not reachable on Winyah (every declared store station has a
-            # surveyed position), but the stamp-out fisheries the spec names
-            # (Charleston, Awendaw, Murrells Inlet) will have sondes outside
-            # that table.
-            else w.off_axis
-        )
+        if store_stem_ok and w.station in store_coords:
+            off_axis = is_off_axis(store_stem.get(w.station, float("nan")), w.off_axis)
+        elif w.station not in store_coords:
+            # No SURVEYED POSITION for this station at all (not in
+            # `cdmo.NIW_STATION_COORDS_LONLAT`) -- regardless of whether the
+            # stem field itself is available. Falling back to `w.off_axis`
+            # here would be the wrong REASON: being unplaceable is a fact
+            # about the station, not a claim about which branch it sits on,
+            # and `build_site_record` tests `off_axis` BEFORE `located` (see
+            # its docstring), so a bare `w.off_axis` fallback would report
+            # "off axis" even for a station the YAML declares on-axis is
+            # unlocated -- it would never reach the `located` check at all.
+            # `False` here lets `located` below name the true failure
+            # ("no coordinates known for this site") instead -- the same
+            # guard the WQP path already applies over `wqp_known` (see
+            # `wqp_off_axis` below). Not reachable on Winyah (every declared
+            # store station has a surveyed position), but the stamp-out
+            # fisheries the spec names (Charleston, Awendaw, Murrells Inlet)
+            # will have sondes outside that table.
+            off_axis = False
+        else:
+            # `store_stem_ok` is False: the stem distance field itself has
+            # not been built (see `_stem_km_or_fallback`). This station DOES
+            # have a surveyed position, so "unplaceable" is not the issue --
+            # there is simply no computed distance to test it against, and
+            # the declared flag is the best information left. Pre-this-task
+            # behaviour, unchanged.
+            off_axis = w.off_axis
         record = build_site_record(
             w.station,
             rows,
