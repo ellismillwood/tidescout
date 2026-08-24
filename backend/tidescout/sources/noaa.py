@@ -84,6 +84,51 @@ def tide_events(station: str, day: date, tz: str, cache: Cache) -> list[TideEven
     ]
 
 
+def tide_events_range(
+    station: str, start: date, end: date, tz: str, cache: Cache
+) -> list[TideEvent]:
+    """Hi/lo predictions across a multi-year span, fetched a year at a time.
+
+    The salinity calibration needs a tidal phase for every grab sample it
+    holds -- measured 2026-08-24: 1,260 unique dates spanning 1999-2026.
+    Looping `tide_events` would be 1,260 requests; yearly chunks are 28.
+    Both are one-time (PREDICTION_TTL is None because predictions are
+    deterministic), but only one is neighbourly to a federal service.
+
+    Chunks are keyed per year, so extending the range later re-fetches only
+    the years actually added.
+    """
+    zone = ZoneInfo(tz)
+    out: list[TideEvent] = []
+    for year in range(start.year, end.year + 1):
+        begin = f"{year}0101"
+        finish = f"{year}1231"
+        params = {
+            "product": "predictions",
+            "application": "tidescout",
+            "station": station,
+            "begin_date": begin,
+            "end_date": finish,
+            "datum": "MLLW",
+            "time_zone": "lst_ldt",
+            "units": "english",
+            "interval": "hilo",
+            "format": "json",
+        }
+        cached = cache.get_or_fetch(
+            "coops",
+            f"hilo:{station}:{begin}:{finish}",
+            PREDICTION_TTL,
+            lambda p=params: _get_json(p),
+        )
+        out.extend(
+            TideEvent(_parse_t(p["t"], zone), p["type"], float(p["v"]))
+            for p in cached.payload.get("predictions", [])
+        )
+    out.sort(key=lambda e: e.time)
+    return out
+
+
 def current_hours(station: str, day: date, tz: str, cache: Cache) -> list[CurrentHour]:
     begin, end = _window(day)
     params = {

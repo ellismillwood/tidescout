@@ -101,3 +101,97 @@ def test_water_temp_latest(tmp_path):
     assert result is not None
     temp, _at = result
     assert temp == 84.2
+
+
+def test_tide_events_range_chunks_by_year(monkeypatch):
+    """1,260 unique dates over 27 years is 28 yearly calls, not 1,260 daily
+    ones. The cache makes both one-time, but not both cheap."""
+    from datetime import date
+
+    from tidescout.sources import noaa
+
+    calls = []
+
+    def fake_get_or_fetch(source, key, ttl, fetch):
+        calls.append(key)
+        return type("C", (), {"payload": {"predictions": []}})()
+
+    cache = type("Cache", (), {"get_or_fetch": staticmethod(fake_get_or_fetch)})()
+    noaa.tide_events_range(
+        "8662549", date(1999, 1, 1), date(2001, 12, 31), "America/New_York", cache
+    )
+
+    assert len(calls) == 3, f"expected one call per year, got {calls}"
+
+
+def test_tide_events_range_returns_events_in_time_order(monkeypatch):
+    """Yearly chunks are concatenated; phase_at sorts defensively, but the
+    seam is where unsorted input would first appear."""
+    from datetime import date
+
+    from tidescout.sources import noaa
+
+    payloads = {
+        "1999": {"predictions": [{"t": "1999-06-01 05:00", "type": "L", "v": "-0.5"}]},
+        "2000": {"predictions": [{"t": "2000-06-01 05:00", "type": "H", "v": "4.0"}]},
+    }
+
+    def fake_get_or_fetch(source, key, ttl, fetch):
+        year = key.split(":")[2][:4]
+        return type("C", (), {"payload": payloads[year]})()
+
+    cache = type("Cache", (), {"get_or_fetch": staticmethod(fake_get_or_fetch)})()
+    out = noaa.tide_events_range(
+        "8662549", date(1999, 1, 1), date(2000, 12, 31), "America/New_York", cache
+    )
+
+    assert [e.time for e in out] == sorted(e.time for e in out)
+    assert len(out) == 2
+
+
+def test_tide_events_range_uses_the_permanent_prediction_cache(monkeypatch):
+    """Predictions are deterministic; re-fetching 28 years on every run
+    would be pure waste."""
+    from datetime import date
+
+    from tidescout.sources import noaa
+
+    seen_ttl = []
+
+    def fake_get_or_fetch(source, key, ttl, fetch):
+        seen_ttl.append(ttl)
+        return type("C", (), {"payload": {"predictions": []}})()
+
+    cache = type("Cache", (), {"get_or_fetch": staticmethod(fake_get_or_fetch)})()
+    noaa.tide_events_range(
+        "8662549", date(2020, 1, 1), date(2020, 12, 31), "America/New_York", cache
+    )
+
+    assert seen_ttl == [noaa.PREDICTION_TTL]
+    assert noaa.PREDICTION_TTL is None
+
+
+def test_tide_events_range_parses_a_real_coops_response():
+    """A recorded real response, not a hand-built one. CO-OPS returns naive
+    local-time strings with `time_zone=lst_ldt`; parsing them as UTC would
+    shift every phase by 4-5 hours -- a third of a tidal cycle."""
+    import json
+    from datetime import date
+    from pathlib import Path
+
+    from tidescout.sources import noaa
+
+    payload = json.loads(
+        (Path(__file__).parent / "fixtures" / "coops_hilo_1999.json").read_text()
+    )
+    cache = type("Cache", (), {
+        "get_or_fetch": staticmethod(lambda s, k, t, f: type("C", (), {"payload": payload})())
+    })()
+
+    out = noaa.tide_events_range("8662549", date(1999, 1, 1), date(1999, 12, 31),
+                                 "America/New_York", cache)
+
+    assert out, "the real fixture must yield events"
+    assert all(e.time.tzinfo is not None for e in out)
+    assert all(e.kind in ("H", "L") for e in out)
+    assert out == sorted(out, key=lambda e: e.time)
