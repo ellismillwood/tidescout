@@ -277,6 +277,53 @@ discharge_buckets:
   # tie-breaking, which is now a tie rather than a win.
   freshet_cfs: 22996
 salinity:
+  # ============================================================================
+  # CALIBRATION RE-RUN 2026-08-23 ON THE FULL NERRS RECORD -- THE MODEL IS
+  # FALSIFIED, NOT MERELY UNCONSTRAINED. Values below remain THEORETICAL.
+  #
+  # Task 5 (below) could only say "these data cannot tell." With 2.05 M NERRS
+  # readings over 10.6 years the answer is no longer "cannot tell":
+  #
+  #   10,864 observations + 10,864 tidal swings, 2016-01-01 .. 2026-08-22,
+  #   discharge 1,232-183,660 cfs, 3,569 distinct flows.
+  #     rmse            4.060 ppt  against an observation resolution of 0.003
+  #                                -- 1,353x. Task 5's 1.719 ppt was 1.7x its
+  #                                1.0 ppt USGS quantum, which is why it could
+  #                                only report ignorance. NERRS resolves to
+  #                                hundredths, so the same test now reads three
+  #                                orders of magnitude over resolution.
+  #     tidal-swing rmse 5.073 ppt against a resolution of 0.044 -- 115x.
+  #     condition 12.2, every 1-sigma well below its value, nothing at a
+  #     bound. The fit is NUMERICALLY healthy and still reproduces nothing:
+  #     exactly the failure mode the warnings block was written to catch.
+  #   fitted=False. Nothing from that run is written below.
+  #
+  # THREE MEASURED REASONS, none of which more data of this kind would fix:
+  #   1. STRATIFICATION. The WS/WB pair share one distance and differ by a
+  #      median +3.30 ppt (bottom saltier 86.8% of 337,891 paired instants).
+  #      A depth-averaged single layer cannot be both; dropping to surface-only
+  #      alone moves rmse 4.07 -> 3.37.
+  #   2. TWO BRANCHES ON ONE AXIS. North Inlet reads 31.4-32.0 ppt where the
+  #      bay reads 6.0-9.6 at distances that order them the wrong way round.
+  #      Excluded as off_axis (see stations.water); including them would clear
+  #      n_distinct_distances>=3 only by calling two branches one profile.
+  #   3. COVERAGE, and this is the binding one. The bay's own stations sit at
+  #      16.68 and 19.03 km -- TWO distinct distances spanning 2.35 km --
+  #      against a fitted front width of 14.48 km. Every known fishing spot
+  #      sits at 2.58-13.05 km, i.e. entirely BELOW the observed range. The
+  #      CDMO import did not close Task 5's extrapolation gap; it moved the
+  #      observations further from the spots, not closer.
+  #
+  # WHAT WOULD ACTUALLY RESOLVE IT, superseding Task 5's note below: NOT more
+  # NERRS history, and NOT the CDMO IP registration (that data is now in hand
+  # and is what produced this result). Either a salinity sensor between the
+  # jetties and Mud Bay Cut -- the 2.58-13.05 km reach where the spots are and
+  # no observation exists -- or a model with an axis for the vertical
+  # structure and the branching, which is a design change, not a fit.
+  #
+  # The climatology fallback below therefore stays live and load-bearing.
+  # ============================================================================
+  #
   # CALIBRATION ATTEMPTED AND DECLINED 2026-08-22 (Task 5). Every value below
   # is still THEORETICAL, not fitted. `tidescout salinity calibrate` runs and
   # returns numbers; those numbers are not constrained by any data that
