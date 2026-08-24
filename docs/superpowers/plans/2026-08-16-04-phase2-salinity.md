@@ -77,7 +77,8 @@ Salinity is a function of how far the water is from the sea **through water**, n
 **Interfaces:**
 - Consumes: `flowlib.grid_spec`, `fishery.model_domain.ocean_boundary_utm_km`
 - Produces:
-  - `along_estuary_km(spec, ocean_polygon_utm_km) -> np.ndarray` — 1-D, library-masked, km from the sea, NaN where unreachable
+  - `along_estuary_km(spec, seed_mask) -> np.ndarray` — 1-D, library-masked, km from the sea, NaN where unreachable. Seed-agnostic: takes a boolean seed mask, not a polygon, so the Dijkstra core stays pure and Task 3/5 callers can pass their own seeds without going through `ocean_seed_mask`.
+  - `ocean_seed_mask(spec, ocean_boundary_utm_km, bed_elev_m, ocean_max_z_m) -> np.ndarray` — the polygon-to-seed adapter: in-domain cells that are on the domain's outer edge, below `ocean_max_z_m`, inside the authored polygon, and in the largest connected component of that set (see `estuary.py` for why all four conditions are needed)
   - `build_distance_field(slug, fishery) -> Path` → `data/<slug>/estuary_km.npy`
   - `load_distance_field(slug) -> np.ndarray`
   Task 3 and Task 5 both consume the 1-D array.

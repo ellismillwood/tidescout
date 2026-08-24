@@ -2,6 +2,8 @@ import numpy as np
 import pytest
 
 from tidescout.engine import flow
+from tidescout.engine.flow import blend_regimes
+from tidescout.models import DischargeBuckets
 
 
 def test_exact_regime_is_preferred():
@@ -209,3 +211,191 @@ def test_tide_states_rejects_an_empty_series():
 def test_tide_states_handles_a_flat_series():
     """A regime whose boundary never moved is entirely slack, not a crash."""
     assert flow.tide_states([1.0, 1.0, 1.0, 1.0]) == ["slack"] * 4
+
+
+BUCKETS = DischargeBuckets(
+    low_below_cfs=2774.0, high_above_cfs=6292.0, freshet_cfs=22996.0
+)
+# The library as rebuilt in Plan 4 Task 7: three range buckets x four
+# discharge buckets, the fourth being the observed-maximum freshet.
+ALL = {
+    f"{r}_{d}"
+    for r in ("neap", "mean", "spring")
+    for d in ("low", "med", "high", "freshet")
+}
+# The shipped nine, before the freshet rebuild -- still a legitimate library
+# state (a fishery that has not measured a freshet has exactly this), so the
+# clamp-at-`high` behaviour it produces is tested rather than deleted.
+NO_FRESHET = {n for n in ALL if not n.endswith("_freshet")}
+PRE_FRESHET_BUCKETS = DischargeBuckets(low_below_cfs=2774.0, high_above_cfs=6292.0)
+
+
+def test_exact_bucket_flow_returns_a_single_regime():
+    mix, clamped = blend_regimes("mean", 2774.0, BUCKETS, ALL)
+    assert mix == [("mean_low", 1.0)]
+    assert clamped is False
+
+
+def test_midway_flow_blends_the_two_bracketing_buckets():
+    """4533 cfs is the med point; 3653 is halfway from low to med."""
+    mix, _ = blend_regimes("mean", 3653.5, BUCKETS, ALL)
+    assert {r for r, _ in mix} == {"mean_low", "mean_med"}
+    assert dict(mix)["mean_low"] == pytest.approx(0.5, abs=0.01)
+    assert sum(w for _, w in mix) == pytest.approx(1.0)
+
+
+def test_blend_never_crosses_the_range_axis():
+    """Range is the strong axis -- one step rescales the whole tidal forcing.
+    A blend that traded it for discharge would be the exact mistake
+    RANGE_STEP_COST=3 exists to prevent."""
+    mix, _ = blend_regimes("spring", 5000.0, BUCKETS, ALL)
+    assert all(r.startswith("spring_") for r, _ in mix)
+
+
+def test_flow_at_the_top_bucket_is_the_freshet_regime_and_does_not_clamp():
+    """The clamp boundary moved from 6,292 to 22,996 cfs when `freshet` was
+    simulated. 22,996 is the observed maximum of the composite record and is
+    now a regime that was actually run, so it must resolve to that regime
+    exactly and NOT report itself as extrapolated."""
+    mix, clamped = blend_regimes("mean", 22996.0, BUCKETS, ALL)
+    assert mix == [("mean_freshet", 1.0)]
+    assert clamped is False
+
+
+def test_flow_above_the_top_bucket_clamps_and_flags():
+    """Past the observed maximum there is still nothing simulated to blend to.
+
+    Input raised above the new ceiling: 22,996 cfs used to be the canonical
+    "way past anything we ran" value and is now a regime, so this needs a
+    flow above THAT to still be testing the clamp.
+    """
+    mix, clamped = blend_regimes("mean", 30000.0, BUCKETS, ALL)
+    assert mix == [("mean_freshet", 1.0)]
+    assert clamped is True
+
+
+def test_the_freshet_bucket_ramps_instead_of_snapping():
+    """Between `high` and `freshet` the axis interpolates like any other pair.
+
+    The gap is 16,704 cfs against 1,759 for the two below it, so this interval
+    carries most of the record and getting its weighting wrong would be worth
+    more than the rest of the axis combined. Midpoint of 6,292 and 22,996 is
+    14,644.
+    """
+    mix, clamped = blend_regimes("mean", 14644.0, BUCKETS, ALL)
+    assert clamped is False
+    assert {r for r, _ in mix} == {"mean_high", "mean_freshet"}
+    assert dict(mix)["mean_freshet"] == pytest.approx(0.5, abs=0.01)
+    assert sum(w for _, w in mix) == pytest.approx(1.0)
+
+
+def test_a_library_without_freshet_still_clamps_at_high():
+    """The shipped-nine state must keep working unchanged.
+
+    A fishery with no `freshet_cfs` has no fourth bucket, so 22,996 cfs is
+    once again above everything simulated and must clamp to `high` and flag.
+    """
+    mix, clamped = blend_regimes("mean", 22996.0, PRE_FRESHET_BUCKETS, NO_FRESHET)
+    assert mix == [("mean_high", 1.0)]
+    assert clamped is True
+
+
+def test_a_freshet_regime_with_no_configured_flow_is_an_error_not_a_silent_clamp():
+    """A library/config mismatch must not quietly discard the new regimes.
+
+    If the freshet regimes exist on disk but the fishery never recorded what
+    flow they were run at, there is no cfs to place them on the ramp. Dropping
+    them would silently clamp the axis back to `high` -- throwing away the
+    hours of compute the rebuild cost, with nothing anywhere to notice.
+    """
+    with pytest.raises(ValueError, match="freshet_cfs"):
+        blend_regimes("mean", 10000.0, PRE_FRESHET_BUCKETS, ALL)
+
+
+def test_bucket_flows_omits_freshet_when_the_fishery_has_not_measured_one():
+    """No defensible default exists, so there must be no default."""
+    assert "freshet" not in flow.bucket_flows(PRE_FRESHET_BUCKETS)
+    assert flow.bucket_flows(BUCKETS)["freshet"] == 22996.0
+
+
+def test_a_three_step_discharge_gap_now_ties_one_range_step():
+    """Documents what the fourth bucket did to select_regime's cost function.
+
+    RANGE_STEP_COST=3 was chosen as the smallest integer exceeding the widest
+    discharge gap, which was 2 when the axis had three buckets. `freshet`
+    makes it 3, so `low <-> freshet` now COSTS THE SAME as one range step and
+    the alphabetical tiebreak decides. Pinned rather than fixed: the tie is
+    only reachable in a partial library, and the measurement that made
+    "never trade range for discharge" obviously right was taken across
+    2,774-6,292 cfs, not out to 22,996 where discharge moves speed by 17.20%.
+    See engine/flow.py's RANGE_STEP_COST comment.
+    """
+    # spring_freshet keeps the range but is 3 discharge steps off; mean_low
+    # has the exact discharge but is 1 range step off. Both cost 3.
+    name, fell_back = flow.select_regime(
+        "spring", "low", {"mean_low", "spring_freshet"}
+    )
+    assert fell_back is True
+    assert name == "mean_low"  # alphabetical, on a genuine tie
+
+
+def test_flow_below_the_bottom_bucket_clamps_and_flags():
+    mix, clamped = blend_regimes("mean", 500.0, BUCKETS, ALL)
+    assert mix == [("mean_low", 1.0)]
+    assert clamped is True
+
+
+def test_blend_falls_back_when_a_bracketing_regime_is_missing():
+    """A partial library must degrade, per spec section 10, not raise."""
+    partial = {"mean_low", "mean_high"}
+    mix, _ = blend_regimes("mean", 4533.0, BUCKETS, partial)
+    assert {r for r, _ in mix} <= partial
+    assert sum(w for _, w in mix) == pytest.approx(1.0)
+
+
+def test_weights_are_never_negative():
+    for cfs in (
+        1000.0, 2774.0, 3500.0, 4533.0, 5500.0, 6292.0, 14644.0, 22996.0, 30000.0
+    ):
+        mix, _ = blend_regimes("mean", cfs, BUCKETS, ALL)
+        assert all(w >= 0.0 for _, w in mix)
+        assert sum(w for _, w in mix) == pytest.approx(1.0)
+
+
+def test_blend_falls_back_across_the_range_axis_when_the_range_bucket_has_no_regimes():
+    """Basic coverage for the `not order` branch: when `range_bucket` has no
+    regime at ANY discharge, blend_regimes cannot blend at all and must fall
+    through to select_regime's cross-range fallback rather than crash or
+    silently drop the axis.
+
+    mean is one range step from spring; neap is two. RANGE_STEP_COST=3 beats
+    even the worst possible discharge mismatch (DISCHARGE_STEP_COST=1 * 2),
+    so a `mean_*` regime always wins over any `neap_*` one here regardless of
+    which discharge bucket 4533 cfs (the med point) is nearest to -- and
+    since it's nearest med itself, mean_med is the unique minimum-cost pick."""
+    no_spring = {n for n in ALL if not n.startswith("spring_")}
+    mix, clamped = blend_regimes("spring", 4533.0, BUCKETS, no_spring)
+    assert mix == [("mean_med", 1.0)]
+    assert clamped is True
+
+
+def test_blend_fallback_breaks_a_range_tie_by_actual_discharge_not_a_fixed_med():
+    """Regression for a defect found in review: the total-fallback branch
+    once scored every candidate's discharge distance against a hardcoded
+    "med" instead of the bucket nearest `cfs`, so two range-adjacent
+    candidates that tied on range distance fell through to an alphabetic
+    tiebreak instead of the real discharge distance.
+
+    neap_high and spring_low are both exactly one range step from "mean"
+    (RANGE_STEP_COST=3 either way) -- a genuine tie that must be broken by
+    discharge. cfs=100 sits far below every bucket, so "low" is the correct
+    discharge match: scored against the true nearest bucket ("low"), the
+    costs are neap_high=3*1+1*2=5 vs spring_low=3*1+1*0=3, and spring_low
+    wins outright. Scored against a fixed "med" they would instead tie at
+    cost 4 apiece (3*1+1*1 for both), and the name-alphabetical tiebreak
+    would hand this to neap_high -- the high-discharge regime, wrong for
+    cfs=100 -- which is exactly the bug this pins against regressing."""
+    avail = {"neap_high", "spring_low"}
+    mix, clamped = blend_regimes("mean", 100.0, BUCKETS, avail)
+    assert mix == [("spring_low", 1.0)]
+    assert clamped is True

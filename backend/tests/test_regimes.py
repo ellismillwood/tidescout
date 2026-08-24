@@ -6,6 +6,11 @@ import pytest
 
 from tidescout.pipeline import regimes
 
+# Derived, never hardcoded: these tests are about "one regime failed and the
+# others survived", and a literal 8/9 silently stops testing that the moment
+# the matrix changes size -- which it just did, from 9 to 12.
+N_REGIMES = len(regimes.REGIME_MATRIX)
+
 
 class _FakeElevationQuantity:
     """Stand-in for `domain.get_quantity("elevation")` -- only the one method
@@ -36,15 +41,36 @@ class _FakeDomain:
         return self._elev
 
 
-def test_regime_matrix_is_three_by_three():
-    assert len(regimes.REGIME_MATRIX) == 9
+def test_regime_matrix_is_three_by_four():
+    """Four discharge buckets since Plan 4 Task 7, not three.
+
+    The fourth is `freshet`, the observed maximum of the composite record.
+    Twelve regimes is the size of a full rebuild, so this number is also the
+    compute budget -- 12 at 9 workers runs in two waves.
+    """
+    assert len(regimes.REGIME_MATRIX) == 12
     assert ("spring", "high") in regimes.REGIME_MATRIX
-    assert len(set(regimes.REGIME_MATRIX)) == 9
+    assert ("spring", "freshet") in regimes.REGIME_MATRIX
+    assert len(set(regimes.REGIME_MATRIX)) == 12
+
+
+def test_the_build_axis_matches_the_lookup_axis():
+    """What the library is BUILT at and how it is READ must name the same
+    buckets, in the same order.
+
+    These are deliberately two separate lists (pipeline vs pure engine), so
+    nothing but this test stops one from gaining a bucket the other has never
+    heard of -- which would either build regimes no lookup can reach, or index
+    lookups to regimes that were never run.
+    """
+    from tidescout.engine.flow import DISCHARGE_ORDER
+
+    assert regimes.DISCHARGE_BUCKETS == DISCHARGE_ORDER
 
 
 def test_regime_name_is_filesystem_safe_and_unique():
     names = {regimes.regime_name(r, d) for r, d in regimes.REGIME_MATRIX}
-    assert len(names) == 9
+    assert len(names) == 12
     assert all(n.replace("_", "").isalnum() for n in names)
 
 
@@ -161,9 +187,9 @@ def test_build_library_records_a_failed_regime_without_losing_others(monkeypatch
 
     assert results["spring_high"]["status"] == "failed"
     assert "solver blew up" in results["spring_high"]["error"]
-    assert sum(v["status"] == "ok" for v in results.values()) == 8
+    assert sum(v["status"] == "ok" for v in results.values()) == N_REGIMES - 1
     manifest = json.loads((regimes.regime_dir("winyah-bay") / "library.json").read_text())
-    assert len(manifest["regimes"]) == 9
+    assert len(manifest["regimes"]) == N_REGIMES
 
 
 def test_build_library_records_missing_regime_json_without_losing_others(
@@ -191,9 +217,9 @@ def test_build_library_records_missing_regime_json_without_losing_others(
     results = regimes.build_library("winyah-bay", max_workers=1)
 
     assert results["spring_high"]["status"] == "failed"
-    assert sum(v["status"] == "ok" for v in results.values()) == 8
+    assert sum(v["status"] == "ok" for v in results.values()) == N_REGIMES - 1
     manifest = json.loads((regimes.regime_dir("winyah-bay") / "library.json").read_text())
-    assert len(manifest["regimes"]) == 9
+    assert len(manifest["regimes"]) == N_REGIMES
 
 
 def test_build_library_records_corrupt_regime_json_without_losing_others(
@@ -221,9 +247,9 @@ def test_build_library_records_corrupt_regime_json_without_losing_others(
     results = regimes.build_library("winyah-bay", max_workers=1)
 
     assert results["spring_high"]["status"] == "failed"
-    assert sum(v["status"] == "ok" for v in results.values()) == 8
+    assert sum(v["status"] == "ok" for v in results.values()) == N_REGIMES - 1
     manifest = json.loads((regimes.regime_dir("winyah-bay") / "library.json").read_text())
-    assert len(manifest["regimes"]) == 9
+    assert len(manifest["regimes"]) == N_REGIMES
 
 
 def test_build_library_records_reversal_check_failure_without_losing_others(
@@ -254,9 +280,9 @@ def test_build_library_records_reversal_check_failure_without_losing_others(
 
     assert results["spring_high"]["status"] == "failed"
     assert "corrupt snapshot array" in results["spring_high"]["error"]
-    assert sum(v["status"] == "ok" for v in results.values()) == 8
+    assert sum(v["status"] == "ok" for v in results.values()) == N_REGIMES - 1
     manifest = json.loads((regimes.regime_dir("winyah-bay") / "library.json").read_text())
-    assert len(manifest["regimes"]) == 9
+    assert len(manifest["regimes"]) == N_REGIMES
 
 
 def test_attach_river_inflows_raises_on_land_only_region(fishery):
@@ -345,7 +371,7 @@ def test_build_library_reports_each_regime_as_it_finishes(monkeypatch, tmp_path)
         "winyah-bay", max_workers=1, on_result=lambda n, m: seen.append((n, m))
     )
 
-    assert len(seen) == 9, "every regime must be reported, not just the good ones"
+    assert len(seen) == N_REGIMES, "every regime must be reported, not just the good ones"
     # Order is completion order (matrix order on the serial path, whichever
     # finishes first in the pool), so compare as sets rather than sequences.
     assert sorted(n for n, _ in seen) == sorted(results)
@@ -374,7 +400,40 @@ def test_build_library_without_a_callback_still_runs(monkeypatch, tmp_path):
 
     results = regimes.build_library("winyah-bay", max_workers=1)
 
-    assert sum(v["status"] == "ok" for v in results.values()) == 9
+    assert sum(v["status"] == "ok" for v in results.values()) == N_REGIMES
+
+
+def test_build_library_regimes_param_runs_only_the_given_subset(monkeypatch, tmp_path):
+    """`regimes` lets a caller rebuild a subset (e.g. regimes that failed on a
+    prior pass) without re-running the rest of REGIME_MATRIX. Added for the
+    2026-08-23 recovery: three regimes died mid-build to a config mismatch
+    and the other nine, already good, were not to be re-simulated."""
+    from tidescout import paths
+    monkeypatch.setattr(paths, "DATA_DIR", tmp_path / "data")
+
+    seen_pairs = []
+
+    def fake_run(slug, r, d, sim_hours=None):
+        seen_pairs.append((r, d))
+        out = regimes.regime_dir(slug) / regimes.regime_name(r, d)
+        out.mkdir(parents=True, exist_ok=True)
+        (out / "regime.json").write_text(
+            json.dumps({"regime": regimes.regime_name(r, d), "snapshots": []})
+        )
+        return out
+
+    monkeypatch.setattr(regimes, "run_regime", fake_run)
+    monkeypatch.setattr(regimes, "reversal_check", lambda d: {"reversed": True})
+
+    subset = [("spring", "med"), ("spring", "high"), ("spring", "freshet")]
+    results = regimes.build_library("winyah-bay", max_workers=1, regimes=subset)
+
+    assert sorted(seen_pairs) == sorted(subset)
+    assert sorted(results) == ["spring_freshet", "spring_high", "spring_med"]
+    assert all(v["status"] == "ok" for v in results.values())
+    # The nine other regimes' full-matrix coverage (regimes=None) is already
+    # exercised by the tests above this one -- they all call build_library()
+    # with no `regimes` argument and assert N_REGIMES entries land.
 
 
 def test_store_sww_knob_defaults_on_and_can_be_disabled():

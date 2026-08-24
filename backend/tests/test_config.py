@@ -1,6 +1,10 @@
 import pytest
+import yaml
+from pydantic import ValidationError
 
 from tidescout.config import load_fishery
+from tidescout.models import Fishery
+from tidescout.paths import FISHERIES_DIR
 
 
 def test_load_winyah_bay():
@@ -53,3 +57,81 @@ def test_anuga_mass_tolerance_is_not_machine_precision():
     """A 1e-6 assert fails on a healthy wetting/drying run (measured 4.2e-4)."""
     f = load_fishery("winyah-bay")
     assert f.anuga.mass_tolerance >= 1e-4
+
+
+def test_mistyped_top_level_key_is_rejected():
+    """A typo'd top-level key (`salinty:` for `salinity:`) must fail loudly,
+    not silently fall back to that field's Python defaults. Before
+    Fishery.model_config gained extra="forbid", this was undetectable by
+    inspection once Task 5 writes fitted salinity numbers into the YAML: the
+    block still parses, still looks complete, and the app runs on the
+    unfitted theoretical constants while reporting nothing wrong."""
+    raw = yaml.safe_load((FISHERIES_DIR / "winyah-bay.yaml").read_text())
+    raw["salinty"] = raw.pop("salinity")
+    with pytest.raises(ValidationError, match="salinty"):
+        Fishery.model_validate(raw)
+
+
+def test_real_fishery_document_has_no_unknown_top_level_keys():
+    """Fishery.model_config's extra="forbid" is only safe repo-wide because
+    the one real Fishery document declares every top-level key it uses --
+    verified here so a future YAML addition that outruns the model fails
+    fast in CI rather than as a surprise the next time someone edits it."""
+    for path in FISHERIES_DIR.glob("*.yaml"):
+        if path.name.endswith((".known-spots.yaml", ".tiles.yaml")):
+            continue  # parsed by different models, never reach Fishery
+        raw = yaml.safe_load(path.read_text())
+        Fishery.model_validate(raw)  # raises ValidationError on any extra key
+
+
+# -- CDMO water-quality stations and the salt-intrusion axis ------------------
+
+
+def test_cdmo_water_sensors_are_declarable():
+    """`kind: cdmo` is a real sensor kind, not a typo. The CDMO stations are
+    a manual historical backfill rather than a polled feed, but the fishery
+    still has to declare WHICH stations belong to it -- the calibration path
+    reads that list to decide what to look for in the store."""
+    from tidescout.models import WaterSensor
+
+    w = WaterSensor(kind="cdmo", station="NIWTAWQ", params=["SAL"])
+    assert w.kind == "cdmo"
+    assert w.off_axis is False
+
+
+def test_off_axis_marks_a_station_on_a_different_branch():
+    from tidescout.models import WaterSensor
+
+    w = WaterSensor(kind="cdmo", station="NIWCBWQ", params=["SAL"], off_axis=True)
+    assert w.off_axis is True
+
+
+def test_winyah_declares_all_six_nerrs_water_quality_stations():
+    """All six are declared and all six are stored; what differs is whether
+    the salt-intrusion fit may READ them."""
+    fishery = load_fishery("winyah-bay")
+    nerrs = {w.station: w for w in fishery.stations.water if w.kind in ("ndbc", "cdmo")}
+
+    assert set(nerrs) == {
+        "WYSS1", "NIWWBWQ", "NIWTAWQ", "NIWCBWQ", "NIWOLWQ", "NIWDCWQ",
+    }
+
+
+def test_north_inlet_stations_are_marked_off_axis_and_bay_stations_are_not():
+    """Measured 2026-08-23 over the full 10.6-year record: the three North
+    Inlet stations average 31.4-32.0 ppt while the three Winyah Bay stations
+    average 6.0-9.6, at along-estuary distances that ORDER them the wrong
+    way round once the field is seeded from the bay mouth (North Inlet
+    12.88-14.18 km, the bay 16.68-19.03). Both branches respond to discharge
+    (r(S, logQ) = -0.66 to -0.79 at all six), so they are not hydrologically
+    isolated -- North Inlet takes the Winyah plume on the flood -- but a
+    single distance axis cannot carry a 25 ppt baseline offset between two
+    branches. They stay stored and are excluded from the fit.
+    """
+    fishery = load_fishery("winyah-bay")
+    by_station = {w.station: w for w in fishery.stations.water}
+
+    for station in ("NIWCBWQ", "NIWOLWQ", "NIWDCWQ"):
+        assert by_station[station].off_axis is True, f"{station} is on North Inlet"
+    for station in ("WYSS1", "NIWWBWQ", "NIWTAWQ"):
+        assert by_station[station].off_axis is False, f"{station} is on the bay"

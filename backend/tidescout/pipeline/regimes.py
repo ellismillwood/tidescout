@@ -1,4 +1,4 @@
-"""Regime simulations: the 3x3 tidal-range x discharge matrix.
+"""Regime simulations: the 3x4 tidal-range x discharge matrix.
 
 Each regime is one full tidal cycle plus spin-up, snapshotted at the configured
 cadence. Runs are completely independent, which is what lets Task 10 execute
@@ -19,8 +19,19 @@ from tidescout.paths import fishery_data_dir
 from tidescout.pipeline import forcing, mesh
 
 RANGE_BUCKETS = ["neap", "mean", "spring"]
-DISCHARGE_BUCKETS = ["low", "med", "high"]
+# Mirrors engine.flow.DISCHARGE_ORDER -- pinned by a test rather than imported,
+# because these two lists mean different things (what to BUILD vs how to READ)
+# and coupling them by import would let a change to either silently redefine
+# the other. `freshet` added Plan 4 Task 7: the axis used to stop at the p75
+# while the observed record runs 3.65x past it.
+DISCHARGE_BUCKETS = ["low", "med", "high", "freshet"]
 REGIME_MATRIX = [(r, d) for r in RANGE_BUCKETS for d in DISCHARGE_BUCKETS]
+
+# A fishery with no `discharge_buckets.freshet_cfs` cannot force the freshet
+# regimes; `forcing.river_inflow_m3s` raises for them by name, and
+# `build_library` records those three as failed rather than taking the build
+# down. That is deliberate: it is loud, it is per-regime, and the other nine
+# still land.
 
 # Elevation threshold for "this centroid is genuinely part of the water
 # channel", used only to validate river-inflow placement. Deliberately mean
@@ -318,21 +329,37 @@ def build_library(
     max_workers: int | None = None,
     sim_hours: float | None = None,
     on_result: Callable[[str, dict], None] | None = None,
+    regimes: list[tuple[str, str]] | None = None,
 ) -> dict[str, dict]:
     """Run every regime, as independent processes.
 
-    Deliberately NOT MPI. The nine runs share nothing, so a process pool gets
-    the same wall time as domain decomposition with none of the toolchain --
-    see the Plan 3 spike findings for the measured comparison.
+    `regimes` defaults to the full `REGIME_MATRIX`. Pass a subset (e.g. to
+    re-run only regimes that failed on a prior pass) and only those are
+    built -- but note `_write_manifest` still writes `{"regimes": results}`
+    with `results` scoped to *this call*, so a subset build's manifest
+    writes will not, on their own, contain entries for regimes built by a
+    previous call. A caller re-running a subset against an existing
+    `library.json` it wants to preserve must merge manifests itself, e.g.
+    via `on_result`, which fires after every write this function makes.
+
+    Deliberately NOT MPI. The runs share nothing, so a process pool gets the
+    same wall time as domain decomposition with none of the toolchain -- see
+    the Plan 3 spike findings for the measured comparison.
+
+    NOTE ON WORKER COUNT AND WAVES. With more regimes than workers this runs
+    in waves, and the last wave leaves the machine partly idle: 12 regimes at
+    9 workers is 9 then 3, which measured ~4.1 h + ~3.5 h where one wave of 12
+    would be ~4.6 h. `max_workers` is a straight ProcessPoolExecutor bound, so
+    matching it to the matrix size is what avoids the ragged tail.
 
     The manifest is written after every individual result, not once at the
-    end: nine small writes instead of one, so a killed process (the pool
+    end: many small writes instead of one, so a killed process (the pool
     path can be killed between any two `as_completed` results, and the
     serial path between any two iterations) leaves `library.json` reflecting
     every regime that finished so far instead of losing all of them.
 
     `on_result(name, entry)` is called as each regime is recorded, with the
-    entry that just went into the manifest. This is a five-to-six-hour job:
+    entry that just went into the manifest. This is a multi-hour job:
     reporting only on return is how build #1 sat with six dead regimes for
     over an hour before anyone noticed. Failures are reported the same way as
     successes, so a caller that prints this sees a regime die at the moment
@@ -343,12 +370,13 @@ def build_library(
 
     fishery = load_fishery(slug)
     workers = max_workers or fishery.anuga.max_workers
+    matrix = list(regimes) if regimes is not None else REGIME_MATRIX
     results: dict[str, dict] = {}
 
     if workers == 1:
         # Serial, in-process: how you debug one misbehaving regime, and the
         # only path a test can monkeypatch (pool children see no patches).
-        for r, d in REGIME_MATRIX:
+        for r, d in matrix:
             name = regime_name(r, d)
             try:
                 out_dir = run_regime(slug, r, d, sim_hours)
@@ -365,13 +393,13 @@ def build_library(
     with ProcessPoolExecutor(max_workers=workers) as pool:
         futures = {
             pool.submit(run_regime, slug, r, d, sim_hours): regime_name(r, d)
-            for r, d in REGIME_MATRIX
+            for r, d in matrix
         }
         for fut in as_completed(futures):
             name = futures[fut]
             try:
                 out_dir = fut.result()
-            except Exception as exc:  # one bad regime must not lose the other eight
+            except Exception as exc:  # one bad regime must not lose the others
                 results[name] = {"status": "failed", "error": f"{type(exc).__name__}: {exc}"}
                 _write_manifest(slug, results)
                 _report(on_result, name, results)

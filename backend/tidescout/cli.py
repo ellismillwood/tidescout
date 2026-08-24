@@ -1,15 +1,25 @@
 import json
+import math
 import time
+from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 from rich.console import Console
 from rich.table import Table
+
+if TYPE_CHECKING:  # annotations only -- this module keeps its imports lazy for startup
+    from datetime import datetime
 
 app = typer.Typer(no_args_is_help=True, help="TideScout: SC inshore fishing decision support.")
 bathy_app = typer.Typer(no_args_is_help=True, help="Bathymetry tile discovery and processing.")
 app.add_typer(bathy_app, name="bathy")
 flow_app = typer.Typer(no_args_is_help=True, help="ANUGA flow-state library.")
 app.add_typer(flow_app, name="flow")
+salinity_app = typer.Typer(
+    no_args_is_help=True, help="Along-estuary distance field and salinity calibration."
+)
+app.add_typer(salinity_app, name="salinity")
 console = Console()
 
 
@@ -341,6 +351,517 @@ def bathy_wetlands(slug: str) -> None:
     console.print(
         f"{len(fc['features'])} wetland features -> {path} ({path.stat().st_size:,} bytes)"
     )
+
+
+
+@salinity_app.command("field")
+def salinity_field(slug: str) -> None:
+    """Build the along-estuary distance field the salinity model reads."""
+    import numpy as np
+
+    from tidescout.config import load_fishery
+    from tidescout.pipeline.estuary import build_distance_field
+
+    fishery = load_fishery(slug)
+    path = build_distance_field(slug, fishery)
+    d = np.load(path)
+    finite = np.isfinite(d)
+    console.print(
+        f"{finite.sum():,} cells with a water route to the sea "
+        f"({(~finite).sum():,} unreachable) -> {path}"
+    )
+    if finite.any():
+        console.print(
+            f"along-estuary km: min {np.nanmin(d):.2f}  median {np.nanmedian(d):.2f}  "
+            f"max {np.nanmax(d):.2f}"
+        )
+
+
+@salinity_app.command("calibrate")
+def salinity_calibrate(
+    slug: str,
+    days: int = typer.Option(90, "--days", help="days of USGS history to fit against"),
+    max_snap_m: float = typer.Option(
+        500.0,
+        "--max-snap-m",
+        help="exclude a sensor further than this from any in-domain cell",
+    ),
+) -> None:
+    """Fit the intrusion model to real observations, and print what it cannot say.
+
+    The diagnostics block is printed verbatim and is the point of the command.
+    A fit that returns numbers is not the same as a fit that means something,
+    and this is the only place that difference is visible.
+    """
+    from tidescout.config import load_fishery
+    from tidescout.pipeline import salinity_fit
+    from tidescout.sources.cache import default_cache
+
+    fishery = load_fishery(slug)
+    try:
+        data = salinity_fit.collect_observations(
+            slug, fishery, default_cache(), days=days, max_snap_m=max_snap_m
+        )
+    except FileNotFoundError as exc:
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
+
+    table = Table(
+        title=(
+            f"{fishery.name} — salinity sensors "
+            f"(USGS 00480: last {days} days; NERRS store: full held history)"
+        )
+    )
+    for col in ("site", "along-estuary km", "snap gap m", "days", "ppt min", "ppt max", "used"):
+        table.add_column(col)
+    for r in data.sites:
+        table.add_row(
+            r.site,
+            f"{r.distance_km:.2f}",
+            f"{r.snap_gap_m:,.0f}",
+            str(r.n_days),
+            f"{r.ppt_range[0]:.1f}",
+            f"{r.ppt_range[1]:.1f}",
+            "[green]yes[/green]" if r.used else f"[red]no[/red] — {r.note}",
+        )
+    console.print(table)
+
+    if data.day_span:
+        console.print(f"discharge paired over {data.day_span[0]} .. {data.day_span[1]}")
+    console.print(
+        f"{len(data.observations)} salinity observations, "
+        f"{len(data.swings)} tidal-swing observations. USGS swings cover the last "
+        f"{data.swing_days} days (that service keeps instantaneous values for 120); "
+        "NERRS-store swings cover everything the store holds, since it accumulates "
+        "rather than serving a rolling window."
+    )
+
+    try:
+        fitted, diag = salinity_fit.fit_intrusion(
+            data.observations, cfg=fishery.salinity, swings=data.swings
+        )
+    except ValueError as exc:
+        console.print(f"\n[red]CANNOT CALIBRATE[/red]: {exc}")
+        rejected = [r for r in data.sites if not r.used]
+        if rejected:
+            console.print(
+                f"\n{len(rejected)} of {len(data.sites)} salinity sensor(s) were "
+                "rejected, so the fit had nothing to run on:"
+            )
+            for r in rejected:
+                console.print(f"  [bold]{r.site}[/bold] — {r.note}")
+            far = [r for r in rejected if r.snap_gap_m > max_snap_m]
+            if far:
+                # ceil, not round: admission is `gap <= max_snap_m`, so a
+                # gap of 9498.3 printed as "9498" would suggest a re-run that
+                # still refuses. The one actionable instruction in this
+                # message must not be a coin flip.
+                worst = math.ceil(max(r.snap_gap_m for r in far))
+                console.print(
+                    f"\nThe problem is WHERE these sensors are, not the tool. They sit "
+                    f"outside the model domain — up to {worst:,} m from the nearest "
+                    f"in-domain cell — so the along-estuary distance each would be "
+                    f"assigned belongs to a different place on the estuary than the "
+                    f"sensor does, and no length scale in the model absorbs that.\n"
+                    f"Re-run with [bold]--max-snap-m {worst}[/bold] (or higher) to "
+                    f"fit anyway, accepting a borrowed distance. Read the warning block "
+                    f"it prints before believing the numbers."
+                )
+        console.print(
+            "\n[dim]That is a finding about the available data, not a bug. The "
+            "unfitted config stands and salinity.fitted stays False.\n"
+            "There is NO fallback for the spatial field to degrade to: the only "
+            "live climatology substitution fills a single bay-wide scalar "
+            "(sources/usgs.py water_summary), not a per-cell field. While "
+            "fitted is False the field must not be read as a between-spot "
+            "discriminator.[/dim]"
+        )
+        raise typer.Exit(1) from exc
+
+    params = Table(title="fitted SalinityConfig")
+    for col in ("parameter", "before", "after", "1-sigma", "fitted?"):
+        params.add_column(col)
+    for name in ("ocean_ppt", "l0_km", "q0_cfs", "k", "excursion_km", "front_width_km"):
+        sigma = diag["param_sigma"].get(name)
+        was, now = getattr(fishery.salinity, name), getattr(fitted, name)
+        params.add_row(
+            name,
+            f"{was:.4g}",
+            f"{now:.4g}",
+            "-" if sigma is None else f"{sigma:.4g}",
+            "yes" if name in diag["fitted_params"] else "[dim]held[/dim]",
+        )
+    lo, hi = fitted.calibration_range_cfs
+    params.add_row("calibration_range_cfs", str(fishery.salinity.calibration_range_cfs),
+                   f"({lo:.0f}, {hi:.0f})", "-", "yes")
+    params.add_row(
+        "fitted",
+        str(fishery.salinity.fitted),
+        f"[green]{fitted.fitted}[/green]" if fitted.fitted else f"[red]{fitted.fitted}[/red]",
+        "-",
+        "derived",
+    )
+    console.print(params)
+    if not fitted.fitted:
+        console.print(
+            "[red]fitted=False[/red] — this run raised at least one warning about its "
+            "own data, so the parameters above are NOT calibrated. Anything computed "
+            "from them carries no observational signal."
+        )
+
+    console.print("\n[bold]diagnostics[/bold]")
+    for key, value in diag.items():
+        if key == "warning":
+            continue
+        console.print(f"  {key}: {value}")
+    console.print("\n[bold]warning[/bold]")
+    console.print(diag["warning"] or "  (none)")
+    console.print(
+        "\n[dim]Read the warning before the numbers. Nothing here is written to "
+        f"fisheries/{slug}.yaml — that edit is a human decision, with this output "
+        "recorded as its provenance.[/dim]"
+    )
+
+
+def _widen(
+    span: "tuple[datetime, datetime] | None", other: "tuple[datetime, datetime] | None"
+) -> "tuple[datetime, datetime] | None":
+    """Union of two (start, end) spans, either of which may be absent.
+
+    A directory or zip can hold several years as several files, so one
+    station's span is the union across every file that mentioned it.
+    """
+    if span is None:
+        return other
+    if other is None:
+        return span
+    return (min(span[0], other[0]), max(span[1], other[1]))
+
+
+@salinity_app.command("import-cdmo")
+def salinity_import_cdmo(
+    slug: str,
+    path: str = typer.Option(
+        None,
+        "--path",
+        help="CDMO export: a .csv file, a directory of .csv files, or a .zip archive. "
+        "Defaults to data/<slug>/cdmo/",
+    ),
+    max_snap_m: float = typer.Option(
+        500.0,
+        "--max-snap-m",
+        help="a station further than this from any in-domain cell reads as OUT OF DOMAIN",
+    ),
+) -> None:
+    """Import a downloaded CDMO historical water-quality export, and report
+    each station's position: how far it snaps from the model domain, and
+    its along-estuary distance.
+
+    Writes into the SAME accumulating store Task 8's NDBC fetch uses
+    (`data/<slug>/ndbc.sqlite`), deduplicated by (station, timestamp) --
+    see `sources/cdmo.py`'s module docstring for why niwwswq lands under
+    the "WYSS1" key NDBC already uses, and for the QAQC flags a value must
+    carry to be admitted at all.
+    """
+    from tidescout.config import load_fishery
+    from tidescout.paths import fishery_data_dir
+    from tidescout.pipeline.salinity_fit import site_distances_km
+    from tidescout.sources import cdmo
+    from tidescout.sources.ndbc import default_store
+
+    fishery = load_fishery(slug)
+    target = Path(path) if path else fishery_data_dir(slug) / "cdmo"
+    try:
+        reports = cdmo.import_path(target, default_store(slug))
+    except (FileNotFoundError, ValueError) as exc:
+        console.print(f"[red]{exc}[/red]")
+        console.print(
+            f"\n[dim]Place the CDMO export (a .csv file, a directory of .csv files, or "
+            f"the .zip itself) at {target}, or point at it directly:\n"
+            f"  tidescout salinity import-cdmo {slug} --path /path/to/export[/dim]"
+        )
+        raise typer.Exit(1) from exc
+
+    # The real export is ONE interleaved file carrying both parameter
+    # families, so the split is per-STATION-LIST within a report, not per
+    # report (Task 9 assumed separate WQ and MET files and split by report
+    # type). It is still a split: MET's along-estuary-distance/domain
+    # concept doesn't apply to a single fixed weather station, so folding
+    # it into the WQ table would misreport "no along-estuary distance" as
+    # a data gap rather than what it actually is -- a different kind of
+    # station entirely. See `sources/cdmo.py`'s "ROUTING BY STATION CODE".
+    wq_reports = [r for r in reports if r.stations]
+    met_reports = [r for r in reports if r.met_stations]
+
+    # Aggregate every WQ station this run touched, across however many
+    # files the path expanded to (a directory or zip can hold several years).
+    agg: dict[str, dict] = {}
+    unknown_columns: set[str] = set()
+    for r in wq_reports:
+        unknown_columns.update(r.unknown_columns)
+        for si in r.stations:
+            a = agg.setdefault(
+                si.canonical,
+                {
+                    "raw_codes": set(), "n_parsed": 0, "n_new": 0, "rejected": {},
+                    "n_bad_ts": 0, "value_unparseable": {}, "flag_unparseable": {},
+                    "admitted": {}, "n_empty": 0, "codes": {}, "span": None,
+                    "meta": None,
+                },
+            )
+            a["raw_codes"].add(si.raw_code)
+            a["n_parsed"] += si.n_parsed
+            a["n_new"] += si.n_new
+            a["n_bad_ts"] += si.n_bad_timestamp
+            a["n_empty"] += si.n_empty
+            a["meta"] = a["meta"] or si.meta
+            a["span"] = _widen(a["span"], si.span)
+            for col, n in si.n_admitted.items():
+                a["admitted"][col] = a["admitted"].get(col, 0) + n
+            for code, n in si.qualifier_codes_admitted.items():
+                a["codes"][code] = a["codes"].get(code, 0) + n
+            for col, n in si.n_rejected_by_flag.items():
+                a["rejected"][col] = a["rejected"].get(col, 0) + n
+            for col, n in si.n_value_unparseable.items():
+                a["value_unparseable"][col] = a["value_unparseable"].get(col, 0) + n
+            for col, n in si.n_flag_unparseable.items():
+                a["flag_unparseable"][col] = a["flag_unparseable"].get(col, 0) + n
+
+    console.print(f"{len(reports)} file(s) read from {target}")
+    if unknown_columns:
+        console.print(
+            f"[yellow]unrecognised column(s), reported rather than guessed at:[/yellow] "
+            f"{sorted(unknown_columns)}"
+        )
+    # Everything that could NOT be parsed -- reported explicitly rather than
+    # silently folded into "0 new", per this command's own promise (and
+    # `sources/cdmo.py`'s module docstring) not to guess at a bad cell.
+    for station in sorted(agg):
+        a = agg[station]
+        bad_bits = []
+        if a["n_bad_ts"]:
+            bad_bits.append(f"{a['n_bad_ts']} row(s) with an unreadable timestamp")
+        if a["value_unparseable"]:
+            bad_bits.append(
+                "unparseable value(s): "
+                + ", ".join(f"{k}:{v}" for k, v in sorted(a["value_unparseable"].items()))
+            )
+        if a["flag_unparseable"]:
+            bad_bits.append(
+                "unparseable flag(s): "
+                + ", ".join(f"{k}:{v}" for k, v in sorted(a["flag_unparseable"].items()))
+            )
+        if bad_bits:
+            console.print(f"[yellow]{station}[/yellow] could not parse: {'; '.join(bad_bits)}")
+
+    # Positions come from the export's OWN `sampling_stations.csv` when the
+    # user downloaded it (`StationImport.meta`, west longitude already
+    # negated), and only fall back to the coordinates transcribed from the
+    # reserve's metadata PDFs when it is absent. Reading the file is what
+    # makes a future export with more stations work with no code change.
+    coords = {}
+    for station, a in agg.items():
+        if a["meta"] is not None:
+            coords[station] = a["meta"].lonlat
+        elif station in cdmo.NIW_STATION_COORDS_LONLAT:
+            coords[station] = cdmo.NIW_STATION_COORDS_LONLAT[station]
+    missing_coords = sorted(set(agg) - set(coords))
+    distances: dict[str, tuple[float, float]] = {}
+    if coords:
+        try:
+            distances = site_distances_km(slug, fishery, coords)
+        except FileNotFoundError as exc:
+            # The import itself already succeeded and is committed to the
+            # store by this point -- losing that because the (separate)
+            # along-estuary distance field hasn't been built yet would
+            # throw away real, already-durable work over a reporting
+            # nicety. Print the field's own helpful message (it already
+            # names the exact command to run) and report positions as
+            # unknown rather than aborting.
+            console.print(f"\n[yellow]{exc}[/yellow]")
+
+    table = Table(title=f"{fishery.name} — CDMO import, per-station position")
+    for col in (
+        "station",
+        "raw code(s)",
+        "parsed",
+        "new",
+        "salinity kept",
+        "salinity rejected",
+        "date span",
+        "along-estuary km",
+        "snap gap m",
+        "in domain?",
+    ):
+        table.add_column(col)
+    n_in_domain = 0
+    distinct_km: set[float] = set()
+    for station in sorted(agg):
+        a = agg[station]
+        span = a["span"]
+        span_str = f"{span[0].date()} to {span[1].date()}" if span else "-"
+        if station in distances:
+            dist_km, gap_m = distances[station]
+            in_domain = gap_m <= max_snap_m
+            if in_domain and math.isfinite(dist_km):
+                n_in_domain += 1
+                distinct_km.add(round(dist_km, 6))
+            dist_str = f"{dist_km:.2f}"
+            gap_str = f"{gap_m:,.0f}"
+            domain_str = "[green]yes[/green]" if in_domain else "[red]no[/red]"
+        else:
+            dist_str = gap_str = "-"
+            domain_str = "[dim]no known position[/dim]"
+        table.add_row(
+            station,
+            ", ".join(sorted(a["raw_codes"])),
+            f"{a['n_parsed']:,}",
+            f"{a['n_new']:,}",
+            f"{a['admitted'].get('sal', 0):,}",
+            f"{a['rejected'].get('sal', 0):,}",
+            span_str,
+            dist_str,
+            gap_str,
+            domain_str,
+        )
+    console.print(table)
+
+    # The QAQC flag is what admits a value; the bracketed codes beside it
+    # explain WHY it got that flag and never override it (CDMO's own QAQC
+    # documentation, and SWMPr's `qaqc()`, both say so). Printed anyway --
+    # a code riding along on ADMITTED data is the only way a caveat enters
+    # a calibration unnoticed, so it should be visible, not buried.
+    for station in sorted(agg):
+        codes = agg[station]["codes"]
+        if not codes:
+            continue
+        top = sorted(codes.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
+        console.print(
+            f"[dim]{station} qualifier codes on ADMITTED values: "
+            + ", ".join(
+                f"{c} ({cdmo.QAQC_CODE_MEANINGS.get(c, 'UNDOCUMENTED')}) x{n:,}"
+                for c, n in top
+            )
+            + "[/dim]"
+        )
+
+    if missing_coords:
+        console.print(
+            f"\n[yellow]no known position for:[/yellow] {missing_coords} — imported and "
+            "stored, but not geolocated. Download CDMO's sampling_stations.csv into the "
+            "same directory as the export and re-run to geolocate them."
+        )
+    console.print(
+        f"\n{n_in_domain} in-domain station(s), {len(distinct_km)} distinct along-estuary "
+        "distance(s) among them — the number pipeline.salinity_fit.fit_intrusion's "
+        "n_distinct_distances warning (< 3) is checking against."
+    )
+
+    if met_reports:
+        _print_met_import_summary(met_reports)
+
+
+def _print_met_import_summary(met_reports: list) -> None:
+    """Meteorological stations this run touched -- a separate, simpler
+    table than the WQ one above: along-estuary distance and domain
+    membership are salinity-model concepts that don't apply to the
+    reserve's one fixed weather station. Store and expose; nothing here
+    feeds a score (Phase 3 does not exist yet) -- see `sources/cdmo.py`'s
+    "MET FILE SUPPORT".
+    """
+    from tidescout.sources import cdmo
+
+    agg: dict[str, dict] = {}
+    unknown_columns: set[str] = set()
+    for r in met_reports:
+        unknown_columns.update(r.unknown_columns)
+        for si in r.met_stations:
+            a = agg.setdefault(
+                si.canonical,
+                {"raw_codes": set(), "n_parsed": 0, "n_new": 0, "span": None, "meta": None},
+            )
+            a["raw_codes"].add(si.raw_code)
+            a["n_parsed"] += si.n_parsed
+            a["n_new"] += si.n_new
+            a["meta"] = a["meta"] or si.meta
+            a["span"] = _widen(a["span"], si.span)
+
+    console.print(f"\n[bold]{len(agg)} meteorological station(s)[/bold]")
+    if unknown_columns:
+        console.print(
+            f"[yellow]unrecognised MET column(s), reported rather than guessed at:[/yellow] "
+            f"{sorted(unknown_columns)}"
+        )
+    table = Table(title="CDMO import — meteorological")
+    for col in ("station", "raw code(s)", "position", "date span", "parsed", "new"):
+        table.add_column(col)
+    for station in sorted(agg):
+        a = agg[station]
+        if a["meta"] is not None:
+            lon, lat = a["meta"].lonlat
+        elif station in cdmo.NIW_MET_STATION_COORDS_LONLAT:
+            lon, lat = cdmo.NIW_MET_STATION_COORDS_LONLAT[station]
+        else:
+            lon = lat = None
+        pos_str = (
+            f"{lat:.4f}, {lon:.4f}" if lat is not None else "[dim]no known position[/dim]"
+        )
+        span = a["span"]
+        span_str = f"{span[0].date()} to {span[1].date()}" if span else "-"
+        table.add_row(
+            station, ", ".join(sorted(a["raw_codes"])), pos_str, span_str,
+            f"{a['n_parsed']:,}", f"{a['n_new']:,}",
+        )
+    console.print(table)
+
+
+@salinity_app.command("citation")
+def salinity_citation(slug: str) -> None:
+    """Print the NERRS citation, acknowledgement, and disclaimer this data
+    store actually earns -- generated from what is held, not hardcoded.
+
+    WYSS1 (NDBC-mirrored) and every CDMO station this store has ever
+    imported are NERRS System-wide Monitoring Program data; the citation
+    obligation applies from the first row on, not only once a CDMO export
+    arrives (see `sources/ndbc.py`'s "PROVENANCE AND CITATION"). Anything
+    that later publishes or displays a value derived from this store
+    should call `NdbcStore.citation()` too -- this command is the human-
+    readable front of the same function.
+    """
+    from tidescout.config import load_fishery
+    from tidescout.sources.ndbc import default_store
+
+    # Validated the same way every sibling `salinity` command validates
+    # `slug` -- without this, a typo'd slug would silently create a fresh,
+    # empty `data/<typo>/ndbc.sqlite` rather than failing the way `salinity
+    # field`/`salinity calibrate`/`salinity import-cdmo` all do.
+    fishery = load_fishery(slug)
+    store = default_store(slug)
+    c = store.citation()
+
+    # `soft_wrap=True`: this is citation text a human may copy into a
+    # publication -- Rich hard-wrapping it mid-word at whatever the
+    # terminal's column width happens to be would make that copy awkward
+    # (and, in the CLI test suite, made a substring assertion straddle an
+    # inserted newline).
+    console.print(f"[bold]{fishery.name}[/bold]")
+    console.print("[bold]Citation[/bold]")
+    console.print(c.text, soft_wrap=True)
+    console.print("\n[bold]Acknowledgement[/bold]")
+    console.print(c.acknowledgement, soft_wrap=True)
+    console.print("\n[bold]Disclaimer[/bold]")
+    console.print(c.disclaimer, soft_wrap=True)
+    console.print("\n[bold]Subset of data used[/bold]")
+    for line in c.subset_lines:
+        console.print(f"  {line}", soft_wrap=True)
+    if c.sources:
+        console.print(f"\n[dim]accessed via: {', '.join(c.sources)}[/dim]")
+    if c.accessed_date is None:
+        console.print(
+            "\n[yellow]No provenance is on record for this store -- data may predate "
+            "provenance tracking, or was written by a raw append call that bypassed "
+            "it. The access date above is a placeholder, not a real fact.[/yellow]"
+        )
 
 
 @flow_app.command("mesh")

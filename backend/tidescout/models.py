@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel
+from pydantic import BaseModel, ConfigDict, Field, field_validator
 
 
 class RiverGauge(BaseModel):
@@ -22,9 +22,29 @@ class RiverGauge(BaseModel):
 
 
 class WaterSensor(BaseModel):
-    kind: Literal["usgs", "coops"]
+    # "ndbc" added Phase 2 Task 8 for buoy water-quality stations (e.g. WYSS1)
+    # -- see sources/ndbc.py. Its `params` are the station's own `.ocean`
+    # column headers (DEPTH, OTMP, COND, SAL, ...), not USGS/CO-OPS codes;
+    # nothing currently reads this list for "ndbc" sensors -- Task 8 stores
+    # and exposes an accumulating history but wires it into no scoring path.
+    # "cdmo" added Phase 2 Task 12 for the five NERRS water-quality stations
+    # that have no NDBC mirror. Unlike the others this is not a polled feed:
+    # CDMO history arrives via `tidescout salinity import-cdmo`, a manual
+    # one-shot backfill. The entry still earns its place, because the
+    # calibration path reads this list to decide which stations to look for
+    # in the store -- a station nobody declares is a station nobody fits.
+    kind: Literal["usgs", "coops", "ndbc", "cdmo"]
     station: str
     params: list[str] = []
+    # True when the station sits on a branch the 1-D along-estuary coordinate
+    # cannot place: it is stored, served and citable like any other, but the
+    # salt-intrusion fit must not read it. Measured on Winyah 2026-08-23 --
+    # North Inlet's three stations average 31.4-32.0 ppt where the bay's own
+    # three average 6.0-9.6, at distances that order them the wrong way round
+    # (North Inlet 12.88-14.18 km, the bay 16.68-19.03). Both branches
+    # respond to discharge, so this is not "no signal"; it is a 25 ppt
+    # baseline offset that one distance axis cannot carry.
+    off_axis: bool = False
 
 
 class Stations(BaseModel):
@@ -34,11 +54,34 @@ class Stations(BaseModel):
     # Added to CO-OPS predictions to convert MLLW -> NAVD88, the bathymetry
     # datum. Resolved from the station's own datums endpoint, not assumed.
     tide_datum_offset_m: float = 0.0
+    # CO-OPS physocean station supplying S_ocean. Springmaid Pier is the
+    # closest one to Winyah Bay (mdapi probe, 2026-08-16, corrected 2026-08-22
+    # -- it is not the only one within 100 km). Its salinity product currently
+    # returns a CO-OPS {"error": ...} payload live-probed 2026-08-22 -- see
+    # sources/coops_water.py's module docstring; the field is kept because it
+    # is the best documented candidate. fetch_ocean_salinity raises
+    # SourceUnavailable in that case (a real failure), not None -- None is
+    # reserved for "the station responded with nothing usable."
+    ocean_salinity: str = ""
 
 
 class DischargeBuckets(BaseModel):
     low_below_cfs: float
     high_above_cfs: float
+    # The observed maximum of the composite record -- the flow the `freshet`
+    # regime is simulated at, NOT a bucket edge like the two above. Optional
+    # because it is a per-fishery measurement and there is no defensible
+    # default: guessing one would put a simulated regime at a discharge this
+    # river system has never produced. A fishery that leaves it unset simply
+    # has no freshet bucket, and `engine.flow.bucket_flows` omits it.
+    #
+    # Winyah's axis without it spans 2,774-6,292 cfs against an observed
+    # 1,232-22,996, so the top of the simulated range sat at the p75 while
+    # real freshets run 3.65x past it. That extrapolation is not small:
+    # differencing a 22,996 cfs run against production `mean_high` moves the
+    # velocity field by 17.20% (per-phase p99), 22x the 0.77% floor of a
+    # change known to be negligible.
+    freshet_cfs: float | None = None
 
 
 class Climatology(BaseModel):
@@ -141,6 +184,30 @@ class ModelDomain(BaseModel):
     # and destroyed two library builds. Same lesson as polygon_utm_km itself.
     # (x_km, y_km) in the bathymetry EPSG, clockwise. Empty = no restriction.
     ocean_boundary_utm_km: list[tuple[float, float]] = []
+    # Which opening the SALT FRONT advances from, for the along-estuary
+    # distance field only. Empty = use ocean_boundary_utm_km, which is the
+    # old behaviour and correct for any estuary with one seaward opening.
+    #
+    # These two fields answer different questions and conflating them is a
+    # silent, measured defect. `ocean_boundary_utm_km` says which mesh
+    # boundary segments take the TIDE, so every genuine opening belongs in
+    # it -- and `mesh.classify_boundary` reads it, so narrowing it would
+    # change the hydrodynamics and invalidate a built library. The distance
+    # field asks something narrower: which mouth does the salt come in
+    # through. Where a domain holds two openings, Dijkstra hands every cell
+    # whichever is NEARER, with no error anywhere.
+    #
+    # Winyah, measured 2026-08-23: the authored ocean polygon spans one
+    # contiguous 950-cell coastal strip covering BOTH the bay mouth and the
+    # coast in front of North Inlet, so the mid/upper bay measured east
+    # through Mud Bay and out North Inlet instead of down the bay past the
+    # jetties. Re-seeding from the bay mouth alone: WYSS1 15.03 -> 19.03 km
+    # (+27%), Thousand Acre 11.67 -> 16.68 (+43%), Mud Bay Cut 9.47 -> 13.05
+    # (+38%); North Jetty (2.58) and Georgetown Lighthouse (5.52) unchanged,
+    # since both already routed out the mouth. Stable across northern cuts
+    # anywhere in y = 3677.2-3681.6 km, so it is the geometry talking, not
+    # the threshold.
+    salt_source_boundary_utm_km: list[tuple[float, float]] = []
     # islands at least this large become mesh holes (interior_holes) instead of
     # being meshed as land; smaller ones are filled as sub-mesh-scale noise.
     # Lowered 0.05 -> 0.002 2026-08-14: measured against Winyah's real 149
@@ -149,6 +216,16 @@ class ModelDomain(BaseModel):
     # remaining fill is cheap (total island area is small) and this is a
     # fidelity INCREASE, not a mesh-cost tradeoff -- do not raise it back up.
     min_island_hole_km2: float = 0.002
+
+    @property
+    def salt_source_polygon_utm_km(self) -> list[tuple[float, float]]:
+        """The polygon the along-estuary distance field seeds from.
+
+        Falls back to `ocean_boundary_utm_km` so a fishery that has not
+        authored a salt source keeps the old behaviour exactly, rather than
+        losing its seed to an empty polygon.
+        """
+        return self.salt_source_boundary_utm_km or self.ocean_boundary_utm_km
 
 
 class AnugaConfig(BaseModel):
@@ -180,7 +257,102 @@ class AnugaConfig(BaseModel):
     store_sww: bool = True
 
 
+class SalinityConfig(BaseModel):
+    """Empirical salt-intrusion parameters. Fitted in Phase 2 Task 5.
+
+    The defaults here are theoretical starting points, NOT calibrated values --
+    k = 1/3 is the Savenije-family scaling exponent and l0_km is a rough guess
+    at Winyah's intrusion length at median flow. Task 5 replaces them and
+    records the fit residual alongside.
+
+    S is a bounded logistic (sigmoid) function of the tidally-shifted
+    distance, not a clipped exponential -- see `engine/salinity.py`'s module
+    docstring for the real-data review that found the clipped form made
+    47.40% of Winyah's domain read bit-identical salinity across a 19x
+    discharge swing at high water, and why a single length scale could not
+    be fixed without trading the mouth's salinity for the head's. Bounds
+    below are load-bearing, not decorative: Task 5's fit is an unconstrained
+    optimizer, and e.g. `l0_km=-18` produces salinity ABOVE ocean_ppt with no
+    error anywhere unless these are enforced at construction.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    ocean_ppt: float = Field(default=34.0, gt=0)
+    # Along-estuary distance (net of tidal shift) at which salinity crosses
+    # 50% of ocean_ppt -- the salt front's POSITION. Fitted.
+    l0_km: float = Field(default=18.0, gt=0)
+    q0_cfs: float = Field(default=4000.0, gt=0)
+    # Power-law exponent: L ~ Q^-k. 1/3 is the theoretical value. Fitted.
+    k: float = Field(default=0.33, ge=0)
+    # Tidal excursion -- how far the salt field slides over a cycle.
+    # u_tidal * T / pi with u ~ 0.5 m/s and T = 12.42 h gives ~7 km.
+    excursion_km: float = Field(default=7.0, gt=0)
+    # Half-width of the logistic transition, in km -- the salt front's
+    # SHARPNESS, independent of l0_km's POSITION. Added because a single
+    # length scale is over-constrained: forcing near-fresh (1 ppt) at the
+    # real domain's 31.57 km head (36.19 km since the 2026-08-23 re-seeding)
+    # with a plain exponential forced l0_km down
+    # to 8.95 km, which alone cost North Jetty (2.58 km) 8.5 of its 34 ppt.
+    # Splitting position from sharpness fixes that -- under the same head
+    # constraint here, North Jetty loses 0.01 ppt. 5.0 km is a starting
+    # guess, sized so neither the mouth nor the head saturates to
+    # bit-identical output across the full calibration range (verified
+    # against the real 587,325-cell distance field; see Task 3's report).
+    # Fitted in Task 5 alongside the rest.
+    front_width_km: float = Field(default=5.0, gt=0)
+    # Discharge span the fit was made over, (lo, hi) with lo < hi. Outside
+    # it, results are flagged rather than silently trusted.
+    calibration_range_cfs: tuple[float, float] = (1232.0, 22996.0)
+    # True ONLY when a calibration run produced these values AND raised no
+    # warning about its own data. False means every number above is
+    # theoretical -- an authored starting point, not a measurement -- and any
+    # salinity computed from them carries no observational signal whatsoever.
+    #
+    # FALSE IS THE SHIPPED STATE FOR WINYAH BAY, and not for want of trying.
+    # Task 5 ran the calibration against every observation that exists. Both
+    # of the bay's USGS 00480 sites lie OUTSIDE the model domain (1,362 m and
+    # 9,498 m from the nearest in-domain cell) and both snap to the same
+    # cell, the distance field's maximum at 31.57 km, so every observation
+    # available carries ONE along-estuary distance at the extreme fresh end.
+    # The 0-31.57 km reach the scoring layer actually reads has none. Fitted
+    # anyway on 348 daily means, four parameter sets whose rmse differed by
+    # 0.016 ppt -- 60x below the observations' own 1 ppt quantisation --
+    # predicted anywhere from 19.8 to 34.0 ppt at North Jetty.
+    #
+    # This is deliberately SEPARATE from `salinity_field`'s `extrapolated`,
+    # which asks a narrower question: was this DISCHARGE inside the span the
+    # fit covered. That flag cannot express "no observation ever constrained
+    # this cell's DISTANCE", which is currently true of every cell in the
+    # bay, so a caller checking only `extrapolated` sees green everywhere.
+    fitted: bool = False
+
+    @field_validator("calibration_range_cfs")
+    @classmethod
+    def _calibration_range_is_ordered(cls, v: tuple[float, float]) -> tuple[float, float]:
+        lo, hi = v
+        if not lo < hi:
+            raise ValueError(
+                f"calibration_range_cfs must be (lo, hi) with lo < hi, got {v!r} -- "
+                "a reversed or degenerate range makes every discharge read as "
+                "extrapolated, which defeats the flag's whole purpose"
+            )
+        return v
+
+
 class Fishery(BaseModel):
+    # Verified 2026-08-22 against the real fishery document: winyah-bay.yaml
+    # is the only Fishery YAML in the repo and all 16 of its top-level keys
+    # are declared below (winyah-bay.known-spots.yaml and .tiles.yaml are
+    # parsed by different models and never reach this class), so this is a
+    # no-op today. It exists so a typo'd top-level key -- e.g. `salinty:`
+    # for `salinity:` -- raises at load time instead of silently falling
+    # back to that field's Python defaults. That failure mode is undetectable
+    # by inspection once Task 5 has written fitted salinity numbers into the
+    # YAML: the block still parses, still looks complete, and the app runs
+    # on the unfitted theoretical constants while reporting nothing wrong.
+    model_config = ConfigDict(extra="forbid")
+
     slug: str
     name: str
     timezone: str
@@ -197,3 +369,38 @@ class Fishery(BaseModel):
     jetties: list[JettySeed] = []
     model_domain: ModelDomain | None = None
     anuga: AnugaConfig = AnugaConfig()
+    salinity: SalinityConfig = SalinityConfig()
+
+    def branch_shares(self) -> list[float]:
+        """Each river's fraction of total inflow, in `self.rivers` order.
+
+        Shared by every caller that splits a composite discharge across
+        branches (`pipeline.forcing.river_inflow_m3s`, the ANUGA boundary;
+        `sources.usgs.branch_discharge_cfs`, the runtime salinity path) so the
+        split logic and its guards exist in exactly one place. Three cases:
+
+          - every river's `inflow_share` is None: fall back to equal shares.
+            This is the state a fishery starts in before anyone measures its
+            per-river split (see `RiverGauge.inflow_share`) -- not an error.
+          - some but not all are None: raise, naming the missing rivers.
+            Half a split half-guesses the rest; that must fail loudly.
+          - shares are all present but do not sum to 1.0 (within 1e-6): raise.
+            Renormalising silently would hide an authoring mistake.
+        """
+        shares = [r.inflow_share for r in self.rivers]
+        if all(s is None for s in shares):
+            n = len(self.rivers) or 1
+            return [1.0 / n] * len(self.rivers)
+        if any(s is None for s in shares):
+            missing = [r.name for r in self.rivers if r.inflow_share is None]
+            raise ValueError(
+                f"inflow_share is set on some rivers but missing on {missing} -- "
+                "author it on all of them or none, so the split is never half-guessed"
+            )
+        total_share = sum(shares)
+        if abs(total_share - 1.0) > 1e-6:
+            raise ValueError(
+                f"inflow_share values sum to {total_share:.4f}, not 1.0 -- "
+                "renormalising silently would hide an authoring mistake"
+            )
+        return shares

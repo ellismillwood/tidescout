@@ -29,3 +29,24 @@ Personal fishing decision-support app for SC inshore waters (Winyah Bay first; C
     ~/.venvs/tidescout/bin/tidescout bathy artifacts winyah-bay  # open data/winyah-bay/quicklook.png
     ~/.venvs/tidescout/bin/tidescout features winyah-bay         # ambush-feature inventory
     ~/.venvs/tidescout/bin/tidescout spots winyah-bay            # your known spots vs detections
+
+    # salinity / weather data: NDBC (live) + CDMO (historical) accumulating store
+    ~/.venvs/tidescout/bin/tidescout salinity import-cdmo winyah-bay --path /path/to/export
+    ~/.venvs/tidescout/bin/tidescout salinity citation winyah-bay  # attribution for what's held
+
+## Data attribution
+
+Winyah Bay water-quality and meteorological data (`sources/ndbc.py`,
+`sources/cdmo.py`, `data/<slug>/ndbc.sqlite`) originates with the **NOAA
+National Estuarine Research Reserve System (NERRS) System-wide Monitoring
+Program**, collected and processed by the **North Inlet-Winyah Bay NERR**
+(Baruch Marine Field Laboratory, University of South Carolina) and
+distributed via the NERRS Centralized Data Management Office
+(nerrsdata.org) — some of it redistributed through NOAA's NDBC buoy
+network (station WYSS1), which does not detach the citation obligation
+from the data. Run `tidescout salinity citation <slug>` for the exact
+citation, acknowledgement, and disclaimer this store's held data currently
+earns, generated from the store itself rather than hardcoded here (see
+`sources/ndbc.py`'s "PROVENANCE AND CITATION"). The disclaimer applies in
+full: this project bears all responsibility for its use of the data, and
+NOAA/the Federal government assumes no liability for it.
