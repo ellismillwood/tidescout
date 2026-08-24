@@ -154,3 +154,83 @@ def test_counters_account_for_every_row():
         + r.n_other_characteristic
     )
     assert accounted == r.n_rows
+
+
+def test_store_is_a_separate_file_from_the_nerrs_one(tmp_path, monkeypatch):
+    """ndbc.py states as an invariant that its store holds only NIW NERR
+    data, and its citation() builds a NERRS citation for everything in it.
+    WQP rows in that file would attribute SCDHEC and EPA data to NERRS."""
+    from tidescout.sources import ndbc, wqp
+
+    monkeypatch.setattr("tidescout.paths.fishery_data_dir", lambda slug: tmp_path)
+    monkeypatch.setattr("tidescout.sources.ndbc.fishery_data_dir", lambda slug: tmp_path)
+    monkeypatch.setattr("tidescout.sources.wqp.fishery_data_dir", lambda slug: tmp_path)
+
+    assert wqp.default_store("winyah-bay")._db_path != ndbc.default_store("winyah-bay")._db_path
+    assert wqp.default_store("winyah-bay")._db_path.name == "wqp.sqlite"
+
+
+def test_station_coordinates_are_stored_with_their_readings(tmp_path):
+    """WQP stations are discovered from a bbox query, not authored, so their
+    positions must travel with their readings rather than living in a second
+    artefact that can drift out of step."""
+    from tidescout.sources import ndbc, wqp
+
+    store = ndbc.NdbcStore(tmp_path / "wqp.sqlite")
+    stations_csv = (
+        "MonitoringLocationIdentifier,LatitudeMeasure,LongitudeMeasure\n"
+        "21SC60WQ_WQX-WB-06,33.2795,-79.2210\n"
+    )
+    wqp.import_results(FIXTURE.read_text(), store, stations_csv=stations_csv)
+    coords = wqp.station_coords_from_store(store)
+    assert coords["21SC60WQ_WQX-WB-06"] == pytest.approx((-79.2210, 33.2795))
+
+
+def test_import_is_idempotent(tmp_path):
+    """Re-running an import must add nothing -- the append-and-dedupe
+    contract cdmo.py proved at 2.5 M rows, reused unchanged."""
+    from tidescout.sources import ndbc, wqp
+
+    store = ndbc.NdbcStore(tmp_path / "wqp.sqlite")
+    text = FIXTURE.read_text()
+    first = wqp.import_results(text, store)
+    second = wqp.import_results(text, store)
+    assert first.n_new > 0
+    assert second.n_new == 0
+
+
+def test_import_records_provenance_under_its_own_source(tmp_path):
+    """Attribution depends on distinguishing WQP rows from NERRS rows, and
+    provenance.source is the only field that can carry it."""
+    from tidescout.sources import ndbc, wqp
+
+    store = ndbc.NdbcStore(tmp_path / "wqp.sqlite")
+    wqp.import_results(FIXTURE.read_text(), store)
+    sources = {p.source for p in store.provenance()}
+    assert sources == {wqp.SOURCE_WQP}
+
+
+def test_fetch_builds_a_bbox_query_without_a_key(monkeypatch):
+    """The endpoint is public and unauthenticated -- unlike CDMO, which
+    needs a static IP registered through a human-submitted form."""
+    from tidescout.sources import wqp
+
+    seen = {}
+
+    class _Resp:
+        text = "CharacteristicName\n"
+
+        def raise_for_status(self):
+            return None
+
+    def fake_get(url, params=None, timeout=None):
+        seen["url"] = url
+        seen["params"] = params
+        return _Resp()
+
+    monkeypatch.setattr(wqp.httpx, "get", fake_get)
+    wqp.fetch_results((-79.45, 33.15, -79.05, 33.60))
+
+    assert seen["params"]["bBox"] == "-79.45,33.15,-79.05,33.60"
+    assert seen["params"]["characteristicName"] == "Salinity"
+    assert "key" not in seen["params"] and "apiKey" not in seen["params"]

@@ -815,6 +815,74 @@ def _print_met_import_summary(met_reports: list) -> None:
     console.print(table)
 
 
+@salinity_app.command("import-wqp")
+def salinity_import_wqp(slug: str) -> None:
+    """Fetch Water Quality Portal salinity for this fishery and store it.
+
+    The anchors the fit never had: 55 in-domain stations in the 2.58-13.05 km
+    reach that previously held no salinity observation at all.
+
+    Writes into `data/<slug>/wqp.sqlite` -- a SEPARATE file from the NERRS
+    store (`sources/ndbc.py`'s `citation()` would overclaim SCDHEC/EPA data
+    as NERRS otherwise), reusing the same `NdbcStore` class and its proven
+    append-and-dedupe contract. Also fetches the matching station-metadata
+    export so `wqp_stations` (positions the calibration will need) is
+    populated in the same run, not left for a caller to backfill later.
+    """
+    from tidescout.config import load_fishery
+    from tidescout.sources import wqp
+
+    fishery = load_fishery(slug)
+    store = wqp.default_store(slug)
+    bbox = tuple(fishery.bbox)
+    text = wqp.fetch_results(bbox)
+    stations_csv = wqp.fetch_stations(bbox)
+    rep = wqp.import_results(text, store, stations_csv=stations_csv)
+
+    # `n_rows` counts EVERY row read (any CharacteristicName), not just
+    # Salinity ones (see `ParseReport`'s docstring) -- so "rows seen" and
+    # the salinity subset actually screened need separate, unambiguous
+    # labels, and `n_other_characteristic` is itself a rejection path with
+    # its own counter, not a footnote.
+    p = rep.parse
+    n_salinity_rows = p.n_rows - p.n_other_characteristic
+    table = Table(title=f"{fishery.name} — Water Quality Portal salinity")
+    for col in ("metric", "count"):
+        table.add_column(col)
+    for label, n in [
+        ("rows seen (all characteristics)", p.n_rows),
+        ("rejected — different characteristic", p.n_other_characteristic),
+        ("of which Salinity rows", n_salinity_rows),
+        ("admitted", p.n_admitted),
+        ("new to the store", rep.n_new),
+        ("rejected — no usable time", p.n_no_time),
+        ("rejected — unknown unit", p.n_bad_unit),
+        ("rejected — unreviewed status", p.n_bad_status),
+        ("rejected — QC activity", p.n_qc_activity),
+        ("rejected — no value", p.n_no_value),
+    ]:
+        table.add_row(label, f"{n:,}")
+    console.print(table)
+    if p.unknown_units:
+        console.print(f"[yellow]unknown units seen:[/yellow] {p.unknown_units}")
+    if p.unknown_statuses:
+        console.print(f"[yellow]unknown statuses seen:[/yellow] {p.unknown_statuses}")
+    console.print(f"{len(rep.stations)} station(s) with admitted salinity; span {rep.span}")
+
+    # `admitted` routinely exceeds `new to the store`: a first import can
+    # still collapse rows via (station, ts) dedupe when two source rows
+    # share a timestamp and an identical value -- not data loss, just the
+    # store's primary key doing its job. Reported here rather than treated
+    # as a discrepancy to chase.
+    coords = wqp.station_coords_from_store(store)
+    missing_coords = sorted(set(store.stations()) - set(coords))
+    if missing_coords:
+        console.print(
+            f"[yellow]no known position for:[/yellow] {missing_coords} — imported and "
+            "stored, but WQP's station metadata for this bbox did not include them."
+        )
+
+
 @salinity_app.command("citation")
 def salinity_citation(slug: str) -> None:
     """Print the NERRS citation, acknowledgement, and disclaimer this data

@@ -496,6 +496,7 @@ class NdbcStore:
 
     def __init__(self, db_path: Path):
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._db_path = db_path
         self._conn = sqlite3.connect(db_path)
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS observations ("
@@ -576,6 +577,17 @@ class NdbcStore:
             "SELECT COUNT(*) FROM observations WHERE station = ?", (station,)
         ).fetchone()
         return n
+
+    def stations(self) -> list[str]:
+        """Every distinct station with at least one row in `observations`,
+        sorted -- e.g. for a caller (`sources/wqp.py`) that needs to compare
+        what has been imported against what has a known position."""
+        return [
+            r[0]
+            for r in self._conn.execute(
+                "SELECT DISTINCT station FROM observations ORDER BY station"
+            )
+        ]
 
     def time_span(self, station: str) -> tuple[datetime, datetime] | None:
         """(earliest, latest) stored timestamp for `station`, or `None` if empty."""
