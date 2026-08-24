@@ -489,6 +489,14 @@ def salinity_calibrate(
             "while some of its own rows were excluded this way -- `n_days`/`ppt range` in "
             "the site table above already exclude them."
         )
+    if data.n_no_phase:
+        console.print(
+            f"[yellow]{data.n_no_phase} WQP grab(s) excluded[/yellow] -- no tidal phase "
+            "could be determined for that sample's timestamp (outside the fetched tide "
+            "predictions, inside a prediction gap, or between two same-kind events -- see "
+            "`engine.tides.phase_at`). Counted rather than silently scored at the "
+            "daily-mean phase, which would fabricate up to half the local tidal swing."
+        )
     if data.stem_field_missing:
         console.print(
             f"[yellow]distance-to-stem field not built[/yellow] -- run "
@@ -501,7 +509,7 @@ def salinity_calibrate(
     try:
         fitted, diag = salinity_fit.fit_intrusion(
             data.observations, cfg=fishery.salinity, swings=data.swings,
-            sources=data.observation_sources,
+            sources=data.observation_sources, phases=data.observation_phases,
         )
     except ValueError as exc:
         console.print(f"\n[red]CANNOT CALIBRATE[/red]: {exc}")

@@ -258,7 +258,7 @@ def intrusion_length_km(cfs: float, cfg: SalinityConfig) -> float:
     return cfg.l0_km * (_effective_cfs(cfs) / cfg.q0_cfs) ** (-cfg.k)
 
 
-def salinity_at(distance_km, cfs: float, phase: float, cfg: SalinityConfig):
+def salinity_at(distance_km, cfs: float, phase: float | np.ndarray, cfg: SalinityConfig):
     """Salinity in ppt at one or many along-estuary distances.
 
     The tidal term slides the whole profile: phase 0 is LOW water (spin-up is
@@ -268,6 +268,15 @@ def salinity_at(distance_km, cfs: float, phase: float, cfg: SalinityConfig):
     UNCLIPPED here -- see the module docstring for why clipping it (as an
     earlier version did) reintroduces the discharge-blind plateau this form
     exists to remove.
+
+    `phase` may be a scalar (every distance evaluated at one instant, the
+    original shape) OR an array the SAME SHAPE as `distance_km` (each
+    distance evaluated at its OWN phase) -- `x + excursion_km *
+    cos(2*pi*phase)` broadcasts elementwise either way, with no other change
+    to the arithmetic. Verified bit-identical to a per-row loop (Task 3,
+    2026-08-24). This is what lets `pipeline.salinity_fit` score each
+    observation -- daily mean or instantaneous grab alike -- at the tidal
+    phase it actually occurred at, rather than one shared phase for every row.
 
     NaN distances -- cells with no water route to the sea -- stay NaN. Treating
     them as 0 km would make an isolated pond the saltiest water in the model.
