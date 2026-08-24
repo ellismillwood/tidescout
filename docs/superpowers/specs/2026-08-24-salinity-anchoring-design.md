@@ -74,6 +74,12 @@ the 2.58–13.05 km reach that had nothing**. Main-channel stations, live-verifi
 Contributing organisations: SC Dept of Environmental Services (144 stations), SCDHEC Shellfish
 (39), SCDHEC (9), EPA EMAP (9), Coastal Carolina University (4), EPA NARS (3).
 
+**One band gains nothing: 0–2.58 km, seaward of North Jetty, has zero WQP stations** (the
+in-domain counts by band are 0 below 2.58 km, 55 in 2.58–13.05, 41 in 13.05–16.68, 5 in
+16.68–19.03, 31 above). Those 53 features stay extrapolated and must come out `extrapolated` on
+the §4c ordinal. This is the correct outcome — it is open coast, and the honest answer there is
+the ocean end-member — but it is not a gap this spec closes.
+
 These are **discrete grab samples, not a feed**. That is not a weakness here: each carries a
 timestamp, and this codebase already holds the tide model and 10.6 years of composite discharge,
 so every sample resolves to a known **distance, discharge and tidal phase** — a fully-specified
@@ -132,6 +138,11 @@ along-axis distance to the nearest on-axis observation, with the raw distance ex
 it. Ordinal rather than a 0–1 score because it is a *coverage* statement and should read as one;
 a continuous score invites being multiplied into something.
 
+It is **per-cell and array-shaped, aligned elementwise with `SalinityField.ppt`** — coverage
+varies along the estuary within a single evaluation, so a scalar would have to collapse the one
+thing the field exists to express. `extrapolated` and `fitted` stay scalar; they are properties
+of the discharge and the config respectively, not of position.
+
 It sits beside the existing `extrapolated` and `fitted` flags, which answer different questions
 and are already documented as such. Phase 3's `score_factors(..., salinity_ppt=None)` already
 accepts an absent value, so this rides into the sub-score's reason string.
@@ -153,6 +164,19 @@ dropping to surface-only alone moved rmse 4.07 → 3.37. The branch offset is ha
 *fitting*, but the model still has one axis. The realistic outcome is `fitted` moving from
 "false, and structurally hopeless" to "false, for one identifiable reason" — with `fitted=True`
 genuinely unknown until the data is in.
+
+## 5a. One thing the gate must also look at: `ocean_ppt`
+
+`ocean_ppt` is held at 34.0 and has never been measured — Task 4 verified no CO-OPS station
+within 250 km serves salinity. It is the seaward anchor the whole profile decays from, so an
+unmeasured value there propagates everywhere, and §3's band with no stations is exactly the reach
+it governs.
+
+Two candidates now exist that did not before: WB-06 reads up to 35.4 ppt at 5.56 km, and North
+Inlet's three stations — useless for the profile, since they are off-axis — are ocean-flushed and
+read 31.4–32.0 ppt mean with maxima near 39. Whether either can anchor `ocean_ppt`, and whether
+it should be freed rather than held, is a question for the same gate. **It is not decided here**
+and no value is to be changed without that measurement.
 
 ## 6. Testing
 
