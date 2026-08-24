@@ -1316,3 +1316,74 @@ def test_colocated_wqp_station_is_excluded_and_not_double_counted(monkeypatch):
     assert data.n_colocated == 1
     # Only WYSS1's own daily mean enters -- WB08's duplicate grab does not.
     assert data.observations == [(19.03, 4000.0, 12.0)]
+
+
+# -- Task 6: per-cell coverage on SalinityField ------------------------------
+# Coverage states how well OBSERVED a cell's along-estuary position is, as a
+# separate axis from `extrapolated` (about the DISCHARGE) and `fitted` (about
+# the CONFIG). It is per-cell -- the whole reason it exists is that coverage
+# varies along the estuary within a single evaluation -- so unlike those two
+# scalar flags it must be array-shaped and aligned elementwise with `.ppt`.
+
+
+def test_coverage_is_per_cell_and_aligned_with_ppt():
+    from tidescout.engine.salinity import salinity_field
+
+    d = np.array([2.0, 6.0, 12.0, 30.0])
+    f = salinity_field(d, 4000.0, 0.25, CFG)
+    assert f.coverage.shape == f.ppt.shape
+
+
+def test_a_cell_at_an_observation_reads_measured():
+    from tidescout.engine.salinity import Coverage, classify_coverage
+
+    cov = classify_coverage(np.array([5.56]), observed_km=[5.56, 10.28], near_km=1.0)
+    assert cov[0] == Coverage.MEASURED
+
+
+def test_a_cell_between_observations_reads_interpolated():
+    from tidescout.engine.salinity import Coverage, classify_coverage
+
+    cov = classify_coverage(np.array([8.0]), observed_km=[5.56, 10.28], near_km=1.0)
+    assert cov[0] == Coverage.INTERPOLATED
+
+
+def test_a_cell_outside_the_observed_span_reads_extrapolated():
+    """The 53 features seaward of North Jetty have no WQP station below
+    2.58 km and must come out extrapolated -- that band gains nothing from
+    this work and must not claim otherwise."""
+    from tidescout.engine.salinity import Coverage, classify_coverage
+
+    cov = classify_coverage(np.array([1.0, 30.0]), observed_km=[5.56, 10.28], near_km=1.0)
+    assert cov[0] == Coverage.EXTRAPOLATED
+    assert cov[1] == Coverage.EXTRAPOLATED
+
+
+def test_no_observations_makes_everything_extrapolated():
+    from tidescout.engine.salinity import Coverage, classify_coverage
+
+    cov = classify_coverage(np.array([5.0, 15.0]), observed_km=[], near_km=1.0)
+    assert set(cov) == {Coverage.EXTRAPOLATED}
+
+
+def test_salinity_field_defaults_to_all_extrapolated_with_no_observed_km():
+    """Every existing caller of `salinity_field` does not know what has been
+    observed, so it must keep working and get the honest, pessimistic answer
+    -- not a crash, and not a silently optimistic default."""
+    from tidescout.engine.salinity import Coverage, salinity_field
+
+    x = np.array([2.0, 10.0, 30.0])
+    f = salinity_field(x, cfs=4000.0, phase=0.25, cfg=CFG)
+    assert set(f.coverage) == {str(Coverage.EXTRAPOLATED)}
+
+
+def test_salinity_field_coverage_dtype_holds_the_longest_labels_exactly():
+    """'interpolated' and 'extrapolated' are both exactly 12 characters --
+    verify a fixed-width dtype does not truncate either."""
+    from tidescout.engine.salinity import Coverage, salinity_field
+
+    x = np.array([5.56, 8.0, 30.0])
+    f = salinity_field(x, cfs=4000.0, phase=0.25, cfg=CFG, observed_km=[5.56, 10.28])
+    assert str(f.coverage[0]) == str(Coverage.MEASURED)
+    assert str(f.coverage[1]) == str(Coverage.INTERPOLATED)
+    assert str(f.coverage[2]) == str(Coverage.EXTRAPOLATED)
