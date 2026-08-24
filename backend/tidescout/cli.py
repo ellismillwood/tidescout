@@ -377,6 +377,28 @@ def salinity_field(slug: str) -> None:
         )
 
 
+@salinity_app.command("stem")
+def salinity_stem(slug: str) -> None:
+    """Build the distance-to-main-stem field used to screen off-branch stations."""
+    import numpy as np
+
+    from tidescout.config import load_fishery
+    from tidescout.pipeline.estuary import (
+        ON_AXIS_MAX_KM,
+        build_stem_distance_field,
+        load_stem_distance_field,
+    )
+
+    fishery = load_fishery(slug)
+    path = build_stem_distance_field(slug, fishery)
+    d = load_stem_distance_field(slug)
+    console.print(f"distance-to-stem field -> {path}")
+    console.print(
+        f"min {float(d.min()):.2f}  median {float(np.median(d)):.2f}  "
+        f"max {float(d.max()):.2f} km; on-axis threshold {ON_AXIS_MAX_KM} km"
+    )
+
+
 @salinity_app.command("calibrate")
 def salinity_calibrate(
     slug: str,

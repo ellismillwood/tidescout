@@ -255,3 +255,97 @@ def load_distance_field(slug: str) -> np.ndarray:
             f"`tidescout salinity field {slug}` first"
         )
     return np.load(path)
+
+
+# Distance to the estuary's main stem, THROUGH WATER, above which a station
+# is treated as sitting on a different branch. Measured 2026-08-24 against the
+# real field: on-axis stations (Winyah Bay main channel plus the bay's own
+# NERRS sondes) span 0.048-1.604 km, off-axis ones (North Inlet, Town Creek,
+# the AIWW, the North Santee) span 7.798-11.918 -- a 4.8x gap with only Jones
+# Creek / Mud Bay (2.170) inside it. This value sits in that gap.
+#
+# Jones Creek falling OUTSIDE is correct rather than a miss: Mud Bay is the
+# physical connection between Winyah Bay and North Inlet, so its membership is
+# genuinely ambiguous and the conservative answer is to leave it out of a fit
+# that assumes one branch.
+ON_AXIS_MAX_KM = 2.0
+
+_STEM_NEIGHBOURS = [(-1, 0), (1, 0), (0, -1), (0, 1), (-1, -1), (-1, 1), (1, -1), (1, 1)]
+
+
+def descent_path(field_grid: np.ndarray, start: tuple[int, int]) -> list[tuple[int, int]]:
+    """Steepest-descent cells from `start` down to a seed, on a 2-D field.
+
+    Follows the same 8-connectivity `along_estuary_km` used to BUILD the
+    field, so the path it traces is one the distance actually measures along.
+    Stops when no neighbour is strictly lower, which at a seed cell (distance
+    0.0) is immediate.
+    """
+    r, c = start
+    out = [(r, c)]
+    rows, cols = field_grid.shape
+    while True:
+        best = None
+        for dr, dc in _STEM_NEIGHBOURS:
+            rr, cc = r + dr, c + dc
+            if 0 <= rr < rows and 0 <= cc < cols and not np.isnan(field_grid[rr, cc]):
+                if best is None or field_grid[rr, cc] < best[0]:
+                    best = (field_grid[rr, cc], rr, cc)
+        if best is None or best[0] >= field_grid[r, c]:
+            return out
+        _, r, c = best
+        out.append((r, c))
+
+
+def main_stem_mask(fishery: Fishery, spec, field: np.ndarray) -> np.ndarray:
+    """The estuary's main channel: the union of the descent paths from each
+    river inflow point down to the mouth.
+
+    The inflow points are already authored in the fishery YAML (they are where
+    `Inlet_operator` injects discharge), so this adds no new hand-authored
+    geometry. Walking downhill from each one traces the channel the river
+    water actually takes, which is the line the salt front advances along.
+    """
+    from rasterio.warp import transform as warp_transform
+
+    grid = to_grid(field, spec.flat_index, spec.shape, fill=np.nan)
+    lons = [r.inflow_lonlat[0] for r in fishery.rivers]
+    lats = [r.inflow_lonlat[1] for r in fishery.rivers]
+    xs, ys = warp_transform("EPSG:4326", f"EPSG:{fishery.bathymetry.epsg}", lons, lats)
+
+    stem = np.zeros(spec.shape, dtype=bool)
+    for x, y in zip(xs, ys, strict=True):
+        d2 = (spec.xs - x) ** 2 + (spec.ys - y) ** 2
+        i = int(np.argmin(d2))
+        start = np.unravel_index(spec.flat_index[i], spec.shape)
+        for rr, cc in descent_path(grid, (int(start[0]), int(start[1]))):
+            stem[rr, cc] = True
+    return from_grid(stem, spec.flat_index)
+
+
+def build_stem_distance_field(slug: str, fishery: Fishery) -> Path:
+    """Distance from every cell to the main stem, through water.
+
+    The SAME Dijkstra as the along-estuary field, seeded from the stem
+    instead of the ocean. Reused rather than reimplemented so the two fields
+    cannot drift apart in connectivity or diagonal cost.
+    """
+    from tidescout.pipeline.flowlib import grid_spec
+
+    spec = grid_spec(slug, fishery)
+    field = load_distance_field(slug)
+    stem = main_stem_mask(fishery, spec, field)
+    d = along_estuary_km(spec, stem)
+    path = fishery_data_dir(slug) / "stem_km.npy"
+    np.save(path, d.astype("float32"))
+    return path
+
+
+def load_stem_distance_field(slug: str) -> np.ndarray:
+    path = fishery_data_dir(slug) / "stem_km.npy"
+    if not path.exists():
+        raise FileNotFoundError(
+            f"no distance-to-stem field at {path} -- run "
+            f"`tidescout salinity stem {slug}` first"
+        )
+    return np.load(path)

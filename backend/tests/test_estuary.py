@@ -8,6 +8,7 @@ import numpy as np
 import pytest
 from affine import Affine
 
+from tidescout.engine.structure import to_grid
 from tidescout.pipeline import estuary
 
 
@@ -327,3 +328,89 @@ def test_build_distance_field_seeds_from_the_salt_source(tmp_path, monkeypatch):
 
     assert seen["polygon"] == _F.model_domain.salt_source_boundary_utm_km
     assert seen["polygon"] != _F.model_domain.ocean_boundary_utm_km
+
+
+# -- Main stem and branch membership ----------------------------------------
+
+
+def _branch_spec():
+    """A main channel with one long side creek joining it near the mouth."""
+    mask = np.zeros((20, 20), bool)
+    mask[2:15, 3] = True   # main channel, north-south, mouth at the south end
+    mask[13, 3:12] = True  # a side creek joining low down
+    return _Spec(mask)
+
+
+def test_descent_path_runs_downhill_to_a_seed():
+    spec = _branch_spec()
+    rows, cols = np.unravel_index(spec.flat_index, spec.shape)
+    seeds = (rows == 14) & (cols == 3)
+    d = estuary.along_estuary_km(spec, seeds)
+    grid = to_grid(d, spec.flat_index, spec.shape, fill=np.nan)
+
+    path = estuary.descent_path(grid, (2, 3))
+
+    assert path[0] == (2, 3)
+    assert path[-1] == (14, 3), "must terminate at the seed"
+    assert len(path) == 13
+
+
+def test_distance_to_stem_separates_a_side_creek_from_the_channel():
+    """The head of a side creek is far from the stem THROUGH WATER even
+    when it is close in a straight line."""
+    spec = _branch_spec()
+    rows, cols = np.unravel_index(spec.flat_index, spec.shape)
+    stem = (cols == 3) & (rows >= 2) & (rows <= 14)
+
+    to_stem = estuary.along_estuary_km(spec, stem)
+
+    on_channel = (rows == 8) & (cols == 3)
+    creek_head = (rows == 13) & (cols == 11)
+    assert to_stem[on_channel][0] == pytest.approx(0.0)
+    assert to_stem[creek_head][0] == pytest.approx(0.8)  # 8 cells of 100 m
+
+
+@pytest.mark.parametrize(
+    ("station", "expect_off_axis"),
+    [
+        ("NIWTAWQ", False), ("WYSS1", False), ("NIWWBWQ", False),
+        ("NIWCBWQ", True), ("NIWOLWQ", True), ("NIWDCWQ", True),
+    ],
+)
+def test_the_six_nerrs_stations_land_on_the_right_side_of_the_screen(
+    station, expect_off_axis
+):
+    """Regression against the real built field, so a future threshold change
+    cannot silently re-admit North Inlet to a Winyah Bay fit.
+
+    Skips rather than fails when the field has not been built -- a fresh
+    clone has no data/ directory, and this asserts about real geometry.
+    """
+    import numpy as np
+    from rasterio.warp import transform as warp_transform
+
+    from tidescout.config import load_fishery
+    from tidescout.pipeline.flowlib import grid_spec
+    from tidescout.sources import cdmo
+
+    fishery = load_fishery("winyah-bay")
+    try:
+        stem = estuary.load_stem_distance_field("winyah-bay")
+    except FileNotFoundError:
+        pytest.skip("stem field not built -- run `tidescout salinity stem winyah-bay`")
+
+    spec = grid_spec("winyah-bay", fishery)
+    lon, lat = cdmo.NIW_STATION_COORDS_LONLAT[station]
+    x, y = (v[0] for v in warp_transform(
+        "EPSG:4326", f"EPSG:{fishery.bathymetry.epsg}", [lon], [lat]))
+    i = int(np.argmin((spec.xs - x) ** 2 + (spec.ys - y) ** 2))
+
+    assert (float(stem[i]) > estuary.ON_AXIS_MAX_KM) is expect_off_axis
+
+
+def test_on_axis_threshold_sits_in_the_measured_gap():
+    """Measured on the real field 2026-08-24: on-axis stations span
+    0.048-1.604 km to the stem and off-axis ones 7.798-11.918, with only
+    Jones Creek / Mud Bay (2.170) between. The threshold must sit in that
+    gap, not on either shoulder."""
+    assert 1.604 < estuary.ON_AXIS_MAX_KM < 2.170
