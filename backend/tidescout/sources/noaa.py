@@ -4,6 +4,7 @@ from zoneinfo import ZoneInfo
 import httpx
 
 from tidescout.engine.tides import CurrentHour, TideEvent, TideHour, TideStage
+from tidescout.errors import SourceUnavailable
 from tidescout.sources.cache import Cache
 
 __all__ = ["CurrentHour", "TideEvent", "TideHour", "TideStage"]
@@ -84,6 +85,31 @@ def tide_events(station: str, day: date, tz: str, cache: Cache) -> list[TideEven
     ]
 
 
+def _fetch_year_predictions(params: dict, station: str, year: int) -> dict:
+    """Fetch one year of hi/lo predictions, rejecting an empty result before
+    it can be cached.
+
+    CO-OPS can answer with HTTP 200 and a body like
+    {"message": "Network error communicating with endpoint"} when its own
+    backend is unhappy -- observed live while capturing this module's test
+    fixture. `_get_json` only inspects `payload["error"]`, so that shape
+    passes straight through with no "predictions" key. Because
+    `PREDICTION_TTL` is `None`, letting it through here would cache zero
+    events for that year forever, silently making every grab sample in it
+    unphaseable. Every year actually sampled at this station carries
+    roughly 1,410 hi/lo events, so an empty result is treated as a fetch
+    failure, not a legitimate outcome -- a real empty year is not expected
+    here, and caching emptiness forever is strictly worse than a loud
+    failure.
+    """
+    payload = _get_json(params)
+    if not payload.get("predictions"):
+        raise SourceUnavailable(
+            "coops", f"no hi/lo predictions returned for station {station}, {year}"
+        )
+    return payload
+
+
 def tide_events_range(
     station: str, start: date, end: date, tz: str, cache: Cache
 ) -> list[TideEvent]:
@@ -97,6 +123,15 @@ def tide_events_range(
 
     Chunks are keyed per year, so extending the range later re-fetches only
     the years actually added.
+
+    Returns every event in each *calendar year* touched by [start, end],
+    not just events falling inside that window -- deliberately a superset,
+    not a bug. `phase_at` needs the pair of events bracketing each
+    observation, and the first and last observations in a caller's window
+    are typically bracketed by events that fall just outside it; filtering
+    to the window would strip exactly those and leave the edge observations
+    unphaseable. A caller that wants a strict window should filter the
+    result itself.
     """
     zone = ZoneInfo(tz)
     out: list[TideEvent] = []
@@ -119,7 +154,7 @@ def tide_events_range(
             "coops",
             f"hilo:{station}:{begin}:{finish}",
             PREDICTION_TTL,
-            lambda p=params: _get_json(p),
+            lambda p=params, y=year: _fetch_year_predictions(p, station, y),
         )
         out.extend(
             TideEvent(_parse_t(p["t"], zone), p["type"], float(p["v"]))

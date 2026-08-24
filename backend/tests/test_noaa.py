@@ -125,15 +125,23 @@ def test_tide_events_range_chunks_by_year(monkeypatch):
 
 
 def test_tide_events_range_returns_events_in_time_order(monkeypatch):
-    """Yearly chunks are concatenated; phase_at sorts defensively, but the
-    seam is where unsorted input would first appear."""
+    """Yearly chunks are concatenated in ascending-year order; phase_at
+    sorts defensively, but the seam is where unsorted input would first
+    appear.
+
+    The "1999" chunk (processed first, by year) is deliberately given a
+    *later* timestamp than the "2000" chunk (processed second), so naive
+    concatenation would NOT already be time-ordered -- only the explicit
+    `out.sort(...)` fixes it. A version of this test using naturally
+    ordered dates would still pass with that sort deleted, which is why
+    the dates are swapped here."""
     from datetime import date
 
     from tidescout.sources import noaa
 
     payloads = {
-        "1999": {"predictions": [{"t": "1999-06-01 05:00", "type": "L", "v": "-0.5"}]},
-        "2000": {"predictions": [{"t": "2000-06-01 05:00", "type": "H", "v": "4.0"}]},
+        "1999": {"predictions": [{"t": "2000-06-01 05:00", "type": "H", "v": "4.0"}]},
+        "2000": {"predictions": [{"t": "1999-06-01 05:00", "type": "L", "v": "-0.5"}]},
     }
 
     def fake_get_or_fetch(source, key, ttl, fetch):
@@ -147,6 +155,7 @@ def test_tide_events_range_returns_events_in_time_order(monkeypatch):
 
     assert [e.time for e in out] == sorted(e.time for e in out)
     assert len(out) == 2
+    assert out[0].time.year == 1999  # only true because .sort() reordered them
 
 
 def test_tide_events_range_uses_the_permanent_prediction_cache(monkeypatch):
@@ -169,6 +178,90 @@ def test_tide_events_range_uses_the_permanent_prediction_cache(monkeypatch):
 
     assert seen_ttl == [noaa.PREDICTION_TTL]
     assert noaa.PREDICTION_TTL is None
+
+
+def test_tide_events_range_fetch_closures_do_not_share_the_loop_variable(monkeypatch):
+    """Regression for the closure trap the task brief warned about: a bare
+    `lambda: _get_json(params)` inside the year loop closes over the
+    *variable* `params`, not its value at that point in the loop.
+
+    The real `Cache.get_or_fetch` happens to call `fetch()` synchronously,
+    inline, before the loop advances to the next year -- so calling
+    `fetch()` immediately (as the other tests' fakes would, if they called
+    it at all) can't actually distinguish the fix from the bug: at that
+    instant `params` still holds the right value either way. The bug only
+    surfaces once a `fetch` callable outlives its loop iteration -- e.g. a
+    cache that batches or retries later. So this fake defers every
+    `fetch()` call until after `tide_events_range` has fully returned and
+    the loop variable has settled on its *last* value. With the bare-lambda
+    regression, every deferred call would then report the last year's
+    `begin_date`; with the `p=params, y=year` default-argument binding,
+    each keeps the year it was built for."""
+    from datetime import date
+
+    from tidescout.sources import noaa
+
+    deferred_fetches = []
+
+    def fake_get_or_fetch(source, key, ttl, fetch):
+        deferred_fetches.append(fetch)  # NOT called yet -- see docstring
+        return type("C", (), {"payload": {"predictions": []}})()
+
+    cache = type("Cache", (), {"get_or_fetch": staticmethod(fake_get_or_fetch)})()
+    noaa.tide_events_range(
+        "8662549", date(1999, 1, 1), date(2002, 12, 31), "America/New_York", cache
+    )
+    assert len(deferred_fetches) == 4  # the loop variable is now stuck on 2002
+
+    seen_begin_dates = []
+
+    def fake_get_json(params):
+        seen_begin_dates.append(params["begin_date"])
+        year = params["begin_date"][:4]
+        return {"predictions": [{"t": f"{year}-06-01 05:00", "type": "H", "v": "1.0"}]}
+
+    monkeypatch.setattr(noaa, "_get_json", fake_get_json)
+    for fetch in deferred_fetches:
+        fetch()
+
+    assert seen_begin_dates == ["19990101", "20000101", "20010101", "20020101"]
+
+
+@respx.mock
+def test_tide_events_range_rejects_a_200_status_error_shaped_response(tmp_path):
+    """CO-OPS can return HTTP 200 with a body like
+    {"message": "Network error communicating with endpoint"} when its own
+    backend is unhappy -- not hypothetical: this is exactly what this
+    task's own fixture-capture curl got on its first attempt. `_get_json`
+    only inspects payload["error"], so that shape passes straight through
+    with no "predictions" key. Because PREDICTION_TTL is None, letting it
+    through would cache zero events for that year forever, silently making
+    every grab sample in it unphaseable.
+
+    Uses a real Cache (not a fake) so this also proves the bad payload
+    never reaches the cache in the first place -- a subsequent read for
+    the exact key finds nothing, so CO-OPS recovering later is not
+    permanently blocked by a stale empty entry."""
+    from datetime import date
+
+    import pytest
+
+    from tidescout.errors import SourceUnavailable
+    from tidescout.sources import noaa
+
+    respx.get(url__regex=r".*datagetter.*").mock(
+        return_value=Response(200, json={"message": "Network error communicating with endpoint"})
+    )
+    cache = Cache(tmp_path / "c.sqlite")
+
+    with pytest.raises(SourceUnavailable) as exc_info:
+        noaa.tide_events_range(
+            "8662549", date(1999, 1, 1), date(1999, 12, 31), "America/New_York", cache
+        )
+
+    assert "8662549" in str(exc_info.value)
+    assert "1999" in str(exc_info.value)
+    assert cache._read("coops", "hilo:8662549:19990101:19991231") is None
 
 
 def test_tide_events_range_parses_a_real_coops_response():
