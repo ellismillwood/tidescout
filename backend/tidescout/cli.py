@@ -554,6 +554,27 @@ def salinity_calibrate(
             "from them carries no observational signal."
         )
 
+    bias = salinity_fit.station_bias(data.sites, data.observations, fitted)
+    if bias:
+        bias_table = Table(title="per-station bias against the fitted config")
+        for col in ("station(s)", "along-estuary km", "n", "mean residual ppt", "rmse ppt"):
+            bias_table.add_column(col)
+        for b in bias:
+            bias_table.add_row(
+                ", ".join(b.sites),
+                f"{b.distance_km:.2f}",
+                str(b.n),
+                f"{b.mean_residual_ppt:+.3f}",
+                f"{b.rmse_ppt:.3f}",
+            )
+        console.print(bias_table)
+        console.print(
+            "[dim]residual is predicted minus observed, evaluated at each row's own "
+            "discharge and FIT_PHASE — the same scoring `fit_intrusion` itself uses. "
+            "Two stations sharing one row above sit at the exact same along-estuary "
+            "distance and cannot be told apart from Observation alone.[/dim]"
+        )
+
     console.print("\n[bold]diagnostics[/bold]")
     for key, value in diag.items():
         if key == "warning":

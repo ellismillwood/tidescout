@@ -679,6 +679,78 @@ def build_site_record(
     )
 
 
+@dataclass
+class StationBias:
+    """One admitted station's residual against a fitted config.
+
+    `sites` holds more than one name when two admitted stations snap to the
+    EXACT same along-estuary distance -- see `station_bias`'s docstring for
+    why that case cannot be told apart from the data this is built on.
+    """
+
+    sites: tuple[str, ...]
+    distance_km: float
+    n: int
+    # predicted - observed, at each row's own discharge and FIT_PHASE.
+    mean_residual_ppt: float
+    rmse_ppt: float
+
+
+def station_bias(
+    sites: Sequence[SiteRecord], observations: Sequence[Observation], cfg: SalinityConfig
+) -> list[StationBias]:
+    """Per-station residual against `cfg`, for every ADMITTED (`used`) site.
+
+    Evaluated the same way the fit itself was scored: `salinity_at(distance,
+    cfs, FIT_PHASE, cfg)` minus the observed value, for every row belonging
+    to that station.
+
+    `Observation` is `(distance_km, cfs, ppt)` -- it carries no station id
+    (see the type alias's own comment), so this groups admitted sites by
+    their EXACT `distance_km`, the same float value `pair_daily_means` /
+    `collect_observations` used to build `observations` in the first place,
+    so the match is exact, not a tolerance. Two admitted stations that snap
+    to the identical distance -- e.g. WYSS1 and NIWWBWQ, the surface/bottom
+    pair sharing one along-estuary position at 19.03 km on the real Winyah
+    fit -- are therefore reported as ONE combined entry, `sites` naming
+    both. That is an honest limit of what `observations` can distinguish,
+    not a bug to paper over: nothing here has any way to separate their two
+    residuals from an object that only ever carried one of them per row.
+
+    Stations with no rows in `observations` at their distance (e.g. an
+    admitted site whose only history is swings, not levels) are omitted
+    rather than reported with a NaN. Returned sorted by distance.
+    """
+    admitted = [r for r in sites if r.used]
+    stations_at: dict[float, list[str]] = {}
+    for r in admitted:
+        stations_at.setdefault(r.distance_km, []).append(r.site)
+
+    rows_at: dict[float, list[tuple[float, float]]] = {}
+    for d, q, y in observations:
+        if d in stations_at:
+            rows_at.setdefault(d, []).append((q, y))
+
+    out = []
+    for d, names in sorted(stations_at.items()):
+        rows = rows_at.get(d)
+        if not rows:
+            continue
+        resid = np.array(
+            [salinity_at(d, q, FIT_PHASE, cfg) - y for q, y in rows], dtype="float64"
+        )
+        out.append(
+            StationBias(
+                sites=tuple(sorted(names)),
+                distance_km=d,
+                n=len(rows),
+                mean_residual_ppt=float(resid.mean()),
+                rmse_ppt=float(np.sqrt(np.mean(resid**2))),
+            )
+        )
+    return out
+
+
 def composite_discharge_by_day(
     fishery: Fishery, daily: dict[str, list[tuple[date, float]]]
 ) -> dict[date, float]:

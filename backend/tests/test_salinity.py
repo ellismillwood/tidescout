@@ -767,6 +767,92 @@ def test_site_record_reports_the_observed_ppt_range():
     assert r.ppt_range == (0.0, 8.0)
 
 
+# -- Task 7: per-station bias against a fitted config ------------------------
+# The gate report needs a bias/rmse figure per admitted station, not just the
+# one headline rmse. `Observation` carries a distance, not a station id, so
+# `station_bias` groups admitted `SiteRecord`s by their exact distance_km --
+# the same value that built `observations` in the first place.
+
+
+def test_station_bias_matches_a_hand_computed_residual():
+    site = salinity_fit.build_site_record(
+        "A", [(date(2026, 5, 1), 10.0)], located=True, distance_km=5.0,
+        snap_gap_m=1.0, max_snap_m=500.0,
+    )
+    obs = [(5.0, 4000.0, 9.0), (5.0, 4000.0, 11.0)]
+    out = salinity_fit.station_bias([site], obs, TRUTH)
+
+    assert len(out) == 1
+    b = out[0]
+    assert b.sites == ("A",)
+    assert b.distance_km == 5.0
+    assert b.n == 2
+    predicted = float(
+        salinity.salinity_at(np.array([5.0]), 4000.0, salinity_fit.FIT_PHASE, TRUTH)[0]
+    )
+    expected = [predicted - 9.0, predicted - 11.0]
+    assert b.mean_residual_ppt == pytest.approx(float(np.mean(expected)))
+    assert b.rmse_ppt == pytest.approx(float(np.sqrt(np.mean(np.square(expected)))))
+
+
+def test_station_bias_combines_stations_sharing_one_distance():
+    """WYSS1 and NIWWBWQ, the real surface/bottom pair on Winyah, snap to the
+    identical 19.03 km. `Observation` cannot tell their rows apart, so they
+    must be reported as one combined entry rather than silently double-
+    counted or arbitrarily assigned to whichever name sorts first."""
+    a = salinity_fit.build_site_record(
+        "NIWWBWQ", [(date(2026, 5, 1), 10.0)], located=True, distance_km=19.03,
+        snap_gap_m=1.0, max_snap_m=500.0,
+    )
+    b = salinity_fit.build_site_record(
+        "WYSS1", [(date(2026, 5, 1), 10.0)], located=True, distance_km=19.03,
+        snap_gap_m=1.0, max_snap_m=500.0,
+    )
+    obs = [(19.03, 4000.0, 8.0), (19.03, 9000.0, 5.0)]
+    out = salinity_fit.station_bias([a, b], obs, TRUTH)
+
+    assert len(out) == 1
+    assert out[0].sites == ("NIWWBWQ", "WYSS1")
+    assert out[0].n == 2
+
+
+def test_station_bias_omits_unused_stations_and_stations_with_no_matching_rows():
+    used = salinity_fit.build_site_record(
+        "A", [(date(2026, 5, 1), 10.0)], located=True, distance_km=5.0,
+        snap_gap_m=1.0, max_snap_m=500.0,
+    )
+    # Outside the domain -> used=False; must not appear even though it is
+    # "in" `sites`.
+    excluded = salinity_fit.build_site_record(
+        "B", [], located=True, distance_km=31.0, snap_gap_m=9000.0, max_snap_m=500.0
+    )
+    # Admitted (used=True) but nothing in `observations` sits at its
+    # distance -- e.g. a station whose only history is swings, not levels.
+    no_rows = salinity_fit.build_site_record(
+        "C", [(date(2026, 5, 1), 4.0)], located=True, distance_km=25.0,
+        snap_gap_m=1.0, max_snap_m=500.0,
+    )
+    obs = [(5.0, 4000.0, 9.0)]
+    out = salinity_fit.station_bias([used, excluded, no_rows], obs, TRUTH)
+
+    assert [b.sites for b in out] == [("A",)]
+
+
+def test_station_bias_is_sorted_by_distance():
+    far = salinity_fit.build_site_record(
+        "FAR", [(date(2026, 5, 1), 4.0)], located=True, distance_km=20.0,
+        snap_gap_m=1.0, max_snap_m=500.0,
+    )
+    near = salinity_fit.build_site_record(
+        "NEAR", [(date(2026, 5, 1), 4.0)], located=True, distance_km=5.0,
+        snap_gap_m=1.0, max_snap_m=500.0,
+    )
+    obs = [(20.0, 4000.0, 4.0), (5.0, 4000.0, 9.0)]
+    out = salinity_fit.station_bias([far, near], obs, TRUTH)
+
+    assert [b.distance_km for b in out] == [5.0, 20.0]
+
+
 # -- The CLI refusal path ---------------------------------------------------
 
 
