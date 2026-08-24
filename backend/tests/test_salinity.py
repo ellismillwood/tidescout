@@ -1988,3 +1988,96 @@ def test_salinity_field_nearest_observed_km_is_nan_with_no_observed_km():
     x = np.array([2.0, 10.0, 30.0])
     f = salinity_field(x, cfs=4000.0, phase=0.25, cfg=CFG)
     assert np.all(np.isnan(f.nearest_observed_km))
+
+
+# -- Pinning the "one tide station suffices" ruling --------------------------
+# The spec's Sec 2 rules that no per-location phase-lag model is needed for
+# this 4.4-32.9 km estuary, on the strength of a MEASURED lag of <= 0.011
+# phase units at 16.68-19.03 km against station 8662549 -- see the module
+# docstring for `pipeline/salinity_fit.py` on why the whole fit uses ONE
+# station's phase. That ruling is what keeps this work small (the
+# alternative was a per-cell lag model across a 36 km domain); nothing
+# before this test protected it from silently going false.
+
+
+def test_up_estuary_tidal_lag_stays_negligible():
+    """The spec rules that ONE tide station's phase serves the whole
+    estuary, because the measured lag at 16.68-19.03 km is <= 0.011 phase
+    units against the ~0.25 error the old code made. That ruling is what
+    keeps this work small; this pins it against becoming FALSE -- a future
+    change to the tide station, the phase convention, or the interpolation
+    that pushes the real lag past this bay's tidal-averaging tolerance.
+
+    Measured 2026-08-24 over 2026-07-01..21 against CO-OPS station 8662549,
+    from each NERRS station's own `depth_m` record (its high-water time
+    compared against the tide station's predicted high, matched within a
+    4-hour window, median lag across 37-39 matched highs per station):
+        NIWTAWQ  16.68 km   -2.0 min  (-0.003 phase units)
+        WYSS1    19.03 km   +4.0 min  (+0.005 phase units)
+        NIWWBWQ  19.03 km   +8.0 min  (+0.011 phase units)
+
+    The 0.05 threshold below is deliberately NOT the measured 0.011: it
+    guards the ruling from becoming wrong, not the exact measurement, which
+    will vary a little with the window chosen. Tightening it to 0.011 would
+    make this test fail on ordinary variation and invite deletion.
+
+    Skips cleanly when the NERRS store or the tide predictions are
+    unavailable -- a fresh clone has no `data/` directory, and this asserts
+    about real measured geography, like the other real-data tests here."""
+    from zoneinfo import ZoneInfo
+
+    from tidescout.errors import SourceUnavailable
+    from tidescout.sources import ndbc, noaa
+    from tidescout.sources.cache import default_cache
+
+    fishery = load_fishery("winyah-bay")
+    store = ndbc.default_store("winyah-bay")
+    if not store.stations():
+        pytest.skip("NERRS store not present")
+
+    zone = ZoneInfo(fishery.timezone)
+    try:
+        events = noaa.tide_events_range(
+            fishery.stations.tide[0], date(2026, 7, 1), date(2026, 7, 21),
+            fishery.timezone, default_cache(),
+        )
+    except SourceUnavailable:
+        pytest.skip("tide predictions unavailable")
+    highs = sorted(e.time for e in events if e.kind == "H")
+
+    checked = 0
+    for station in ("NIWTAWQ", "WYSS1", "NIWWBWQ"):
+        rows = [
+            (t, r.depth_m)
+            for t, r in (
+                (o.ts.astimezone(zone), o)
+                for o in store.read(
+                    station,
+                    datetime(2026, 7, 1, tzinfo=zone),
+                    datetime(2026, 7, 21, tzinfo=zone),
+                )
+            )
+            if r.depth_m is not None
+        ]
+        if len(rows) < 500:
+            continue  # this station's window is too sparse to trust here; try the others
+        times = [t for t, _ in rows]
+        depths = np.array([d for _, d in rows], dtype="float64")
+        lags = []
+        for h in highs:
+            idx = [i for i, t in enumerate(times) if abs((t - h).total_seconds()) < 4 * 3600]
+            if len(idx) < 20:
+                continue
+            j = idx[int(np.argmax(depths[idx]))]
+            lags.append((times[j] - h).total_seconds() / 60.0)
+        if not lags:
+            continue
+        checked += 1
+        phase_units = abs(float(np.median(lags))) / (12.42 * 60)
+        assert phase_units <= 0.05, (
+            f"{station}'s tidal lag is {phase_units:.3f} phase units -- the spec's "
+            "'one station suffices' ruling assumed <= 0.011. If this is real, a "
+            "per-location lag model is now needed and the spec must be revisited."
+        )
+    if checked == 0:
+        pytest.skip("no NERRS station had enough depth readings in the 2026-07-01..21 window")
