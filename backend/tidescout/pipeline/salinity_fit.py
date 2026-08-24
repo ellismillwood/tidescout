@@ -402,7 +402,17 @@ def fit_intrusion(
         for (d, q, y_), ph in zip(observations, phases, strict=True)
         if np.isfinite(d) and np.isfinite(q) and np.isfinite(y_)
     ] if phases else []
-    n_phase_resolved = len(kept_phases)
+    # Deliberately named `_supplied`, not `_resolved`: this counts every row
+    # scored with a caller-supplied phase array entry, WHATEVER that value
+    # is -- it does NOT distinguish an individually-resolved WQP grab phase
+    # from a daily mean carrying the shared FIT_PHASE default. `fit_intrusion`
+    # has no way to tell those apart from the phase values alone (both are
+    # ordinary floats), and a name implying "individually resolved" here
+    # would overstate what this counts by ~7x on the real Winyah run (12,725
+    # supplied vs. 1,860 individually resolved -- see
+    # `CalibrationInput.n_wqp_phase_resolved`, which IS the per-row-provenance
+    # count, tracked where that provenance is actually known).
+    n_phase_supplied = len(kept_phases)
     # Empty `phases` reproduces today's behaviour exactly: every row scored
     # at FIT_PHASE, the phase at which a daily mean's tidal term is zero.
     level_phases = (
@@ -506,7 +516,7 @@ def fit_intrusion(
         "rmse_ppt": rmse,
         "rmse_by_source_ppt": rmse_by_source,
         "n_obs": len(obs),
-        "n_phase_resolved": n_phase_resolved,
+        "n_phase_supplied": n_phase_supplied,
         "n_interior_obs": n_interior,
         "cfs_span": cfs_span,
         "warning": warning,
@@ -1038,6 +1048,19 @@ class CalibrationInput:
     # grab with no determinable phase is dropped, never silently scored at
     # `FIT_PHASE` as though it were a tidal average.
     n_no_phase: int = 0
+    # How many `observation_phases` entries are an INDIVIDUALLY RESOLVED WQP
+    # grab phase (from `phase_at`), as opposed to the shared `FIT_PHASE`
+    # default every NERRS/USGS daily mean carries. Tracked directly at the
+    # one place this is exactly known (the WQP loop below), rather than
+    # inferred later by comparing phase values against `FIT_PHASE` -- that
+    # comparison would be a fragile heuristic (a resolved phase landing
+    # exactly on 0.25 would misclassify) where this is exact. This is the
+    # number a reader wants when asking "how many rows got their OWN phase,"
+    # not `fit_intrusion`'s `n_phase_supplied`, which counts every row
+    # scored with ANY caller-supplied phase -- daily means included -- and
+    # so overstates this by roughly 7x on the real Winyah run (12,725 vs.
+    # 1,860, measured 2026-08-24).
+    n_wqp_phase_resolved: int = 0
 
 
 def daily_means_and_swings(
@@ -1509,6 +1532,7 @@ def collect_observations(
 
     n_wqp_no_discharge_day = 0
     n_no_phase = 0
+    n_wqp_phase_resolved = 0
     for site, series in sorted(wqp_series.items()):
         if site not in wqp_usable:
             continue
@@ -1538,6 +1562,7 @@ def collect_observations(
             observations.append((dist, by_day[day], ppt))
             sources.append("wqp")
             obs_phases.append(ph)
+            n_wqp_phase_resolved += 1
 
     swing_days = min(days, MAX_IV_DAYS)
     from tidescout.sources import usgs
@@ -1561,4 +1586,5 @@ def collect_observations(
         observation_sources=sources, n_colocated=n_colocated,
         n_wqp_no_discharge_day=n_wqp_no_discharge_day,
         observation_phases=obs_phases, n_no_phase=n_no_phase,
+        n_wqp_phase_resolved=n_wqp_phase_resolved,
     )

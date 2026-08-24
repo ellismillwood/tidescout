@@ -1567,6 +1567,25 @@ def test_wqp_stations_enter_as_individual_grab_samples_not_daily_means(monkeypat
     assert data.n_no_phase == 0
     # Both surviving WQP rows carry a real (non-FIT_PHASE-defaulted) phase.
     assert len(data.observation_phases) == len(data.observations)
+    # VALUE assertions, not just length/count: each row's phase must equal
+    # `phase_at` computed independently against the SAME events for that
+    # row's OWN timestamp -- not merely differ from FIT_PHASE by
+    # coincidence, and not silently reintroducible by reverting
+    # `obs_phases.append(ph)` back to `obs_phases.append(FIT_PHASE)` in
+    # `collect_observations` (that regression would leave `n_no_phase`,
+    # `n_wqp_no_discharge_day` and the length check above all unchanged).
+    from tidescout.engine.tides import phase_at as _phase_at
+
+    phase_by_row = dict(zip(data.observations, data.observation_phases, strict=True))
+    assert phase_by_row[(10.28, 4000.0, 5.0)] == pytest.approx(
+        _phase_at(events, datetime(2026, 5, 1, 15, 0, tzinfo=UTC))
+    )
+    assert phase_by_row[(10.28, 4200.0, 6.0)] == pytest.approx(
+        _phase_at(events, datetime(2026, 5, 2, 16, 0, tzinfo=UTC))
+    )
+    assert phase_by_row[(10.28, 4000.0, 5.0)] != pytest.approx(salinity_fit.FIT_PHASE)
+    assert phase_by_row[(10.28, 4200.0, 6.0)] != pytest.approx(salinity_fit.FIT_PHASE)
+    assert data.n_wqp_phase_resolved == 2
 
 
 def test_wqp_rows_with_no_composite_discharge_day_are_counted_not_silent(monkeypatch):
@@ -1634,6 +1653,18 @@ def test_wqp_rows_with_no_composite_discharge_day_are_counted_not_silent(monkeyp
     site = next(r for r in data.sites if r.site == "WB-06")
     assert site.used is True
     assert site.n_days == 1, "the undischarged row must not inflate n_days"
+    # VALUE assertion, not just a count: the surviving row's phase must
+    # equal `phase_at` computed independently for its own timestamp against
+    # the same events -- catches a revert of `obs_phases.append(ph)` back to
+    # `obs_phases.append(FIT_PHASE)`, which would leave every assertion
+    # above this one unchanged (see the sibling test's comment for why).
+    from tidescout.engine.tides import phase_at as _phase_at
+
+    assert data.observation_phases == [
+        pytest.approx(_phase_at(events, datetime(2026, 5, 1, 15, 0, tzinfo=UTC)))
+    ]
+    assert data.observation_phases[0] != pytest.approx(salinity_fit.FIT_PHASE)
+    assert data.n_wqp_phase_resolved == 1
 
 
 # -- Cross-store co-location: WQP-to-STORE only, never WQP-to-WQP -----------

@@ -466,6 +466,22 @@ def salinity_calibrate(
         "NERRS-store swings cover everything the store holds, since it accumulates "
         "rather than serving a rolling window."
     )
+    # Two DIFFERENT counts, named so neither can be misread as the other:
+    # `n_wqp_phase_resolved` is exact per-row provenance (each WQP grab's
+    # OWN timestamp resolved via phase_at); the remainder are NERRS/USGS
+    # daily means, which correctly carry the shared FIT_PHASE default (a
+    # daily mean already averages the tide out, so FIT_PHASE is not a
+    # fallback for them). `fit_intrusion`'s own `n_phase_supplied`
+    # diagnostic (printed below) is the AGGREGATE of both and must not be
+    # read as "this many were individually resolved" -- see its docstring.
+    console.print(
+        f"{data.n_wqp_phase_resolved} of those {len(data.observations)} salinity "
+        "observations carry a tidal phase individually resolved from their own WQP "
+        f"grab timestamp; the remaining "
+        f"{len(data.observations) - data.n_wqp_phase_resolved} (NERRS/USGS daily "
+        "means) score at the fixed daily-mean FIT_PHASE, which is correct for a "
+        "quantity that already averages the tide out."
+    )
     from tidescout.pipeline.estuary import ON_AXIS_MAX_KM
 
     console.print(
