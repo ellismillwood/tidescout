@@ -136,6 +136,7 @@ __all__ = [
     "NERRS_CITATION_TEMPLATE",
     "NERRS_DISCLAIMER",
     "SOURCE_NDBC_REALTIME2",
+    "WQP_ATTRIBUTION",
     "Citation",
     "MetObservation",
     "NdbcStore",
@@ -285,6 +286,28 @@ NERRS_CITATION_TEMPLATE = (
     "Monitoring Program. Data accessed from the NOAA NERRS Centralized Data "
     "Management Office website: http://www.nerrsdata.org; accessed {date}. "
     "doi:10.25921/vw8a-8031."
+)
+
+# Attribution for Water Quality Portal holdings. WQP is an aggregator: the
+# data belongs to the contributing organisation (SC DES, SCDHEC, EPA), and
+# WQP itself asks to be named as the access route. `{date}` is the only part
+# this codebase fills in, matching NERRS_CITATION_TEMPLATE's contract.
+WQP_ATTRIBUTION = (
+    "Water quality data accessed from the Water Quality Portal "
+    "(https://www.waterqualitydata.us), a cooperative service of the U.S. "
+    "Environmental Protection Agency, the U.S. Geological Survey and the "
+    "National Water Quality Monitoring Council; accessed {date}. Data are "
+    "contributed by the originating monitoring organisations, which retain "
+    "credit for having collected them."
+)
+
+# Provenance `source` prefix -> the citation block that source requires.
+# Keyed on prefix so "cdmo:water_quality" and "cdmo:meteorological" share one
+# entry without listing every variant.
+_CITATION_BY_SOURCE_PREFIX: tuple[tuple[str, str], ...] = (
+    ("wqp:", WQP_ATTRIBUTION),
+    ("ndbc:", NERRS_CITATION_TEMPLATE),
+    ("cdmo:", NERRS_CITATION_TEMPLATE),
 )
 
 # This store only ever holds North Inlet-Winyah Bay (NIW) NERR data (every
@@ -766,7 +789,17 @@ class NdbcStore:
             date_str = f"{accessed_date.day} {accessed_date:%B} {accessed_date.year}"
         else:
             date_str = "[NO RECORDED ACCESS -- this store predates provenance tracking]"
-        text = NERRS_CITATION_TEMPLATE.format(date=date_str)
+        # One block per source family actually present. Task 10's ruling was
+        # that this is GENERATED from the store so it can neither overclaim
+        # nor underclaim; a fixed NERRS template overclaims the moment the
+        # store holds anything else.
+        templates: list[str] = []
+        for prefix, template in _CITATION_BY_SOURCE_PREFIX:
+            if any(s.startswith(prefix) for s in sources) and template not in templates:
+                templates.append(template)
+        if not templates:
+            templates = [NERRS_CITATION_TEMPLATE]
+        text = "\n\n".join(t.format(date=date_str) for t in templates)
 
         wq_stations = [
             r[0] for r in self._conn.execute("SELECT DISTINCT station FROM observations")

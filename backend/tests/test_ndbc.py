@@ -664,3 +664,40 @@ def test_citation_includes_the_disclaimer_and_niw_acknowledgement(tmp_path):
     assert "cdmodata@baruch.sc.edu" in c.acknowledgement
     assert "Federal government does not assume liability" in c.disclaimer
     assert "reimburse or indemnify" in c.disclaimer  # the clause the dispatch's quote dropped
+
+
+def test_citation_names_the_sources_the_store_actually_holds(tmp_path):
+    """Task 10's ruling was that the citation is GENERATED from the store so
+    it cannot overclaim. A hardcoded NERRS template does exactly that the
+    moment the store holds anything else."""
+    from datetime import UTC, datetime
+
+    from tidescout.sources import ndbc, wqp
+
+    store = ndbc.NdbcStore(tmp_path / "wqp.sqlite")
+    store.append("WB-06", [ndbc.Observation(
+        ts=datetime(2014, 6, 12, 15, 35, tzinfo=UTC), depth_m=None, water_temp_c=None,
+        cond_ms_cm=None, salinity_psu=20.0, o2_pct=None, o2_ppm=None,
+        chlorophyll_ug_l=None, turbidity_ftu=None, ph=None, eh_mv=None)])
+    store.record_provenance(wqp.SOURCE_WQP, ["WB-06"], None, 1)
+
+    cit = store.citation()
+    assert "Water Quality Portal" in cit.text
+    assert "National Estuarine Research Reserve" not in cit.text, (
+        "a WQP-only store must not claim NERRS provenance"
+    )
+
+
+def test_a_nerrs_store_still_gets_the_nerrs_citation(tmp_path):
+    from datetime import UTC, datetime
+
+    from tidescout.sources import ndbc
+
+    store = ndbc.NdbcStore(tmp_path / "ndbc.sqlite")
+    store.append("WYSS1", [ndbc.Observation(
+        ts=datetime(2026, 8, 23, 12, 0, tzinfo=UTC), depth_m=None, water_temp_c=None,
+        cond_ms_cm=None, salinity_psu=10.5, o2_pct=None, o2_ppm=None,
+        chlorophyll_ug_l=None, turbidity_ftu=None, ph=None, eh_mv=None)])
+    store.record_provenance("ndbc:realtime2", ["WYSS1"], None, 1)
+
+    assert "doi:10.25921/vw8a-8031" in store.citation().text
