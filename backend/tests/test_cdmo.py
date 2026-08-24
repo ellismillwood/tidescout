@@ -783,9 +783,13 @@ def test_import_file_detects_a_met_file_and_writes_into_met_observations(tmp_pat
 
     assert store.count_met("NIWOLMET") == 1
     assert store.count("NIWOLMET") == 0  # never written to the WQ table
-    assert report.stations[0].canonical == "NIWOLMET"
-    assert report.stations[0].raw_code == "niwolmet"
-    assert report.stations[0].n_new == 1
+    # A MET station appears under `met_stations`, never `stations` -- one
+    # report now covers both families, because the real export is one
+    # interleaved file (Task 11).
+    assert report.stations == []
+    assert report.met_stations[0].canonical == "NIWOLMET"
+    assert report.met_stations[0].raw_code == "niwolmet"
+    assert report.met_stations[0].n_new == 1
 
 
 def test_reimporting_the_same_met_file_adds_nothing(tmp_path):
@@ -797,7 +801,7 @@ def test_reimporting_the_same_met_file_adds_nothing(tmp_path):
     report2 = import_file(path, store)
 
     assert store.count_met("NIWOLMET") == 1
-    assert report2.stations[0].n_new == 0
+    assert report2.met_stations[0].n_new == 0
 
 
 def test_bad_met_header_raises_and_does_not_touch_the_store(tmp_path):
@@ -857,8 +861,8 @@ def test_met_import_file_dedupes_across_a_second_pass(tmp_path):
     r1 = import_file(path, store)
     r2 = import_file(path, store)
 
-    assert sum(s.n_new for s in r1.stations) == 2
-    assert sum(s.n_new for s in r2.stations) == 0
+    assert sum(s.n_new for s in r1.met_stations) == 2
+    assert sum(s.n_new for s in r2.met_stations) == 0
     assert store.count_met("NIWOLMET") == 2
 
 

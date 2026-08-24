@@ -118,7 +118,8 @@ than fabricating a date.
 """
 
 import sqlite3
-from collections.abc import Sequence
+from collections.abc import Iterator, Sequence
+from contextlib import contextmanager
 from dataclasses import dataclass
 from datetime import UTC, date, datetime
 from pathlib import Path
@@ -130,6 +131,7 @@ from tidescout.paths import fishery_data_dir
 
 __all__ = [
     "NDBC_URL",
+    "BulkWriter",
     "NERRS_ACKNOWLEDGEMENT",
     "NERRS_CITATION_TEMPLATE",
     "NERRS_DISCLAIMER",
@@ -326,6 +328,153 @@ class Citation:
     sources: tuple[str, ...]
 
 
+# -- the one place each table's row shape is written down ---------------------
+# `append`/`append_met`/`record_provenance` and `BulkWriter` all bind through
+# these, so the small-batch and streaming write paths can never drift apart in
+# column order or count.
+
+_INSERT_WQ = (
+    "INSERT OR REPLACE INTO observations "
+    "(station, ts, depth_m, water_temp_c, cond_ms_cm, salinity_psu, "
+    " o2_pct, o2_ppm, chlorophyll_ug_l, turbidity_ftu, ph, eh_mv) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
+_INSERT_MET = (
+    "INSERT OR REPLACE INTO met_observations "
+    "(station, ts, air_temp_c, rh_pct, bp_mb, wind_speed_ms, "
+    " max_wind_speed_ms, wind_dir_deg, wind_dir_sd_deg, "
+    " par_mmol_m2, precip_mm, solar_rad_wm2) "
+    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)"
+)
+
+_INSERT_PROVENANCE = (
+    "INSERT INTO provenance "
+    "(accessed_at, source, stations, span_start, span_end, n_new) "
+    "VALUES (?, ?, ?, ?, ?, ?)"
+)
+
+
+def _wq_params(station: str, r: Observation) -> tuple:
+    return (
+        station, r.ts.astimezone(UTC).isoformat(),
+        r.depth_m, r.water_temp_c, r.cond_ms_cm, r.salinity_psu,
+        r.o2_pct, r.o2_ppm, r.chlorophyll_ug_l, r.turbidity_ftu,
+        r.ph, r.eh_mv,
+    )
+
+
+def _met_params(station: str, r: MetObservation) -> tuple:
+    return (
+        station, r.ts.astimezone(UTC).isoformat(),
+        r.air_temp_c, r.rh_pct, r.bp_mb, r.wind_speed_ms,
+        r.max_wind_speed_ms, r.wind_dir_deg, r.wind_dir_sd_deg,
+        r.par_mmol_m2, r.precip_mm, r.solar_rad_wm2,
+    )
+
+
+def _provenance_params(
+    source: str,
+    stations: Sequence[str],
+    span: tuple[datetime, datetime] | None,
+    n_new: int,
+    accessed_at: datetime | None = None,
+) -> tuple:
+    at = (accessed_at or datetime.now(UTC)).astimezone(UTC)
+    return (
+        at.isoformat(),
+        source,
+        ",".join(sorted(stations)),
+        span[0].astimezone(UTC).isoformat() if span else None,
+        span[1].astimezone(UTC).isoformat() if span else None,
+        n_new,
+    )
+
+
+class BulkWriter:
+    """A streaming write into an open transaction -- see `NdbcStore.bulk_writer`.
+
+    `append` takes a `Sequence`, which means the caller has already built
+    every row in memory. That is the right shape for a 4,000-row NDBC fetch
+    and the wrong one for a 2.5-million-row CDMO export, where materialising
+    the rows costs more than the file itself. This accumulates at most
+    `batch_rows` bound tuples per table before handing them to SQLite, so
+    peak memory is set by `batch_rows` rather than by the file.
+
+    Both tables and the provenance row are written through ONE transaction
+    owned by `bulk_writer`, so "the whole import or none of it" covers a
+    multi-station, multi-table, multi-batch import exactly the way
+    `append`'s single `with self._conn` covers one batch.
+    """
+
+    def __init__(self, conn: sqlite3.Connection, batch_rows: int = 20_000):
+        self._conn = conn
+        self._batch_rows = batch_rows
+        self._wq: list[tuple] = []
+        self._met: list[tuple] = []
+        # Count at the moment this import first touched each station, taken
+        # lazily so a station the file never mentions is never queried.
+        self._before_wq: dict[str, int] = {}
+        self._before_met: dict[str, int] = {}
+
+    def add(self, station: str, row: Observation) -> None:
+        if station not in self._before_wq:
+            self._before_wq[station] = self._count("observations", station)
+        self._wq.append(_wq_params(station, row))
+        if len(self._wq) >= self._batch_rows:
+            self.flush()
+
+    def add_met(self, station: str, row: MetObservation) -> None:
+        if station not in self._before_met:
+            self._before_met[station] = self._count("met_observations", station)
+        self._met.append(_met_params(station, row))
+        if len(self._met) >= self._batch_rows:
+            self.flush()
+
+    def flush(self) -> None:
+        """Hand every buffered row to SQLite. Still inside the transaction --
+        nothing is durable until `bulk_writer` commits."""
+        if self._wq:
+            self._conn.executemany(_INSERT_WQ, self._wq)
+            self._wq.clear()
+        if self._met:
+            self._conn.executemany(_INSERT_MET, self._met)
+            self._met.clear()
+
+    def n_new(self, station: str) -> int:
+        """Rows this import ADDED for `station` -- re-importing a file that
+        is already stored reports 0, not its row count. Call after `flush`;
+        the uncommitted rows are visible to this connection."""
+        before = self._before_wq.get(station, 0)
+        return self._count("observations", station) - before
+
+    def n_new_met(self, station: str) -> int:
+        before = self._before_met.get(station, 0)
+        return self._count("met_observations", station) - before
+
+    def record_provenance(
+        self,
+        source: str,
+        stations: Sequence[str],
+        span: tuple[datetime, datetime] | None,
+        n_new: int,
+        accessed_at: datetime | None = None,
+    ) -> None:
+        """`NdbcStore.record_provenance`, inside THIS transaction rather than
+        one of its own -- so a rollback takes the provenance row with it and
+        a failed import leaves no record of data it never committed."""
+        self._conn.execute(
+            _INSERT_PROVENANCE,
+            _provenance_params(source, stations, span, n_new, accessed_at),
+        )
+
+    def _count(self, table: str, station: str) -> int:
+        (n,) = self._conn.execute(
+            f"SELECT COUNT(*) FROM {table} WHERE station = ?", (station,)
+        ).fetchone()
+        return n
+
+
 class NdbcStore:
     """Accumulating, deduplicated observation history for NDBC stations.
 
@@ -383,23 +532,38 @@ class NdbcStore:
         window that overlaps what is already stored returns 0 for the
         overlap, not `len(rows)` -- see `test_append_and_dedupe_across_
         overlapping_fetches` for the proof this matters.
+
+        For a batch small enough to hold in memory. `bulk_writer` is the
+        streaming equivalent for an import too large to materialise (see
+        its docstring); both go through `_wq_params` and `_INSERT_WQ`, so
+        the row shape is defined in exactly one place.
         """
         before = self.count(station)
         with self._conn:
-            for r in rows:
-                self._conn.execute(
-                    "INSERT OR REPLACE INTO observations "
-                    "(station, ts, depth_m, water_temp_c, cond_ms_cm, salinity_psu, "
-                    " o2_pct, o2_ppm, chlorophyll_ug_l, turbidity_ftu, ph, eh_mv) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        station, r.ts.astimezone(UTC).isoformat(),
-                        r.depth_m, r.water_temp_c, r.cond_ms_cm, r.salinity_psu,
-                        r.o2_pct, r.o2_ppm, r.chlorophyll_ug_l, r.turbidity_ftu,
-                        r.ph, r.eh_mv,
-                    ),
-                )
+            self._conn.executemany(_INSERT_WQ, (_wq_params(station, r) for r in rows))
         return self.count(station) - before
+
+    @contextmanager
+    def bulk_writer(self, batch_rows: int = 20_000) -> Iterator[BulkWriter]:
+        """One transaction spanning an entire streamed import.
+
+        `append` is whole-BATCH atomic; this is whole-IMPORT atomic. The
+        difference matters once a single file is too big to be one batch:
+        without it a 2.5 M-row import that dies at row 2 million would leave
+        the store holding an arbitrary prefix of a file, indistinguishable
+        from a complete one. Any exception raised inside the `with` body --
+        a malformed row, an unbindable value, a KeyboardInterrupt -- rolls
+        the whole thing back, including the provenance row.
+        """
+        writer = BulkWriter(self._conn, batch_rows=batch_rows)
+        try:
+            yield writer
+            writer.flush()
+        except BaseException:
+            self._conn.rollback()
+            raise
+        else:
+            self._conn.commit()
 
     def count(self, station: str) -> int:
         (n,) = self._conn.execute(
@@ -460,20 +624,7 @@ class NdbcStore:
         dedupe), against `met_observations` instead of `observations`."""
         before = self.count_met(station)
         with self._conn:
-            for r in rows:
-                self._conn.execute(
-                    "INSERT OR REPLACE INTO met_observations "
-                    "(station, ts, air_temp_c, rh_pct, bp_mb, wind_speed_ms, "
-                    " max_wind_speed_ms, wind_dir_deg, wind_dir_sd_deg, "
-                    " par_mmol_m2, precip_mm, solar_rad_wm2) "
-                    "VALUES (?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?, ?)",
-                    (
-                        station, r.ts.astimezone(UTC).isoformat(),
-                        r.air_temp_c, r.rh_pct, r.bp_mb, r.wind_speed_ms,
-                        r.max_wind_speed_ms, r.wind_dir_deg, r.wind_dir_sd_deg,
-                        r.par_mmol_m2, r.precip_mm, r.solar_rad_wm2,
-                    ),
-                )
+            self._conn.executemany(_INSERT_MET, (_met_params(station, r) for r in rows))
         return self.count_met(station) - before
 
     def count_met(self, station: str) -> int:
@@ -535,20 +686,10 @@ class NdbcStore:
         `accessed_at` defaults to now (UTC) -- overridable only for tests
         that need a fixed clock; every real call site uses the default.
         """
-        at = (accessed_at or datetime.now(UTC)).astimezone(UTC)
         with self._conn:
             self._conn.execute(
-                "INSERT INTO provenance "
-                "(accessed_at, source, stations, span_start, span_end, n_new) "
-                "VALUES (?, ?, ?, ?, ?, ?)",
-                (
-                    at.isoformat(),
-                    source,
-                    ",".join(sorted(stations)),
-                    span[0].astimezone(UTC).isoformat() if span else None,
-                    span[1].astimezone(UTC).isoformat() if span else None,
-                    n_new,
-                ),
+                _INSERT_PROVENANCE,
+                _provenance_params(source, stations, span, n_new, accessed_at),
             )
 
     def provenance(self) -> list[ProvenanceRecord]:

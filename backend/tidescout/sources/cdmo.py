@@ -286,6 +286,7 @@ import csv
 import io
 import re
 import zipfile
+from collections.abc import Iterable, Iterator, Mapping, Sequence
 from dataclasses import dataclass, field
 from datetime import datetime, timedelta, timezone
 from pathlib import Path
@@ -294,38 +295,49 @@ from tidescout.sources.ndbc import MetObservation, NdbcStore, Observation
 
 __all__ = [
     "ACCEPTED_FLAGS",
+    "BATCH_ROWS",
     "CDMO_TZ",
     "FLAG_MEANINGS",
     "MET_ACCEPTED_FLAGS",
     "MET_FLAG_MEANINGS",
     "NIW_MET_STATION_COORDS_LONLAT",
     "NIW_STATION_COORDS_LONLAT",
+    "QAQC_CODE_MEANINGS",
     "SOURCE_CDMO_MET",
     "SOURCE_CDMO_WQ",
     "STATION_ALIASES",
+    "STATION_METADATA_FILENAME",
     "ImportReport",
-    "MetImportReport",
-    "MetParseResult",
-    "MetStationImport",
-    "MetStationParse",
     "ParseResult",
     "StationImport",
+    "StationMeta",
     "StationParse",
     "canonical_station",
+    "find_station_metadata",
     "import_file",
     "import_path",
+    "load_station_metadata",
+    "read_station_metadata",
     "parse_cdmo_csv",
     "parse_cdmo_met_csv",
+    "station_kind",
 ]
 
-# Provenance `source` labels for the two CDMO import routes -- see
+# Provenance `source` labels for the two CDMO parameter families -- see
 # `ndbc.py`'s "PROVENANCE AND CITATION" and `SOURCE_NDBC_REALTIME2` there.
+# One interleaved file records BOTH, because it contains both.
 SOURCE_CDMO_WQ = "cdmo:water_quality"
 SOURCE_CDMO_MET = "cdmo:meteorological"
 
+# Rows buffered per table before they are handed to SQLite. Peak memory for
+# an import is set by this, not by the file: the real 494 MB export streams
+# through in a bounded working set. See `ndbc.BulkWriter`.
+BATCH_ROWS = 20_000
+
 # Fixed UTC-5, year-round -- built directly rather than via a DST-aware zone.
-# See the module docstring's "TIMESTAMP CONVENTION" section for the two
-# independent primary sources this was established from.
+# See the module docstring's "TIMESTAMP CONVENTION". This is the FALLBACK
+# used when no station metadata is available; when it is, each station's own
+# `GMT Offset` column is read instead (see `StationMeta.tz`).
 CDMO_TZ = timezone(timedelta(hours=-5))
 
 FLAG_MEANINGS: dict[int, str] = {
@@ -368,8 +380,104 @@ MET_FLAG_MEANINGS: dict[int, str] = {
 # not a WQ-style real judgement. See "MET-SPECIFIC QAQC" above.
 MET_ACCEPTED_FLAGS = frozenset({0, 5})
 
+# The alphanumeric QAQC codes that accompany a flag, from CDMO's own QAQC
+# page (https://cdmo.baruch.sc.edu/data/qaqc.cfm, fetched live 2026-08-23).
+# G = general error, S = sensor error, C = comment. These EXPLAIN a flag;
+# they never override it -- see "QUALIFIER CODES" in the module docstring.
+QAQC_CODE_MEANINGS: dict[str, str] = {
+    # -- general errors -------------------------------------------------
+    "GCC": "Calculated value could not be determined; missing correction",
+    "GCM": "Calculated value could not be determined due to missing data",
+    "GCR": "Calculated value could not be determined due to rejected data",
+    "GCS": "Calculated value suspect due to questionable data",
+    "GCU": "Calculated value could not be determined due to unavailable data",
+    "GDM": "Data missing",
+    "GIC": "Incorrect calibration",
+    "GIM": "Instrument malfunction",
+    "GIT": "Instrument recording error; recovered telemetry data",
+    "GMC": "No instrument deployed due to maintenance/calibration",
+    "GMT": "Instrument maintenance",
+    "GNF": "Data not found",
+    "GOW": "Out of water event",
+    "GPD": "Power down",
+    "GPF": "Power failure / low battery",
+    "GPR": "Program reload",
+    "GQD": "Data rejected due to QAQC (deployment)",
+    "GQR": "Data rejected due to QAQC checks",
+    "GQS": "Data suspect due to QAQC checks",
+    "GSM": "See metadata",
+    # -- sensor errors --------------------------------------------------
+    "SBL": "Sensor blocked",
+    "SBO": "Blocked optic",
+    "SCB": "Sensor cable failure",
+    "SCC": "Sensor cap failure",
+    "SCF": "Conductivity sensor failure",
+    "SCS": "Sensor conditions suspect",
+    "SDF": "Depth sensor failure",
+    "SDG": "Suspect due to sensor diagnostics",
+    "SDO": "DO suspect",
+    "SDP": "Depth port blocked",
+    "SFD": "Fouled sensor / drift",
+    "SIC": "Incorrect calibration / contaminated standard",
+    "SIW": "Sensor intermittently out of water",
+    "SMA": "Sensor malfunction, adjusted",
+    "SMT": "Sensor maintenance",
+    "SNV": "Negative value",
+    "SOC": "Out of calibration",
+    "SOW": "Sensor out of water",
+    "SPC": "Post calibration out of range",
+    "SQR": "Sensor data rejected",
+    "SRD": "Sensor reading drift",
+    "SSD": "Sensor drift",
+    "SSM": "Sensor malfunction",
+    "SSN": "Sensor noise",
+    "SSR": "Sensor out of range",
+    "STF": "Catastrophic temperature sensor failure",
+    "STS": "Temperature sensor suspect",
+    "SUL": "Sensor unreliable",
+    "SWM": "Wiper malfunction / loss",
+    "SXD": "Depth from surface/near-surface sonde at fixed depth",
+    # -- comments -------------------------------------------------------
+    "CAB": "Algal bloom",
+    "CAF": "Acceptable calibration/accuracy error of sensor",
+    "CAP": "Depth/level sensor affected by atmospheric pressure",
+    "CBF": "Biofouling",
+    "CCU": "Cause unknown",
+    "CDA": "DO hypoxia (<3 mg/L)",
+    "CDB": "Disturbed bottom",
+    "CDF": "Data appear to fit conditions",
+    "CDR": "Data reviewed",
+    "CFK": "Fish kill",
+    "CHB": "Heavy biofouling",
+    "CIF": "Instrument fouled",
+    "CIP": "Incorrect prefix",
+    "CLE": "Low estuary flow",
+    "CLT": "Low tide",
+    "CMC": "In field maintenance/cleaning",
+    "CMD": "Mud in probe guard",
+    "CML": "Snow melt from previous snowfall event",
+    "CND": "New deployment begins",
+    "CRE": "Significant rain event",
+    "CSM": "See metadata",
+    "CTS": "Turbidity spike",
+    "CUS": "Unusual conditions",
+    "CVT": "Value exceeds sensor specifications",
+    "CWD": "Data collected at wrong depth",
+    "CWE": "Significant weather event",
+}
+
 # niwwswq is WYSS1 -- see "STATION-CODE ALIASING" above.
 STATION_ALIASES: dict[str, str] = {"niwwswq": "WYSS1"}
+
+# CDMO's station-code convention: <3-letter reserve><2-letter site><type>.
+# Verified against the real `sampling_stations.csv`: across all 367 stations
+# system-wide the suffix agrees with the file's own `Station Type` column
+# with ZERO exceptions (wq->1, met->0, nut->2). See "ROUTING BY STATION
+# CODE" in the module docstring.
+_KIND_BY_SUFFIX: dict[str, str] = {"wq": "wq", "met": "met", "nut": "nut"}
+_STATION_TYPE_TO_KIND: dict[str, str] = {"0": "met", "1": "wq", "2": "nut"}
+
+STATION_METADATA_FILENAME = "sampling_stations.csv"
 
 
 def canonical_station(cdmo_code: str) -> str:
@@ -378,17 +486,32 @@ def canonical_station(cdmo_code: str) -> str:
     return STATION_ALIASES.get(code, code.upper())
 
 
+def station_kind(cdmo_code: str) -> str:
+    """"wq", "met", "nut" or "unknown", from the code's own suffix.
+
+    This is what routes a row of the real interleaved export to the right
+    table. It reads the code the ROW carries, so it works on a file whose
+    header cannot decide the question (the real export's header carries both
+    parameter families) and on a station the metadata file has never heard
+    of.
+    """
+    code = cdmo_code.strip().lower()
+    for suffix, kind in _KIND_BY_SUFFIX.items():
+        if code.endswith(suffix):
+            return kind
+    return "unknown"
+
+
 def _dms(deg: float, mins: float, secs: float) -> float:
     return deg + mins / 60.0 + secs / 3600.0
 
 
 # (lon, lat) WGS84, decimal-converted from the DMS coordinates published in
-# the reserve's own metadata PDF (Sections 5 and 10 -- see module
-# docstring). Keyed by the CANONICAL station id (post `canonical_station`),
-# the same key `NdbcStore` uses, so a caller can go from a store row
-# straight to a position with no second lookup. All six of NIW's current
-# stations -- see "WHAT THE DISPATCH GOT WRONG" above for why this is six,
-# not four.
+# the reserve's own metadata PDFs. Kept as a documented FALLBACK for when no
+# `sampling_stations.csv` accompanies an export -- `load_station_metadata`
+# is the primary source now (see "GEOLOCATION" in the module docstring).
+# `test_cdmo_real_export.py` cross-checks the two against each other, so a
+# real disagreement is loud rather than silent.
 NIW_STATION_COORDS_LONLAT: dict[str, tuple[float, float]] = {
     "NIWCBWQ": (-_dms(79, 11, 34.62), _dms(33, 20, 2.05)),  # Clambank Landing
     "NIWDCWQ": (-_dms(79, 10, 2.81), _dms(33, 21, 36.49)),  # Debidue Creek
@@ -398,15 +521,128 @@ NIW_STATION_COORDS_LONLAT: dict[str, tuple[float, float]] = {
     "NIWWBWQ": (-_dms(79, 17, 19.58), _dms(33, 18, 33.94)),  # Winyah Bay bottom
 }
 
-# One entry: NIW runs exactly one weather station, system-wide, at Oyster
-# Landing -- see "MET FILE SUPPORT" above. Independently sourced from the
-# MET metadata PDF's own DMS coordinates, not copied from NIW_STATION_
-# COORDS_LONLAT["NIWOLWQ"] -- the two differ by a few feet (same pier,
-# different sensor mount), which is worth keeping visible rather than
-# collapsing onto one shared position.
 NIW_MET_STATION_COORDS_LONLAT: dict[str, tuple[float, float]] = {
     "NIWOLMET": (-_dms(79, 11, 20.03), _dms(33, 20, 57.85)),  # Oyster Landing (niwolmet)
 }
+
+
+@dataclass(frozen=True)
+class StationMeta:
+    """One row of CDMO's `sampling_stations.csv`, made usable.
+
+    `lon` is NEGATED on the way in -- see "GEOLOCATION: THE LONGITUDE SIGN
+    TRAP" in the module docstring. `tz` comes from the row's own `GMT
+    Offset`, so an export from a reserve that is not on UTC-5 is not
+    silently shifted.
+    """
+
+    code: str  # lowercase, whitespace-stripped
+    canonical: str
+    name: str
+    lon: float  # WEST-NEGATIVE decimal degrees
+    lat: float
+    gmt_offset_hours: int
+    kind: str  # "wq" | "met" | "nut" | "unknown"
+    status: str
+    active_dates: str
+
+    @property
+    def tz(self) -> timezone:
+        return timezone(timedelta(hours=self.gmt_offset_hours))
+
+    @property
+    def lonlat(self) -> tuple[float, float]:
+        return (self.lon, self.lat)
+
+
+_STATION_META_REQUIRED = frozenset({"station code", "latitude", "longitude"})
+
+
+def looks_like_station_metadata(header: Sequence[str]) -> bool:
+    """True if this header is CDMO's station table, not an observation
+    export. Both are `.csv` and live in the same download directory; the
+    station table has no `DateTimeStamp` and would otherwise be fed to the
+    observation parser and abort the whole import."""
+    keys = {h.strip().lower() for h in header}
+    return _STATION_META_REQUIRED <= keys and "datetimestamp" not in keys
+
+
+def load_station_metadata(path: Path) -> dict[str, StationMeta]:
+    """Every station in CDMO's `sampling_stations.csv`, keyed by lowercase code.
+
+    Reads the FILE, never a hardcoded table: the real one carries all 367
+    NERRS stations system-wide, so a future export that adds a station is
+    geolocated with no code change.
+
+    Two things are corrected on the way in, both of which are silent
+    disasters if missed -- see the module docstring's "GEOLOCATION" section:
+    the longitude sign, and the assumption that every reserve is on UTC-5.
+    """
+    with path.open(newline="", encoding="utf-8", errors="replace") as fh:
+        return read_station_metadata(fh, source=str(path))
+
+
+def read_station_metadata(fh: Iterable[str], source: str = "<stream>") -> dict[str, StationMeta]:
+    """`load_station_metadata` against an already-open stream -- what a zip
+    member goes through, and what the path version delegates to."""
+    out: dict[str, StationMeta] = {}
+    reader = csv.DictReader(fh)
+    if not reader.fieldnames or not looks_like_station_metadata(reader.fieldnames):
+        raise ValueError(
+            f"{source} does not look like CDMO's station table -- expected columns "
+            f"{sorted(_STATION_META_REQUIRED)}, got {reader.fieldnames}"
+        )
+    reader.fieldnames = [f.strip() for f in reader.fieldnames]
+    for row in reader:
+        code = (row.get("Station Code") or "").strip().lower()
+        if not code:
+            continue
+        lat_raw = (row.get("Latitude") or "").strip()
+        lon_raw = (row.get("Longitude") or "").strip()
+        try:
+            lat = float(lat_raw)
+            lon = float(lon_raw)
+        except ValueError:
+            continue  # a station with no surveyed position; reported as unlocated
+        try:
+            offset = int(float((row.get("GMT Offset") or "").strip()))
+        except ValueError:
+            offset = -5
+        kind = _STATION_TYPE_TO_KIND.get(
+            (row.get("Station Type") or "").strip(), station_kind(code)
+        )
+        out[code] = StationMeta(
+            code=code,
+            canonical=canonical_station(code),
+            name=(row.get("Station Name") or "").strip(),
+            # NEGATED: CDMO stores west longitudes as positive magnitudes.
+            lon=-abs(lon),
+            lat=lat,
+            gmt_offset_hours=offset,
+            kind=kind,
+            status=(row.get("Status") or "").strip(),
+            active_dates=(row.get("Active Dates") or "").strip(),
+        )
+    return out
+
+
+def find_station_metadata(near: Path) -> Path | None:
+    """`sampling_stations.csv` beside an export, if the user downloaded it."""
+    directory = near if near.is_dir() else near.parent
+    for candidate in (directory / STATION_METADATA_FILENAME,):
+        if candidate.is_file():
+            return candidate
+    matches = sorted(directory.glob("*.csv"))
+    for candidate in matches:
+        try:
+            with candidate.open(newline="", encoding="utf-8", errors="replace") as fh:
+                header = next(csv.reader(fh), [])
+        except OSError:
+            continue
+        if looks_like_station_metadata(header):
+            return candidate
+    return None
+
 
 # CDMO column name (lowercased) -> `Observation` field. `eh_mv` has no CDMO
 # counterpart (the SWMP parameter set carries no ORP sensor) and is always
@@ -433,15 +669,9 @@ _COLUMN_MAP: dict[str, str] = {
 # never both) so nothing here ever mixes the two conductivity conventions
 # within one series.
 
-# Columns CDMO documents but that have no destination field in the shared
-# NDBC/CDMO schema (Task 8 never needed vertical datum or barometric
-# corrections) -- deliberately dropped, and excluded from
-# `ParseResult.unknown_columns` so dropping them doesn't read as "could not
-# parse."
 _UNMAPPED_PARAM_COLUMNS = frozenset({"cdepth", "level", "clevel"})
 
-# CDMO MET column name (lowercased) -> `MetObservation` field, per SWMPr's
-# `param_names.R` MET list -- see module docstring's "MET FILE SUPPORT".
+# CDMO MET column name (lowercased) -> `MetObservation` field.
 _MET_COLUMN_MAP: dict[str, str] = {
     "atemp": "air_temp_c",
     "rh": "rh_pct",
@@ -455,21 +685,12 @@ _MET_COLUMN_MAP: dict[str, str] = {
     "totsorad": "solar_rad_wm2",
 }
 
-# `cumprcp` is documented by SWMPr but no longer exported by CDMO (met
-# metadata PDF remark 13.d) -- deliberately dropped, same treatment as
-# `_UNMAPPED_PARAM_COLUMNS` above. See module docstring's "COLUMNS
-# DELIBERATELY DROPPED".
 _MET_UNMAPPED_PARAM_COLUMNS = frozenset({"cumprcp"})
 
-# Diagnostic columns used only to tell a MET file apart from a WQ file by
-# its header (see `_looks_like_met_header`) -- never both present in a real
-# export, since "ATemp"/"WSpd"/"BP" are MET-only and CDMO issues one file
-# type per parameter family.
-_MET_DIAGNOSTIC_COLUMNS = frozenset({"atemp", "wspd", "bp", "rh"})
-
-# Non-parameter columns every real export carries. `""` covers the trailing
-# empty-named column produced by CDMO's own trailing comma (confirmed on
-# the real zip_ex file).
+# Non-parameter columns a real export carries. `""` covers the trailing
+# empty-named column produced by CDMO's own trailing comma. `historical`
+# and `provisionalplus` appear in the SWMPr "zip download" shape but NOT in
+# the real query-interface export -- both are tolerated.
 _METADATA_COLUMNS = frozenset(
     {"stationcode", "isswmp", "datetimestamp", "historical", "provisionalplus", "f_record", ""}
 )
@@ -478,25 +699,34 @@ _REQUIRED_COLUMNS = frozenset({"stationcode", "datetimestamp"})
 
 _TS_FORMAT = "%m/%d/%Y %H:%M"
 
-# `<flag>` or `<flag CODE>` -- the numeric flag first, an optional QAQC code
-# after it in the same bracket. See module docstring point 2: no real file
-# seen so far actually carries a code, so the second group is exercised
-# only by the synthetic fixture.
-_FLAG_RE = re.compile(r"<\s*(-?\d+)\s*([^>]*)>")
+# `<flag>` optionally followed by qualifier codes. The real export puts the
+# codes AFTER the closing bracket, in square brackets (QAQC error codes) and
+# parentheses (comment codes): `<-3> [SSM] (CSM)`. Group 2 also tolerates a
+# code INSIDE the bracket (`<1 SDG>`), the shape Task 9 inferred from the
+# documentation, so both parse.
+_FLAG_RE = re.compile(r"^<\s*(-?\d+)\s*([^>]*)>\s*(.*)$")
+
+# Three-character alphanumeric codes, wherever they sit in the qualifier
+# text -- `[GSM] (CWD)` yields GSM and CWD without caring which bracket
+# each came from.
+_CODE_RE = re.compile(r"\b[A-Z][A-Z0-9]{2}\b")
 
 
-def _parse_flag(cell: str) -> tuple[int | None, bool]:
-    """(flag, was_parseable). `flag` is `None` for a blank cell (nothing
-    flagged) or an unparseable one; `was_parseable` tells the two apart so
-    the caller can report a real format disagreement rather than treat it
-    as ordinary missingness."""
+def _parse_flag(cell: str) -> tuple[int | None, bool, tuple[str, ...]]:
+    """(flag, was_parseable, qualifier_codes).
+
+    `flag` is `None` for a blank cell (nothing flagged) or an unparseable
+    one; `was_parseable` tells the two apart so the caller can report a real
+    format disagreement rather than treat it as ordinary missingness.
+    """
     cell = cell.strip()
     if not cell:
-        return None, True
+        return None, True, ()
     m = _FLAG_RE.match(cell)
     if not m:
-        return None, False
-    return int(m.group(1)), True
+        return None, False, ()
+    qualifiers = f"{m.group(2)} {m.group(3)}"
+    return int(m.group(1)), True, tuple(_CODE_RE.findall(qualifiers))
 
 
 def _parse_value(cell: str) -> tuple[float | None, bool]:
@@ -512,384 +742,502 @@ def _parse_value(cell: str) -> tuple[float | None, bool]:
 
 def _resolve(
     value_cell: str, flag_cell: str, accepted_flags: frozenset[int] = ACCEPTED_FLAGS
-) -> tuple[float | None, str]:
+) -> tuple[float | None, str, tuple[str, ...]]:
     """One (value, flag) column pair -> the value if QAQC accepts it, else
-    `None` -- plus an outcome tag: "ok", "blank", "rejected",
-    "unparseable_value", "unparseable_flag". Order matters: an unparseable
-    flag is reported as such even if the value itself parsed fine, since a
-    flag CDMO's own documented syntax can't be read is the more serious
-    problem to surface.
+    `None` -- plus an outcome tag ("ok", "blank", "rejected",
+    "unparseable_value", "unparseable_flag") and the qualifier codes the
+    flag cell carried.
 
-    `accepted_flags` defaults to WQ's set; `parse_cdmo_met_csv` passes
-    `MET_ACCEPTED_FLAGS` instead -- see module docstring's "MET-SPECIFIC
-    QAQC". The cell-level parsing itself (`_parse_value`/`_parse_flag`) is
-    identical for both formats; only which flags count as "admitted"
-    differs.
+    Order matters: an unparseable flag is reported as such even if the value
+    itself parsed fine, since a flag CDMO's own documented syntax cannot be
+    read is the more serious problem to surface.
+
+    The NUMERIC FLAG alone decides admission. The qualifier codes are
+    returned so they can be counted and reported, never to gate -- see
+    "QUALIFIER CODES" in the module docstring for the two independent
+    sources that say so.
     """
     value, value_ok = _parse_value(value_cell)
-    flag, flag_ok = _parse_flag(flag_cell)
+    flag, flag_ok, codes = _parse_flag(flag_cell)
     if not flag_ok:
-        return None, "unparseable_flag"
+        return None, "unparseable_flag", ()
     if not value_ok:
-        return None, "unparseable_value"
+        return None, "unparseable_value", codes
     if value is None:
-        return None, "blank"
+        return None, "blank", codes
     if flag is None or flag not in accepted_flags:
-        return None, "rejected"
-    return value, "ok"
+        return None, "rejected", codes
+    return value, "ok", codes
+
+
+def _bump(counter: dict[str, int], key: str) -> None:
+    counter[key] = counter.get(key, 0) + 1
 
 
 @dataclass
 class StationParse:
-    """Everything one CDMO station's rows, within one file, parsed to --
-    and every way some of them could not be used, counted rather than
-    silently dropped."""
+    """Everything one CDMO station's rows amounted to, and every way some of
+    them could not be used, counted rather than silently dropped.
+
+    `observations` is populated ONLY by `parse_cdmo_csv`/`parse_cdmo_met_csv`
+    -- the whole-file, in-memory reading path. `import_file` streams, and
+    deliberately never materialises it; read `n_admitted` and `span` there.
+    """
 
     raw_code: str
-    observations: list[Observation] = field(default_factory=list)
+    kind: str  # "wq" | "met"
+    canonical: str
+    observations: list = field(default_factory=list)
     n_rows: int = 0
     n_bad_timestamp: int = 0
+    # Rows that parsed but yielded no admitted value at all -- CDMO rejected
+    # or never collected every parameter. Stored (the `(station, ts)` key is
+    # a real "we looked, there was nothing" record, matching `parse_ocean`'s
+    # all-MM rows) but counted, because a station that is mostly these is a
+    # station whose history is thinner than its row count suggests.
+    n_empty: int = 0
+    n_admitted: dict[str, int] = field(default_factory=dict)
     n_rejected_by_flag: dict[str, int] = field(default_factory=dict)
     n_value_unparseable: dict[str, int] = field(default_factory=dict)
     n_flag_unparseable: dict[str, int] = field(default_factory=dict)
+    # Every qualifier code seen on this station's cells, and separately the
+    # subset carried by cells the flag ADMITTED -- the only ones that can
+    # let a caveat into calibration data unnoticed.
+    qualifier_codes: dict[str, int] = field(default_factory=dict)
+    qualifier_codes_admitted: dict[str, int] = field(default_factory=dict)
+    unknown_qualifier_codes: dict[str, int] = field(default_factory=dict)
+    first_ts: datetime | None = None
+    last_ts: datetime | None = None
+
+    @property
+    def span(self) -> tuple[datetime, datetime] | None:
+        if self.first_ts is None or self.last_ts is None:
+            return None
+        return (self.first_ts, self.last_ts)
+
+    def _note_ts(self, ts: datetime) -> None:
+        if self.first_ts is None or ts < self.first_ts:
+            self.first_ts = ts
+        if self.last_ts is None or ts > self.last_ts:
+            self.last_ts = ts
 
 
 @dataclass
 class ParseResult:
-    stations: dict[str, StationParse]  # raw lowercase CDMO code -> parse
-    unknown_columns: list[str]  # header columns this parser does not recognise at all
+    """One file's worth of parsing. `stations` holds water-quality stations,
+    `met_stations` meteorological ones -- both come out of the SAME pass over
+    the SAME file, because the real export interleaves them."""
+
+    stations: dict[str, StationParse] = field(default_factory=dict)
+    met_stations: dict[str, StationParse] = field(default_factory=dict)
+    unknown_columns: list[str] = field(default_factory=list)
+    # Station codes that are neither `wq` nor `met` (CDMO's `nut` nutrient
+    # stations, or something new) -- skipped rather than written as empty
+    # rows, and counted so the skip is visible.
+    skipped_stations: dict[str, int] = field(default_factory=dict)
+    n_rows: int = 0
 
 
-def parse_cdmo_csv(text: str) -> ParseResult:
-    """Parse one CDMO CSV export -- one or more stations (see module
-    docstring: "Custom Query" exports combine stations; "zip download"
-    exports do not, and this handles either the same way, grouping by the
-    row's own `StationCode`, never a filename).
+class _Layout:
+    """Column positions for one CDMO header, resolved once per file.
+
+    Built from `csv.reader` output (a list) rather than `DictReader` (a dict
+    per row): at 2.5 million rows x 45 columns the dict construction is the
+    single largest avoidable cost, and integer indexing into the row list is
+    exactly as clear.
+    """
+
+    def __init__(self, header: Sequence[str]):
+        names = [h.strip() for h in header]
+        lower: dict[str, int] = {}
+        for i, name in enumerate(names):
+            lower.setdefault(name.lower(), i)
+
+        missing = _REQUIRED_COLUMNS - set(lower)
+        if missing:
+            raise ValueError(
+                f"missing required column(s) {sorted(missing)} -- this does not look like a "
+                f"CDMO export; header was {list(header)}"
+            )
+
+        self.station_i = lower["stationcode"]
+        self.ts_i = lower["datetimestamp"]
+        self.wq_pairs = self._pairs(lower, _COLUMN_MAP)
+        self.met_pairs = self._pairs(lower, _MET_COLUMN_MAP)
+        self.wq_absent = [f for c, f in _COLUMN_MAP.items() if c not in lower]
+        self.met_absent = [f for c, f in _MET_COLUMN_MAP.items() if c not in lower]
+
+        known = (
+            _METADATA_COLUMNS
+            | set(_COLUMN_MAP)
+            | set(_MET_COLUMN_MAP)
+            | _UNMAPPED_PARAM_COLUMNS
+            | _MET_UNMAPPED_PARAM_COLUMNS
+        )
+        self.unknown_columns = sorted(
+            names[i] for key, i in lower.items() if key not in known and not key.startswith("f_")
+        )
+
+    @staticmethod
+    def _pairs(
+        lower: dict[str, int], column_map: dict[str, str]
+    ) -> list[tuple[str, str, int, int | None]]:
+        return [
+            (col, obs_field, lower[col], lower.get(f"f_{col}"))
+            for col, obs_field in column_map.items()
+            if col in lower
+        ]
+
+
+def _cell(row: Sequence[str], i: int | None) -> str:
+    """A row shorter than the header is not fatal, and a row LONGER than it
+    is ordinary: 63 rows in the real 2.5 M-row export carry one extra
+    trailing field."""
+    if i is None or i >= len(row):
+        return ""
+    return row[i]
+
+
+class _Reader:
+    """One streaming pass over a CDMO export.
+
+    Routes every row by the station code the ROW carries (`station_kind`) --
+    never by the file's header or its name. The real export's single header
+    carries both parameter families and cannot decide the question, and the
+    row is the only thing that can.
+    """
+
+    def __init__(
+        self,
+        layout: _Layout,
+        stations: Mapping[str, StationMeta] | None = None,
+        collect: bool = False,
+    ):
+        self.layout = layout
+        self.stations = stations or {}
+        self.collect = collect
+        self.result = ParseResult(unknown_columns=list(layout.unknown_columns))
+
+    def _station(self, raw_code: str, kind: str) -> StationParse:
+        bucket = self.result.stations if kind == "wq" else self.result.met_stations
+        sp = bucket.get(raw_code)
+        if sp is None:
+            sp = StationParse(
+                raw_code=raw_code, kind=kind, canonical=canonical_station(raw_code)
+            )
+            bucket[raw_code] = sp
+        return sp
+
+    def _tz(self, raw_code: str) -> timezone:
+        meta = self.stations.get(raw_code)
+        return meta.tz if meta is not None else CDMO_TZ
+
+    def row(self, row: Sequence[str]) -> tuple[str, str, Observation | MetObservation] | None:
+        """Parse one row. `None` means it produced no observation -- a blank
+        trailer, an unreadable timestamp, or a station kind this store has
+        no table for. Never raises on cell content."""
+        raw_code = _cell(row, self.layout.station_i).strip().lower()
+        if not raw_code:
+            return None  # a wholly blank trailer row some exports append
+        self.result.n_rows += 1
+
+        kind = station_kind(raw_code)
+        if kind not in ("wq", "met"):
+            _bump(self.result.skipped_stations, raw_code)
+            return None
+
+        sp = self._station(raw_code, kind)
+        sp.n_rows += 1
+
+        ts_raw = _cell(row, self.layout.ts_i).strip()
+        try:
+            ts = datetime.strptime(ts_raw, _TS_FORMAT).replace(tzinfo=self._tz(raw_code))
+        except ValueError:
+            sp.n_bad_timestamp += 1
+            return None
+        sp._note_ts(ts)
+
+        if kind == "wq":
+            pairs, absent = self.layout.wq_pairs, self.layout.wq_absent
+            accepted = ACCEPTED_FLAGS
+        else:
+            pairs, absent = self.layout.met_pairs, self.layout.met_absent
+            accepted = MET_ACCEPTED_FLAGS
+
+        resolved: dict[str, float | None] = dict.fromkeys(absent)
+        for col, obs_field, value_i, flag_i in pairs:
+            value, outcome, codes = _resolve(
+                _cell(row, value_i), _cell(row, flag_i), accepted
+            )
+            resolved[obs_field] = value
+            if outcome == "ok":
+                _bump(sp.n_admitted, col)
+            elif outcome == "rejected":
+                _bump(sp.n_rejected_by_flag, col)
+            elif outcome == "unparseable_value":
+                _bump(sp.n_value_unparseable, col)
+            elif outcome == "unparseable_flag":
+                _bump(sp.n_flag_unparseable, col)
+            for code in codes:
+                _bump(sp.qualifier_codes, code)
+                if outcome == "ok":
+                    _bump(sp.qualifier_codes_admitted, code)
+                if code not in QAQC_CODE_MEANINGS:
+                    _bump(sp.unknown_qualifier_codes, code)
+
+        if not any(v is not None for v in resolved.values()):
+            sp.n_empty += 1
+
+        obs: Observation | MetObservation
+        if kind == "wq":
+            obs = Observation(ts=ts, eh_mv=None, **resolved)
+        else:
+            obs = MetObservation(ts=ts, **resolved)
+        if self.collect:
+            sp.observations.append(obs)
+        return kind, sp.canonical, obs
+
+
+def _open_rows(fh: Iterable[str]) -> Iterator[list[str]]:
+    return csv.reader(fh)
+
+
+def _read(
+    fh: Iterable[str],
+    stations: Mapping[str, StationMeta] | None = None,
+    collect: bool = False,
+) -> tuple[_Reader, Iterator[tuple[str, str, Observation | MetObservation]]]:
+    """(reader, generator of parsed rows). Raises `ValueError` on a header
+    that is not a CDMO export, BEFORE any row is read."""
+    rows = _open_rows(fh)
+    header = next(rows, None)
+    if not header:
+        raise ValueError("empty CDMO export -- no header row")
+    reader = _Reader(_Layout(header), stations=stations, collect=collect)
+
+    def parsed() -> Iterator[tuple[str, str, Observation | MetObservation]]:
+        for row in rows:
+            out = reader.row(row)
+            if out is not None:
+                yield out
+
+    return reader, parsed()
+
+
+def parse_cdmo_csv(
+    text: str, stations: Mapping[str, StationMeta] | None = None
+) -> ParseResult:
+    """Parse one CDMO export held in memory, returning its WATER-QUALITY view.
+
+    For small files and tests. `import_file` is the streaming equivalent and
+    is what a real export goes through -- the real one is 494 MB, which this
+    would need roughly a gigabyte to hold before parsing a single row.
+
+    `result.stations` holds only water-quality stations; meteorological rows
+    in the same file are parsed too (see `parse_cdmo_met_csv` for that view)
+    but never appear here, so a MET station can never manufacture an
+    all-empty water-quality row.
 
     Raises `ValueError` if the header is missing `StationCode` or
-    `DateTimeStamp` entirely -- this does not look like a CDMO export at
-    all, and nothing downstream (dedupe key, timestamp) can proceed without
-    them. Nothing else here raises: a bad cell is dropped and counted (see
-    `StationParse`), never fatal to the rest of the file.
+    `DateTimeStamp` entirely. Nothing else here raises: a bad cell is
+    dropped and counted (see `StationParse`), never fatal to the rest.
     """
-    reader = csv.DictReader(io.StringIO(text))
-    if not reader.fieldnames:
-        raise ValueError("empty CDMO export -- no header row")
+    reader, rows = _read(io.StringIO(text), stations=stations, collect=True)
+    for _ in rows:
+        pass
+    return reader.result
 
-    fieldnames_lower = {name.strip().lower(): name for name in reader.fieldnames if name}
-    missing = _REQUIRED_COLUMNS - set(fieldnames_lower)
-    if missing:
-        raise ValueError(
-            f"missing required column(s) {sorted(missing)} -- this does not look like a "
-            f"CDMO export; header was {reader.fieldnames}"
-        )
 
-    unknown_columns = sorted(
-        orig
-        for key, orig in fieldnames_lower.items()
-        if not key.startswith("f_")
-        and key not in _METADATA_COLUMNS
-        and key not in _COLUMN_MAP
-        and key not in _UNMAPPED_PARAM_COLUMNS
+def parse_cdmo_met_csv(
+    text: str, stations: Mapping[str, StationMeta] | None = None
+) -> ParseResult:
+    """`parse_cdmo_csv`'s METEOROLOGICAL view of the same file.
+
+    Returns a `ParseResult` whose `.stations` are the MET stations, so a
+    caller that only wants weather reads it the same way it reads the WQ
+    one. Same parse, same pass, different projection.
+    """
+    result = parse_cdmo_csv(text, stations=stations)
+    return ParseResult(
+        stations=result.met_stations,
+        met_stations={},
+        unknown_columns=result.unknown_columns,
+        skipped_stations=result.skipped_stations,
+        n_rows=result.n_rows,
     )
-    flag_col_for = {col: fieldnames_lower.get(f"f_{col}") for col in _COLUMN_MAP}
-    stationcode_col = fieldnames_lower["stationcode"]
-    datetimestamp_col = fieldnames_lower["datetimestamp"]
-
-    stations: dict[str, StationParse] = {}
-    for row in reader:
-        raw_code = (row.get(stationcode_col) or "").strip().lower()
-        if not raw_code:
-            continue  # a wholly blank trailer row some exports append
-        sp = stations.setdefault(raw_code, StationParse(raw_code=raw_code))
-        sp.n_rows += 1
-
-        ts_raw = (row.get(datetimestamp_col) or "").strip()
-        try:
-            ts = datetime.strptime(ts_raw, _TS_FORMAT).replace(tzinfo=CDMO_TZ)
-        except ValueError:
-            sp.n_bad_timestamp += 1
-            continue
-
-        resolved: dict[str, float | None] = {}
-        for col, obs_field in _COLUMN_MAP.items():
-            value_col = fieldnames_lower.get(col)
-            if value_col is None:
-                resolved[obs_field] = None
-                continue
-            flag_col = flag_col_for[col]
-            value, outcome = _resolve(
-                row.get(value_col, ""), row.get(flag_col, "") if flag_col else ""
-            )
-            resolved[obs_field] = value
-            if outcome == "rejected":
-                sp.n_rejected_by_flag[col] = sp.n_rejected_by_flag.get(col, 0) + 1
-            elif outcome == "unparseable_value":
-                sp.n_value_unparseable[col] = sp.n_value_unparseable.get(col, 0) + 1
-            elif outcome == "unparseable_flag":
-                sp.n_flag_unparseable[col] = sp.n_flag_unparseable.get(col, 0) + 1
-
-        sp.observations.append(Observation(ts=ts, eh_mv=None, **resolved))
-
-    return ParseResult(stations=stations, unknown_columns=unknown_columns)
-
-
-def _looks_like_met_header(fieldnames_lower: dict[str, str]) -> bool:
-    """True if this header belongs to a MET export, not a WQ one. CDMO
-    issues one file per parameter family, so a real file never carries
-    both a MET-only column (e.g. `ATemp`) and would ambiguously also be a
-    WQ file -- see module docstring's "MET FILE SUPPORT". Used by
-    `import_file`/`_import_zip` to route each file to the right parser
-    without relying on a filename convention, matching `parse_cdmo_csv`'s
-    own "group by the row's own StationCode, never a filename" philosophy.
-    """
-    return bool(_MET_DIAGNOSTIC_COLUMNS & set(fieldnames_lower))
-
-
-@dataclass
-class MetStationParse:
-    """`StationParse`'s exact shape, for one CDMO MET station's rows."""
-
-    raw_code: str
-    observations: list[MetObservation] = field(default_factory=list)
-    n_rows: int = 0
-    n_bad_timestamp: int = 0
-    n_rejected_by_flag: dict[str, int] = field(default_factory=dict)
-    n_value_unparseable: dict[str, int] = field(default_factory=dict)
-    n_flag_unparseable: dict[str, int] = field(default_factory=dict)
-
-
-@dataclass
-class MetParseResult:
-    stations: dict[str, MetStationParse]
-    unknown_columns: list[str]
-
-
-def parse_cdmo_met_csv(text: str) -> MetParseResult:
-    """`parse_cdmo_csv`'s exact contract, against the MET column set
-    (`_MET_COLUMN_MAP`) and MET's narrower accepted-flags set
-    (`MET_ACCEPTED_FLAGS`) instead of WQ's. Same required columns
-    (`StationCode`, `DateTimeStamp`), same non-fatal-per-cell philosophy,
-    same station-grouping-by-row rule. See module docstring's "MET FILE
-    SUPPORT" and "MET-SPECIFIC QAQC".
-    """
-    reader = csv.DictReader(io.StringIO(text))
-    if not reader.fieldnames:
-        raise ValueError("empty CDMO export -- no header row")
-
-    fieldnames_lower = {name.strip().lower(): name for name in reader.fieldnames if name}
-    missing = _REQUIRED_COLUMNS - set(fieldnames_lower)
-    if missing:
-        raise ValueError(
-            f"missing required column(s) {sorted(missing)} -- this does not look like a "
-            f"CDMO export; header was {reader.fieldnames}"
-        )
-
-    unknown_columns = sorted(
-        orig
-        for key, orig in fieldnames_lower.items()
-        if not key.startswith("f_")
-        and key not in _METADATA_COLUMNS
-        and key not in _MET_COLUMN_MAP
-        and key not in _MET_UNMAPPED_PARAM_COLUMNS
-    )
-    flag_col_for = {col: fieldnames_lower.get(f"f_{col}") for col in _MET_COLUMN_MAP}
-    stationcode_col = fieldnames_lower["stationcode"]
-    datetimestamp_col = fieldnames_lower["datetimestamp"]
-
-    stations: dict[str, MetStationParse] = {}
-    for row in reader:
-        raw_code = (row.get(stationcode_col) or "").strip().lower()
-        if not raw_code:
-            continue
-        sp = stations.setdefault(raw_code, MetStationParse(raw_code=raw_code))
-        sp.n_rows += 1
-
-        ts_raw = (row.get(datetimestamp_col) or "").strip()
-        try:
-            ts = datetime.strptime(ts_raw, _TS_FORMAT).replace(tzinfo=CDMO_TZ)
-        except ValueError:
-            sp.n_bad_timestamp += 1
-            continue
-
-        resolved: dict[str, float | None] = {}
-        for col, obs_field in _MET_COLUMN_MAP.items():
-            value_col = fieldnames_lower.get(col)
-            if value_col is None:
-                resolved[obs_field] = None
-                continue
-            flag_col = flag_col_for[col]
-            value, outcome = _resolve(
-                row.get(value_col, ""),
-                row.get(flag_col, "") if flag_col else "",
-                MET_ACCEPTED_FLAGS,
-            )
-            resolved[obs_field] = value
-            if outcome == "rejected":
-                sp.n_rejected_by_flag[col] = sp.n_rejected_by_flag.get(col, 0) + 1
-            elif outcome == "unparseable_value":
-                sp.n_value_unparseable[col] = sp.n_value_unparseable.get(col, 0) + 1
-            elif outcome == "unparseable_flag":
-                sp.n_flag_unparseable[col] = sp.n_flag_unparseable.get(col, 0) + 1
-
-        sp.observations.append(MetObservation(ts=ts, **resolved))
-
-    return MetParseResult(stations=stations, unknown_columns=unknown_columns)
 
 
 @dataclass
 class StationImport:
+    """What one station contributed to the store, from one file."""
+
     raw_code: str
     canonical: str
+    kind: str  # "wq" | "met"
+    n_rows: int
     n_parsed: int
     n_new: int
     n_bad_timestamp: int
+    n_empty: int
+    n_admitted: dict[str, int]
     n_rejected_by_flag: dict[str, int]
     n_value_unparseable: dict[str, int]
     n_flag_unparseable: dict[str, int]
+    qualifier_codes: dict[str, int]
+    qualifier_codes_admitted: dict[str, int]
+    unknown_qualifier_codes: dict[str, int]
+    span: tuple[datetime, datetime] | None
+    meta: StationMeta | None
 
 
 @dataclass
 class ImportReport:
+    """One FILE's import. The real export is a single file holding both
+    parameter families, so one report carries both lists."""
+
     source: str  # display label: a file path, or "archive.zip!member.csv"
-    stations: list[StationImport]
-    unknown_columns: list[str]
+    stations: list[StationImport] = field(default_factory=list)  # water quality
+    met_stations: list[StationImport] = field(default_factory=list)  # meteorological
+    unknown_columns: list[str] = field(default_factory=list)
+    skipped_stations: dict[str, int] = field(default_factory=dict)
+    n_rows: int = 0
+    station_metadata_source: Path | None = None
 
 
-def _apply(result: ParseResult, store: NdbcStore, source: str) -> ImportReport:
-    """Write every parsed station's rows through `NdbcStore.append` --
-    Task 8's whole-batch-atomic, `(station, ts)`-deduplicated write,
-    reused exactly, not reimplemented. Called only after `parse_cdmo_csv`
-    has already finished parsing the WHOLE file in memory (see
-    `import_file`), so a structural parse failure never reaches here and
-    never touches the store.
-
-    Also records ONE provenance row for this whole file (see `ndbc.py`'s
-    "PROVENANCE AND CITATION") -- after every station's `append` has
-    already succeeded, covering every station this file touched and the
-    combined span of what it contributed. Nothing is recorded if the file
-    parsed to zero stations (header-only / all-blank-trailer file): there
-    is nothing real to attribute an access to.
-    """
-    stations = []
-    all_ts: list[datetime] = []
-    touched: list[str] = []
-    for raw_code in sorted(result.stations):
-        sp = result.stations[raw_code]
-        canonical = canonical_station(raw_code)
-        n_new = store.append(canonical, sp.observations)
-        stations.append(
-            StationImport(
-                raw_code=raw_code,
-                canonical=canonical,
-                n_parsed=len(sp.observations),
-                n_new=n_new,
-                n_bad_timestamp=sp.n_bad_timestamp,
-                n_rejected_by_flag=sp.n_rejected_by_flag,
-                n_value_unparseable=sp.n_value_unparseable,
-                n_flag_unparseable=sp.n_flag_unparseable,
-            )
-        )
-        touched.append(canonical)
-        all_ts.extend(o.ts for o in sp.observations)
-    if touched:
-        span = (min(all_ts), max(all_ts)) if all_ts else None
-        store.record_provenance(SOURCE_CDMO_WQ, touched, span, sum(s.n_new for s in stations))
-    return ImportReport(source=source, stations=stations, unknown_columns=result.unknown_columns)
-
-
-@dataclass
-class MetStationImport:
-    raw_code: str
-    canonical: str
-    n_parsed: int
-    n_new: int
-    n_bad_timestamp: int
-    n_rejected_by_flag: dict[str, int]
-    n_value_unparseable: dict[str, int]
-    n_flag_unparseable: dict[str, int]
-
-
-@dataclass
-class MetImportReport:
-    source: str
-    stations: list[MetStationImport]
-    unknown_columns: list[str]
-
-
-def _apply_met(result: MetParseResult, store: NdbcStore, source: str) -> MetImportReport:
-    """`_apply`'s exact contract, against `NdbcStore.append_met` and
-    `SOURCE_CDMO_MET` instead."""
-    stations = []
-    all_ts: list[datetime] = []
-    touched: list[str] = []
-    for raw_code in sorted(result.stations):
-        sp = result.stations[raw_code]
-        canonical = canonical_station(raw_code)
-        n_new = store.append_met(canonical, sp.observations)
-        stations.append(
-            MetStationImport(
-                raw_code=raw_code,
-                canonical=canonical,
-                n_parsed=len(sp.observations),
-                n_new=n_new,
-                n_bad_timestamp=sp.n_bad_timestamp,
-                n_rejected_by_flag=sp.n_rejected_by_flag,
-                n_value_unparseable=sp.n_value_unparseable,
-                n_flag_unparseable=sp.n_flag_unparseable,
-            )
-        )
-        touched.append(canonical)
-        all_ts.extend(o.ts for o in sp.observations)
-    if touched:
-        span = (min(all_ts), max(all_ts)) if all_ts else None
-        store.record_provenance(SOURCE_CDMO_MET, touched, span, sum(s.n_new for s in stations))
-    return MetImportReport(
-        source=source, stations=stations, unknown_columns=result.unknown_columns
+def _station_import(
+    sp: StationParse,
+    n_new: int,
+    stations: Mapping[str, StationMeta],
+) -> StationImport:
+    return StationImport(
+        raw_code=sp.raw_code,
+        canonical=sp.canonical,
+        kind=sp.kind,
+        n_rows=sp.n_rows,
+        n_parsed=sp.n_rows - sp.n_bad_timestamp,
+        n_new=n_new,
+        n_bad_timestamp=sp.n_bad_timestamp,
+        n_empty=sp.n_empty,
+        n_admitted=sp.n_admitted,
+        n_rejected_by_flag=sp.n_rejected_by_flag,
+        n_value_unparseable=sp.n_value_unparseable,
+        n_flag_unparseable=sp.n_flag_unparseable,
+        qualifier_codes=sp.qualifier_codes,
+        qualifier_codes_admitted=sp.qualifier_codes_admitted,
+        unknown_qualifier_codes=sp.unknown_qualifier_codes,
+        span=sp.span,
+        meta=stations.get(sp.raw_code),
     )
 
 
-def _detect_format(text: str) -> str:
-    """"met" or "wq", by peeking the header only -- see
-    `_looks_like_met_header`. A malformed/headerless file reads as "wq"
-    (the default) and is left for `parse_cdmo_csv` to raise its own clear
-    `ValueError` on, rather than this function guessing or raising first.
+def _import_stream(
+    fh: Iterable[str],
+    store: NdbcStore,
+    source: str,
+    stations: Mapping[str, StationMeta] | None = None,
+    metadata_source: Path | None = None,
+) -> ImportReport:
+    """Stream one CDMO export into the store, atomically.
+
+    The header is validated BEFORE the transaction opens, so a file that is
+    not a CDMO export raises without SQLite ever being asked to start one.
+    Everything after that -- every station, both tables, and the two
+    provenance rows -- lives inside ONE `bulk_writer` transaction: the whole
+    file lands or none of it does, at 2.5 million rows exactly as at three.
     """
-    reader = csv.DictReader(io.StringIO(text))
-    fieldnames_lower = {name.strip().lower(): name for name in (reader.fieldnames or []) if name}
-    return "met" if _looks_like_met_header(fieldnames_lower) else "wq"
+    stations = stations or {}
+    reader, rows = _read(fh, stations=stations, collect=False)
+
+    with store.bulk_writer(batch_rows=BATCH_ROWS) as writer:
+        for kind, canonical, obs in rows:
+            if kind == "wq":
+                writer.add(canonical, obs)
+            else:
+                writer.add_met(canonical, obs)
+        writer.flush()
+
+        result = reader.result
+        report = ImportReport(
+            source=source,
+            unknown_columns=result.unknown_columns,
+            skipped_stations=dict(result.skipped_stations),
+            n_rows=result.n_rows,
+            station_metadata_source=metadata_source,
+        )
+        for raw_code in sorted(result.stations):
+            sp = result.stations[raw_code]
+            report.stations.append(
+                _station_import(sp, writer.n_new(sp.canonical), stations)
+            )
+        for raw_code in sorted(result.met_stations):
+            sp = result.met_stations[raw_code]
+            report.met_stations.append(
+                _station_import(sp, writer.n_new_met(sp.canonical), stations)
+            )
+
+        # One provenance row per parameter family that actually got data --
+        # inside this transaction, so a rollback takes it too. See
+        # `ndbc.BulkWriter.record_provenance`.
+        for source_label, imports in (
+            (SOURCE_CDMO_WQ, report.stations),
+            (SOURCE_CDMO_MET, report.met_stations),
+        ):
+            if not imports:
+                continue
+            spans = [s.span for s in imports if s.span is not None]
+            span = (
+                (min(s[0] for s in spans), max(s[1] for s in spans)) if spans else None
+            )
+            writer.record_provenance(
+                source_label,
+                [s.canonical for s in imports],
+                span,
+                sum(s.n_new for s in imports),
+            )
+    return report
 
 
-def import_file(path: Path, store: NdbcStore) -> ImportReport | MetImportReport:
-    """Parse and store one CDMO CSV file -- water-quality or meteorological,
-    detected from the header (`_detect_format`), never from the filename.
+def import_file(
+    path: Path,
+    store: NdbcStore,
+    stations: Mapping[str, StationMeta] | None = None,
+    metadata_source: Path | None = None,
+) -> ImportReport:
+    """Parse and store one CDMO CSV file -- water quality and meteorological
+    together, each row routed by its own station code.
 
-    `utf-8-sig` strips a leading BOM if Excel-exported (the real zip_ex
-    file has none, but a user's own AQS export might) without corrupting
-    plain UTF-8/ASCII, which has no BOM to strip.
+    `stations` is the parsed `sampling_stations.csv`; when omitted, one
+    beside `path` is used if present (`find_station_metadata`). It supplies
+    positions and per-station GMT offsets; without it the import still runs,
+    on the documented UTC-5 fallback and with no positions.
+
+    `utf-8-sig` strips a leading BOM if Excel-exported without corrupting
+    plain UTF-8/ASCII, which has no BOM to strip. `newline=""` is required
+    by `csv`: the real export is CRLF-terminated.
     """
-    text = path.read_text(encoding="utf-8-sig")
-    if _detect_format(text) == "met":
-        return _apply_met(parse_cdmo_met_csv(text), store, str(path))
-    return _apply(parse_cdmo_csv(text), store, str(path))
+    if stations is None:
+        metadata_source = find_station_metadata(path)
+        if metadata_source is not None and metadata_source != path:
+            stations = load_station_metadata(metadata_source)
+        else:
+            metadata_source = None
+    with path.open(newline="", encoding="utf-8-sig") as fh:
+        return _import_stream(fh, store, str(path), stations, metadata_source)
 
 
-def import_path(path: Path, store: NdbcStore) -> list[ImportReport | MetImportReport]:
-    """Import a CDMO export at `path`: a single CSV, a directory of CSVs
-    (CDMO's "zip downloads" feature, once unzipped), or a `.zip` archive
-    (the same feature, not yet unzipped -- read directly via `zipfile`,
-    matching what `SWMPr::import_local` accepts).
+def import_path(path: Path, store: NdbcStore) -> list[ImportReport]:
+    """Import a CDMO export at `path`: a single CSV, a directory of CSVs, or
+    a `.zip` archive (CDMO's "zip downloads" feature, read directly, matching
+    what `SWMPr::import_local` accepts).
 
-    A directory or zip may mix water-quality and meteorological files
-    freely -- this task's dispatch asked for exactly that ("the CDMO export
-    will contain meteorological files alongside water quality files"), and
-    each file is routed to the right store table on its own, by its own
-    header.
+    A directory may hold the observation export and `sampling_stations.csv`
+    side by side -- which is exactly what CDMO's query interface hands a
+    user. The station table is recognised by its header and used as METADATA,
+    not fed to the observation parser (where its missing `DateTimeStamp`
+    would abort the whole import).
 
     IF THE FILE ISN'T HERE YET: raises `FileNotFoundError` naming the exact
-    path expected, before touching the store at all. The CLI (`tidescout
-    salinity import-cdmo`) catches this and prints it plainly -- see that
-    command's docstring for where to put the download and what to run.
+    path expected, before touching the store at all.
     """
     if not path.exists():
         raise FileNotFoundError(
@@ -901,22 +1249,60 @@ def import_path(path: Path, store: NdbcStore) -> list[ImportReport | MetImportRe
         files = sorted(p for p in path.rglob("*.csv") if p.is_file())
         if not files:
             raise FileNotFoundError(f"{path} is a directory but contains no .csv files")
-        return [import_file(f, store) for f in files]
+        metadata_source = find_station_metadata(path)
+        stations = (
+            load_station_metadata(metadata_source) if metadata_source is not None else None
+        )
+        data_files = [f for f in files if f != metadata_source]
+        if not data_files:
+            raise FileNotFoundError(
+                f"{path} contains only a station table ({metadata_source}) and no "
+                "observation export"
+            )
+        return [
+            import_file(f, store, stations=stations, metadata_source=metadata_source)
+            for f in data_files
+        ]
     if path.suffix.lower() == ".zip":
         return _import_zip(path, store)
     return [import_file(path, store)]
 
 
-def _import_zip(path: Path, store: NdbcStore) -> list[ImportReport | MetImportReport]:
-    reports: list[ImportReport | MetImportReport] = []
+def _import_zip(path: Path, store: NdbcStore) -> list[ImportReport]:
+    reports: list[ImportReport] = []
     with zipfile.ZipFile(path) as zf:
         names = sorted(n for n in zf.namelist() if n.lower().endswith(".csv"))
         if not names:
             raise FileNotFoundError(f"{path} contains no .csv files")
+
+        stations: Mapping[str, StationMeta] | None = None
+        metadata_name: str | None = None
         for name in names:
-            text = zf.read(name).decode("utf-8-sig", errors="replace")
-            if _detect_format(text) == "met":
-                reports.append(_apply_met(parse_cdmo_met_csv(text), store, f"{path}!{name}"))
-            else:
-                reports.append(_apply(parse_cdmo_csv(text), store, f"{path}!{name}"))
+            with zf.open(name) as raw:
+                header = next(
+                    csv.reader(io.TextIOWrapper(raw, encoding="utf-8-sig", newline="")), []
+                )
+            if looks_like_station_metadata(header):
+                metadata_name = name
+                break
+        if metadata_name is not None:
+            with zf.open(metadata_name) as raw:
+                # `load_station_metadata` takes a path; the archive member is
+                # small (367 rows) so reading it in full is not the 494 MB
+                # problem this module streams to avoid.
+                text = raw.read().decode("utf-8", errors="replace")
+            stations = read_station_metadata(io.StringIO(text), source=f"{path}!{metadata_name}")
+
+        for name in names:
+            if name == metadata_name:
+                continue
+            with zf.open(name) as raw:
+                fh = io.TextIOWrapper(raw, encoding="utf-8-sig", newline="")
+                reports.append(
+                    _import_stream(fh, store, f"{path}!{name}", stations)
+                )
+    if not reports:
+        raise FileNotFoundError(
+            f"{path} contains only a station table and no observation export"
+        )
     return reports

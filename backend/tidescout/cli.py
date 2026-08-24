@@ -2,10 +2,14 @@ import json
 import math
 import time
 from pathlib import Path
+from typing import TYPE_CHECKING
 
 import typer
 from rich.console import Console
 from rich.table import Table
+
+if TYPE_CHECKING:  # annotations only -- this module keeps its imports lazy for startup
+    from datetime import datetime
 
 app = typer.Typer(no_args_is_help=True, help="TideScout: SC inshore fishing decision support.")
 bathy_app = typer.Typer(no_args_is_help=True, help="Bathymetry tile discovery and processing.")
@@ -513,6 +517,21 @@ def salinity_calibrate(
     )
 
 
+def _widen(
+    span: "tuple[datetime, datetime] | None", other: "tuple[datetime, datetime] | None"
+) -> "tuple[datetime, datetime] | None":
+    """Union of two (start, end) spans, either of which may be absent.
+
+    A directory or zip can hold several years as several files, so one
+    station's span is the union across every file that mentioned it.
+    """
+    if span is None:
+        return other
+    if other is None:
+        return span
+    return (min(span[0], other[0]), max(span[1], other[1]))
+
+
 @salinity_app.command("import-cdmo")
 def salinity_import_cdmo(
     slug: str,
@@ -557,16 +576,16 @@ def salinity_import_cdmo(
         )
         raise typer.Exit(1) from exc
 
-    # A directory/zip can freely mix water-quality and meteorological
-    # files (this task's dispatch: "the CDMO export will contain
-    # meteorological files alongside water quality files"). Split by
-    # report type BEFORE aggregating: MET's along-estuary-distance/domain
+    # The real export is ONE interleaved file carrying both parameter
+    # families, so the split is per-STATION-LIST within a report, not per
+    # report (Task 9 assumed separate WQ and MET files and split by report
+    # type). It is still a split: MET's along-estuary-distance/domain
     # concept doesn't apply to a single fixed weather station, so folding
     # it into the WQ table would misreport "no along-estuary distance" as
     # a data gap rather than what it actually is -- a different kind of
-    # station entirely. See `sources/cdmo.py`'s "MET FILE SUPPORT".
-    wq_reports = [r for r in reports if isinstance(r, cdmo.ImportReport)]
-    met_reports = [r for r in reports if isinstance(r, cdmo.MetImportReport)]
+    # station entirely. See `sources/cdmo.py`'s "ROUTING BY STATION CODE".
+    wq_reports = [r for r in reports if r.stations]
+    met_reports = [r for r in reports if r.met_stations]
 
     # Aggregate every WQ station this run touched, across however many
     # files the path expanded to (a directory or zip can hold several years).
@@ -580,12 +599,21 @@ def salinity_import_cdmo(
                 {
                     "raw_codes": set(), "n_parsed": 0, "n_new": 0, "rejected": {},
                     "n_bad_ts": 0, "value_unparseable": {}, "flag_unparseable": {},
+                    "admitted": {}, "n_empty": 0, "codes": {}, "span": None,
+                    "meta": None,
                 },
             )
             a["raw_codes"].add(si.raw_code)
             a["n_parsed"] += si.n_parsed
             a["n_new"] += si.n_new
             a["n_bad_ts"] += si.n_bad_timestamp
+            a["n_empty"] += si.n_empty
+            a["meta"] = a["meta"] or si.meta
+            a["span"] = _widen(a["span"], si.span)
+            for col, n in si.n_admitted.items():
+                a["admitted"][col] = a["admitted"].get(col, 0) + n
+            for code, n in si.qualifier_codes_admitted.items():
+                a["codes"][code] = a["codes"].get(code, 0) + n
             for col, n in si.n_rejected_by_flag.items():
                 a["rejected"][col] = a["rejected"].get(col, 0) + n
             for col, n in si.n_value_unparseable.items():
@@ -620,9 +648,17 @@ def salinity_import_cdmo(
         if bad_bits:
             console.print(f"[yellow]{station}[/yellow] could not parse: {'; '.join(bad_bits)}")
 
-    coords = {
-        s: cdmo.NIW_STATION_COORDS_LONLAT[s] for s in agg if s in cdmo.NIW_STATION_COORDS_LONLAT
-    }
+    # Positions come from the export's OWN `sampling_stations.csv` when the
+    # user downloaded it (`StationImport.meta`, west longitude already
+    # negated), and only fall back to the coordinates transcribed from the
+    # reserve's metadata PDFs when it is absent. Reading the file is what
+    # makes a future export with more stations work with no code change.
+    coords = {}
+    for station, a in agg.items():
+        if a["meta"] is not None:
+            coords[station] = a["meta"].lonlat
+        elif station in cdmo.NIW_STATION_COORDS_LONLAT:
+            coords[station] = cdmo.NIW_STATION_COORDS_LONLAT[station]
     missing_coords = sorted(set(agg) - set(coords))
     distances: dict[str, tuple[float, float]] = {}
     if coords:
@@ -644,17 +680,20 @@ def salinity_import_cdmo(
         "raw code(s)",
         "parsed",
         "new",
+        "salinity kept",
+        "salinity rejected",
+        "date span",
         "along-estuary km",
         "snap gap m",
         "in domain?",
-        "flag-rejected",
     ):
         table.add_column(col)
     n_in_domain = 0
     distinct_km: set[float] = set()
     for station in sorted(agg):
         a = agg[station]
-        rejected_str = ", ".join(f"{k}:{v}" for k, v in sorted(a["rejected"].items())) or "-"
+        span = a["span"]
+        span_str = f"{span[0].date()} to {span[1].date()}" if span else "-"
         if station in distances:
             dist_km, gap_m = distances[station]
             in_domain = gap_m <= max_snap_m
@@ -670,20 +709,41 @@ def salinity_import_cdmo(
         table.add_row(
             station,
             ", ".join(sorted(a["raw_codes"])),
-            str(a["n_parsed"]),
-            str(a["n_new"]),
+            f"{a['n_parsed']:,}",
+            f"{a['n_new']:,}",
+            f"{a['admitted'].get('sal', 0):,}",
+            f"{a['rejected'].get('sal', 0):,}",
+            span_str,
             dist_str,
             gap_str,
             domain_str,
-            rejected_str,
         )
     console.print(table)
+
+    # The QAQC flag is what admits a value; the bracketed codes beside it
+    # explain WHY it got that flag and never override it (CDMO's own QAQC
+    # documentation, and SWMPr's `qaqc()`, both say so). Printed anyway --
+    # a code riding along on ADMITTED data is the only way a caveat enters
+    # a calibration unnoticed, so it should be visible, not buried.
+    for station in sorted(agg):
+        codes = agg[station]["codes"]
+        if not codes:
+            continue
+        top = sorted(codes.items(), key=lambda kv: (-kv[1], kv[0]))[:6]
+        console.print(
+            f"[dim]{station} qualifier codes on ADMITTED values: "
+            + ", ".join(
+                f"{c} ({cdmo.QAQC_CODE_MEANINGS.get(c, 'UNDOCUMENTED')}) x{n:,}"
+                for c, n in top
+            )
+            + "[/dim]"
+        )
 
     if missing_coords:
         console.print(
             f"\n[yellow]no known position for:[/yellow] {missing_coords} — imported and "
-            "stored, but not geolocated (only the six NIW stations in "
-            "sources.cdmo.NIW_STATION_COORDS_LONLAT have a documented position)."
+            "stored, but not geolocated. Download CDMO's sampling_stations.csv into the "
+            "same directory as the export and re-run to geolocate them."
         )
     console.print(
         f"\n{n_in_domain} in-domain station(s), {len(distinct_km)} distinct along-estuary "
@@ -709,13 +769,16 @@ def _print_met_import_summary(met_reports: list) -> None:
     unknown_columns: set[str] = set()
     for r in met_reports:
         unknown_columns.update(r.unknown_columns)
-        for si in r.stations:
+        for si in r.met_stations:
             a = agg.setdefault(
-                si.canonical, {"raw_codes": set(), "n_parsed": 0, "n_new": 0}
+                si.canonical,
+                {"raw_codes": set(), "n_parsed": 0, "n_new": 0, "span": None, "meta": None},
             )
             a["raw_codes"].add(si.raw_code)
             a["n_parsed"] += si.n_parsed
             a["n_new"] += si.n_new
+            a["meta"] = a["meta"] or si.meta
+            a["span"] = _widen(a["span"], si.span)
 
     console.print(f"\n[bold]{len(agg)} meteorological station(s)[/bold]")
     if unknown_columns:
@@ -724,18 +787,24 @@ def _print_met_import_summary(met_reports: list) -> None:
             f"{sorted(unknown_columns)}"
         )
     table = Table(title="CDMO import — meteorological")
-    for col in ("station", "raw code(s)", "position", "parsed", "new"):
+    for col in ("station", "raw code(s)", "position", "date span", "parsed", "new"):
         table.add_column(col)
     for station in sorted(agg):
         a = agg[station]
-        if station in cdmo.NIW_MET_STATION_COORDS_LONLAT:
+        if a["meta"] is not None:
+            lon, lat = a["meta"].lonlat
+        elif station in cdmo.NIW_MET_STATION_COORDS_LONLAT:
             lon, lat = cdmo.NIW_MET_STATION_COORDS_LONLAT[station]
-            pos_str = f"{lat:.4f}, {lon:.4f}"
         else:
-            pos_str = "[dim]no known position[/dim]"
+            lon = lat = None
+        pos_str = (
+            f"{lat:.4f}, {lon:.4f}" if lat is not None else "[dim]no known position[/dim]"
+        )
+        span = a["span"]
+        span_str = f"{span[0].date()} to {span[1].date()}" if span else "-"
         table.add_row(
-            station, ", ".join(sorted(a["raw_codes"])), pos_str,
-            str(a["n_parsed"]), str(a["n_new"]),
+            station, ", ".join(sorted(a["raw_codes"])), pos_str, span_str,
+            f"{a['n_parsed']:,}", f"{a['n_new']:,}",
         )
     console.print(table)
 
