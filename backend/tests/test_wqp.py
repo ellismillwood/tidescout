@@ -9,6 +9,8 @@ parser in this repo is trusted until it has met a real file.
 from datetime import UTC, datetime
 from pathlib import Path
 
+import pytest
+
 from tidescout.sources import wqp
 
 FIXTURE = Path(__file__).parent / "fixtures" / "wqp_results_excerpt.csv"
@@ -77,6 +79,16 @@ def test_an_unknown_unit_is_rejected_and_counted_never_coerced():
     assert all(s.salinity_psu <= 45.0 for s in r.samples), "a uS/cm value would be ~4 digits"
 
 
+def test_a_bad_status_is_rejected_and_counted():
+    """`Preliminary` and `Provisional` are not reviewed and are blocked --
+    the same posture cdmo.py takes toward unvetted QAQC flags. A typo in
+    ACCEPTED_STATUSES (e.g. "Historical" -> "Historic") must fail a test,
+    not just silently narrow admission."""
+    r = _report()
+    assert r.n_bad_status >= 1
+    assert "Preliminary" in r.unknown_statuses
+
+
 def test_quality_control_activities_are_excluded():
     """Field blanks and lab replicates pass every other filter and would
     enter the fit as real estuary measurements."""
@@ -99,11 +111,46 @@ def test_missing_depth_is_none_not_zero():
     assert all(s.depth_m is None or s.depth_m > 0 for s in r.samples)
 
 
+def test_depth_m_passes_metres_through_unchanged():
+    """The live fixture has zero rows with a recorded depth, so this branch
+    is otherwise dead in coverage -- a sign error here would ship silently."""
+    assert wqp._depth_m("0.3", "m") == 0.3
+    assert wqp._depth_m("1.5", "meters") == 1.5
+
+
+def test_depth_m_converts_feet_to_metres_numerically():
+    """1 ft = 0.3048 m exactly; a wrong constant must fail this, not just
+    the vacuous `> 0` check in test_missing_depth_is_none_not_zero."""
+    assert wqp._depth_m("1.0", "ft") == pytest.approx(0.3048)
+    assert wqp._depth_m("10.0", "feet") == pytest.approx(3.048)
+
+
+def test_depth_m_rejects_blank_and_unknown_units():
+    assert wqp._depth_m("", "m") is None
+    assert wqp._depth_m("0.3", "") is None
+    assert wqp._depth_m("0.3", "fathoms") is None
+
+
+def test_a_different_characteristic_is_excluded_and_counted():
+    """WQP also serves Specific conductance under a neighbouring
+    characteristic; it is a different quantity and not interchangeable
+    with salinity (pipeline/salinity_fit.py:832). Mixing them in would be
+    silent, and dropping the row with no counter would be too."""
+    r = _report()
+    assert r.n_other_characteristic >= 1
+    assert "SYNTH-OTHER-CHARACTERISTIC-STATION" not in {s.station for s in r.samples}
+
+
 def test_counters_account_for_every_row():
-    """A rejection path with no counter is a silent drop."""
+    """A rejection path with no counter is a silent drop. This must account
+    for every row read from the file -- including rows for a different
+    CharacteristicName entirely -- not just the salinity subset, since
+    Task 2's import_results hands this parser arbitrary multi-characteristic
+    exports."""
     r = _report()
     accounted = (
         r.n_admitted + r.n_no_time + r.n_bad_unit
         + r.n_bad_status + r.n_qc_activity + r.n_no_value
+        + r.n_other_characteristic
     )
     assert accounted == r.n_rows

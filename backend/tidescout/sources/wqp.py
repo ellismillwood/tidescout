@@ -34,7 +34,7 @@ from dataclasses import dataclass, field
 from datetime import UTC, datetime, timedelta, timezone
 
 # The WQP characteristic this module reads, and the ONLY one it will read.
-# WQP also serves "Specific conductance" and "Conductivity"; `sources/usgs.py`
+# WQP also serves "Specific conductance" and "Conductivity"; `pipeline/salinity_fit.py:832`
 # already holds the line that specific conductance is a different quantity and
 # is not interchangeable with salinity. Mixing them here would be silent.
 CHARACTERISTIC = "Salinity"
@@ -94,6 +94,7 @@ class ParseReport:
     n_bad_status: int = 0
     n_qc_activity: int = 0
     n_no_value: int = 0
+    n_other_characteristic: int = 0
     unknown_units: dict[str, int] = field(default_factory=dict)
     unknown_statuses: dict[str, int] = field(default_factory=dict)
 
@@ -134,9 +135,15 @@ def parse_results(fh: Iterable[str]) -> ParseReport:
     """WQP Result CSV -> admitted salinity samples, plus why the rest went."""
     report = ParseReport()
     for row in csv.DictReader(fh):
-        if (row.get("CharacteristicName") or "").strip() != CHARACTERISTIC:
-            continue  # a different parameter entirely; not this module's business
         report.n_rows += 1
+        if (row.get("CharacteristicName") or "").strip() != CHARACTERISTIC:
+            # A different parameter entirely -- e.g. Specific conductance,
+            # not interchangeable with salinity (pipeline/salinity_fit.py:832).
+            # Still counted: `import_results` (Task 2) hands this parser
+            # arbitrary multi-characteristic exports, and an uncounted drop
+            # here would be invisible against the raw file.
+            report.n_other_characteristic += 1
+            continue
 
         activity = (row.get("ActivityTypeCode") or "").strip()
         if activity.startswith(_QC_ACTIVITY_PREFIX):
