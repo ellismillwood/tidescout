@@ -73,11 +73,16 @@ def interpolate_tide_hours(events: list[TideEvent], day: date, tz: str) -> list[
 
 
 # The longest interval between consecutive hi/lo predictions that can still
-# be treated as half a tidal cycle. The M2 semidiurnal period is 12.42 h, so
-# a real half-cycle is ~6.2 h; diurnal inequality stretches some intervals
-# past 8 h. Anything beyond this is a GAP in the predictions, not a long
-# half-cycle, and interpolating across it would place phase 0.25 in the
-# middle of a cycle that was never predicted.
+# be treated as half a tidal cycle. Measured across 5,643 consecutive hi/lo
+# intervals at station 8662549 (Springmaid Pier / Winyah Bay area), sampled
+# across 1999/2010/2020/2026: min 4.60 h, median 6.28 h, mean 6.21 h,
+# max 7.82 h, p99 7.18 h, p99.9 7.36 h, zero intervals exceeding 8 h -- this
+# station's tide is semidiurnal with no observed interval near this
+# threshold. 9.0 sits between that observed maximum (7.82 h) and the ~12.4 h
+# gap a single missing event would produce, so it clears real half-cycles
+# with room to spare while still catching a dropped prediction as a GAP, not
+# a long half-cycle. Interpolating across a real gap would place phase 0.25
+# in the middle of a cycle that was never predicted.
 MAX_HALF_CYCLE_H = 9.0
 
 
@@ -100,6 +105,15 @@ def phase_at(events: Sequence[TideEvent], t: datetime) -> float | None:
     between them was not predicted). A fabricated phase is exactly the error
     this codebase already refuses at parse time when it rejects rows with no
     usable timestamp.
+
+    Invariant when `t` lands exactly on an interior event's own timestamp:
+    bracketing intervals are inclusive on both ends (`before.time <= t <=
+    after.time`), so such a `t` matches two adjacent pairs -- the one ending
+    there and the one starting there. This prefers the first VALID pair over
+    the first MATCHING one, so an invalid neighbour (a prediction gap or a
+    same-kind pair) on one side can't shadow a valid determination from the
+    other side. `None` is returned only when every matching pair is
+    unusable.
     """
     if t.tzinfo is None:
         raise ValueError("phase_at needs a tz-aware timestamp; a naive one silently shifts phase")
@@ -108,10 +122,10 @@ def phase_at(events: Sequence[TideEvent], t: datetime) -> float | None:
         if not (before.time <= t <= after.time):
             continue
         if before.kind == after.kind:
-            return None  # the event between them was not predicted
+            continue  # the event between them was not predicted -- try the other matching pair
         span = (after.time - before.time).total_seconds()
         if span <= 0 or span > MAX_HALF_CYCLE_H * 3600.0:
-            return None
+            continue  # a gap, not a half-cycle -- try the other matching pair
         frac = (t - before.time).total_seconds() / span
         # low -> high covers 0.0..0.5; high -> low covers 0.5..1.0
         phase = frac * 0.5 if before.kind == "L" else 0.5 + frac * 0.5

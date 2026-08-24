@@ -176,3 +176,34 @@ def test_two_consecutive_events_of_the_same_kind_are_undeterminable():
     base = datetime(2026, 5, 1, tzinfo=UTC)
     bad = [TideEvent(base, "L", -0.5), TideEvent(base + timedelta(hours=12), "L", -0.4)]
     assert phase_at(bad, base + timedelta(hours=6)) is None
+
+
+def test_exact_hit_on_interior_event_prefers_valid_side_over_a_gap():
+    """A `t` equal to an interior event's own timestamp matches two adjacent
+    pairs (inclusive bounds on both ends): the one ending there and the one
+    starting there. Here the earlier pair (L@00:00 -> H@20:00) is a 20h span,
+    well past MAX_HALF_CYCLE_H -- a real gap, not a long half-cycle -- but
+    the later pair (H@20:00 -> L@26:00) is a valid 6h half-cycle and t IS
+    that high water. Returning None because the invalid pair happened to be
+    checked first would silently drop a determinable grab sample."""
+    base = datetime(2026, 5, 1, tzinfo=UTC)
+    events = [
+        TideEvent(base, "L", -0.5),
+        TideEvent(base + timedelta(hours=20), "H", 4.0),
+        TideEvent(base + timedelta(hours=26), "L", -0.4),
+    ]
+    assert phase_at(events, base + timedelta(hours=20)) == pytest.approx(0.5)
+
+
+def test_exact_hit_on_interior_event_prefers_valid_side_over_same_kind_pair():
+    """Same ambiguity as above, but the invalid neighbour is a same-kind
+    pair (missing intervening high) instead of a gap: L@00:00 -> L@06:00 is
+    unusable, but L@06:00 -> H@12:00 is a valid half-cycle and t IS that low
+    water, so the answer should be 0.0, not None."""
+    base = datetime(2026, 5, 1, tzinfo=UTC)
+    events = [
+        TideEvent(base, "L", -0.5),
+        TideEvent(base + timedelta(hours=6), "L", -0.3),
+        TideEvent(base + timedelta(hours=12), "H", 4.0),
+    ]
+    assert phase_at(events, base + timedelta(hours=6)) == pytest.approx(0.0)
