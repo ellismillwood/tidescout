@@ -93,7 +93,7 @@ offset (hence `WaterSensor.off_axis`); and the bay's own observations span
 km reach where the fishing spots are.
 """
 
-from collections.abc import Sequence
+from collections.abc import Mapping, Sequence
 from dataclasses import dataclass
 from datetime import UTC, date, datetime, timedelta
 from zoneinfo import ZoneInfo
@@ -692,6 +692,54 @@ def daily_swings(
     return out
 
 
+def is_off_axis(stem_km: float, declared: bool) -> bool:
+    """Whether a station sits on a branch the 1-D coordinate cannot place.
+
+    The COMPUTED distance decides; `declared` (the fishery YAML's
+    `off_axis: true`) is an override that can only ever EXCLUDE. A hand flag
+    able to force a station back IN would reintroduce the hand-marking this
+    replaces -- and hand-marking every WQP station by eye is precisely the
+    labour this screen exists to remove. One that can only exclude is a
+    safety valve for geometry the criterion gets wrong.
+
+    NaN excludes: it means the cell has no water route to the stem at all.
+    """
+    from tidescout.pipeline.estuary import ON_AXIS_MAX_KM
+
+    if declared:
+        return True
+    if not np.isfinite(stem_km):
+        return True
+    return stem_km > ON_AXIS_MAX_KM
+
+
+def station_stem_km(
+    slug: str, fishery: Fishery, sites: Mapping[str, tuple[float, float]]
+) -> dict[str, float]:
+    """Distance from each {site: (lon, lat)} to the estuary's main stem."""
+    from rasterio.warp import transform as warp_transform
+
+    from tidescout.pipeline.estuary import load_stem_distance_field
+    from tidescout.pipeline.flowlib import grid_spec
+
+    if not sites:
+        return {}
+    spec = grid_spec(slug, fishery)
+    stem = load_stem_distance_field(slug)
+    ids = sorted(sites)
+    xs, ys = warp_transform(
+        "EPSG:4326",
+        f"EPSG:{fishery.bathymetry.epsg}",
+        [sites[s][0] for s in ids],
+        [sites[s][1] for s in ids],
+    )
+    out = {}
+    for site, x, y in zip(ids, xs, ys, strict=True):
+        i = int(np.argmin((spec.xs - x) ** 2 + (spec.ys - y) ** 2))
+        out[site] = float(stem[i])
+    return out
+
+
 def site_distances_km(
     slug: str, fishery: Fishery, sites: dict[str, tuple[float, float]]
 ) -> dict[str, tuple[float, float]]:
@@ -735,6 +783,15 @@ class CalibrationInput:
     # Swings come from instantaneous readings, which USGS retains for a
     # shorter window than daily means -- see MAX_IV_DAYS.
     swing_days: int = 0
+    # How many `sites` the stem screen removed -- counted from the site
+    # records' own notes rather than tracked separately, so it can never
+    # drift from what the table actually says.
+    n_off_axis: int = 0
+    # True when `station_stem_km` could not run at all because
+    # `stem_km.npy` has not been built (`tidescout salinity stem <slug>`).
+    # `off_axis` then fell back to whatever declared information existed
+    # instead of a computed distance -- see `_stem_km_or_fallback`.
+    stem_field_missing: bool = False
 
 
 def daily_means_and_swings(
@@ -774,20 +831,75 @@ def _open_store(slug: str):
     return default_store(slug)
 
 
-def _store_distances(
-    slug: str, fishery: Fishery, sites: Sequence[str]
-) -> dict[str, tuple[float, float]]:
-    """Along-estuary distance for each store station, from its own surveyed
-    position -- no discovery call, because these are not USGS sites and
-    nothing serves their coordinates as data."""
+def _store_coords(sites: Sequence[str]) -> dict[str, tuple[float, float]]:
+    """{station: (lon, lat)} for every store station whose surveyed position
+    is known -- no discovery call, because these are not USGS sites and
+    nothing serves their coordinates as data. Shared by `_store_distances`
+    and `collect_observations`'s stem-distance lookup so the mapping is
+    built once, not once per caller."""
     from tidescout.sources import cdmo
 
-    known = {
+    return {
         s: cdmo.NIW_STATION_COORDS_LONLAT[s]
         for s in sites
         if s in cdmo.NIW_STATION_COORDS_LONLAT
     }
+
+
+def _store_distances(
+    slug: str, fishery: Fishery, sites: Sequence[str]
+) -> dict[str, tuple[float, float]]:
+    """Along-estuary distance for each store station, from its own surveyed
+    position."""
+    known = _store_coords(sites)
     return site_distances_km(slug, fishery, known) if known else {}
+
+
+def _stem_km_or_fallback(
+    slug: str, fishery: Fishery, sites: Mapping[str, tuple[float, float]]
+) -> tuple[dict[str, float], bool]:
+    """`station_stem_km`, degrading instead of crashing when the stem field
+    has not been built.
+
+    `load_stem_distance_field` raises `FileNotFoundError` until
+    `tidescout salinity stem <slug>` has run once. Letting that propagate
+    would break `salinity calibrate` outright on any machine that has not
+    run it -- the spec calls for a derived screen, not a hard dependency.
+
+    Returns `({}, False)` on that path so the caller can fall back to
+    whatever `off_axis` information it already has without a computed stem
+    distance: the YAML's declared flag for NERRS/NDBC stations (the
+    pre-this-task behaviour), or exclusion for WQP stations, which have no
+    declared flag to fall back to. The `bool` is carried onto
+    `CalibrationInput.stem_field_missing` so the CLI reports the fallback
+    rather than it looking like a clean, fully-screened run.
+    """
+    if not sites:
+        return {}, True
+    try:
+        return station_stem_km(slug, fishery, sites), True
+    except FileNotFoundError:
+        return {}, False
+
+
+def _wqp_sites(slug: str) -> dict[str, list[tuple[datetime, float]]]:
+    """Every WQP station held for this fishery, with its salinity series.
+
+    Discovered from the store rather than declared in the fishery YAML:
+    there are ~130 of them, they arrive from a bbox query, and which ones
+    are usable is decided by the stem screen, not by hand. `{}` when this
+    fishery has never imported any WQP results -- checked by file existence
+    rather than opening the store, which would otherwise create an empty
+    `wqp.sqlite` as a side effect of a mere read (the same posture
+    `wqp.station_coords` already takes).
+    """
+    from tidescout.paths import fishery_data_dir
+    from tidescout.sources import wqp
+
+    if not (fishery_data_dir(slug) / "wqp.sqlite").exists():
+        return {}
+    store = wqp.default_store(slug)
+    return {s: store.salinity_series(s) for s in sorted(store.stations())}
 
 
 def _usgs_inputs(slug, fishery, cache, days, start, end, max_snap_m):
@@ -841,15 +953,28 @@ def collect_observations(
     every station within 250 km), so `ocean_ppt` is held rather than fitted;
     nothing here fetches one, and no default silently stands in for one.
 
-    Two exclusions, both RECORDED rather than silent, because a fit that
+    A THIRD source joins as of Task 5: WQP grab samples (`sources/wqp.py`),
+    discovered from that fishery's own store rather than declared in the
+    YAML. Unlike the other two these are single samples, not a series, so
+    they are NOT run through `daily_means_and_swings` -- a one-sample day
+    would fail its 40-reading gate, correctly. Each keeps its own exact
+    timestamp and is paired with that day's composite discharge directly,
+    which is what resolves it to a known distance, discharge AND tidal
+    phase -- see `sources/wqp.py`'s module docstring for why a grab sample
+    with all three is a fully-specified observation on its own.
+
+    Three exclusions, all RECORDED rather than silent, because a fit that
     quietly narrows its own inputs looks identical to one that had less data:
 
     * A site further than `max_snap_m` from any in-domain cell -- its
       along-estuary distance would be the nearest cell's, which is a
       different place on the estuary.
-    * A station marked `off_axis` -- see `build_site_record`. On Winyah that
-      is North Inlet's three, which read 31.4-32.0 ppt where the bay's own
-      read 6.0-9.6 at distances that order them the wrong way round.
+    * A station `is_off_axis` against the COMPUTED distance to the main
+      stem -- see that function's docstring. On Winyah that is North
+      Inlet's three declared stations plus every WQP station on a branch
+      the 1-D coordinate cannot place.
+    * A WQP station WQP itself never reported a position for -- reported as
+      "no coordinates", same as an unlocated USGS site.
     """
     from tidescout.sources.ndbc import PARAM_SALINITY as STORE_SALINITY
 
@@ -858,6 +983,10 @@ def collect_observations(
         for w in fishery.stations.water
         if w.kind in _STORE_KINDS and STORE_SALINITY in w.params
     ]
+    # A station declared off_axis=True is EXCLUDED unconditionally --
+    # `is_off_axis` returns True for it no matter what the computed stem
+    # distance says (declared can only ever exclude, never admit; see that
+    # function's docstring) -- so its series is never worth fetching.
     on_axis = [w for w in store_sensors if not w.off_axis]
 
     tz = ZoneInfo(fishery.timezone)
@@ -870,12 +999,20 @@ def collect_observations(
             store_means[w.station] = means
             store_swings[w.station] = swings
 
+    wqp_series = _wqp_sites(slug)
+
     end = datetime.now(UTC).date()
     start = end - timedelta(days=days)
     # The store reaches back further than `days` by design, so the discharge
     # window has to reach back with it or every older reading pairs with
-    # nothing and is silently dropped.
+    # nothing and is silently dropped. WQP grabs can reach back further
+    # still (2005 was measured live), so their earliest dates widen it too.
     earliest = [min(m) for m in store_means.values() if m]
+    earliest += [
+        min(ts.astimezone(tz).date() for ts, _ in series)
+        for series in wqp_series.values()
+        if series
+    ]
     if earliest:
         start = min(start, min(earliest))
 
@@ -883,6 +1020,17 @@ def collect_observations(
         slug, fishery, cache, days, start, end, max_snap_m
     )
     store_dist = _store_distances(slug, fishery, [w.station for w in store_sensors])
+    store_coords = _store_coords([w.station for w in store_sensors])
+    store_stem, store_stem_ok = _stem_km_or_fallback(slug, fishery, store_coords)
+
+    from tidescout.sources import wqp as wqp_source
+
+    wqp_coords = wqp_source.station_coords(slug)
+    wqp_known = {s: wqp_coords[s] for s in wqp_series if s in wqp_coords}
+    wqp_dist = site_distances_km(slug, fishery, wqp_known) if wqp_known else {}
+    wqp_stem, wqp_stem_ok = _stem_km_or_fallback(slug, fishery, wqp_known)
+
+    stem_field_missing = not (store_stem_ok and wqp_stem_ok)
 
     usable: dict[str, float] = {}
     records: list[SiteRecord] = []
@@ -902,6 +1050,13 @@ def collect_observations(
     store_usable: dict[str, float] = {}
     for w in store_sensors:
         rows = sorted(store_means.get(w.station, {}).items())
+        off_axis = (
+            is_off_axis(store_stem.get(w.station, float("nan")), w.off_axis)
+            if store_stem_ok
+            # No computed distance available -- fall back to exactly the
+            # declared flag, the behaviour before this task existed.
+            else w.off_axis
+        )
         record = build_site_record(
             w.station,
             rows,
@@ -909,16 +1064,63 @@ def collect_observations(
             distance_km=store_dist.get(w.station, (float("nan"), float("inf")))[0],
             snap_gap_m=store_dist.get(w.station, (float("nan"), float("inf")))[1],
             max_snap_m=max_snap_m,
-            off_axis=w.off_axis,
+            off_axis=off_axis,
         )
         if record.used:
             store_usable[w.station] = record.distance_km
         records.append(record)
 
+    # WQP stations carry no declared off_axis flag at all -- they are
+    # discovered, not authored (see `_wqp_sites`). A station with no known
+    # position is never claimed off-axis (that would misreport WHY it is
+    # excluded); `located` handles it below instead, same ordering
+    # `build_site_record` already enforces for USGS sites.
+    if wqp_stem_ok:
+        wqp_off_axis = {
+            s: is_off_axis(wqp_stem.get(s, float("nan")), False) for s in wqp_known
+        }
+    else:
+        # No declared flag to fall back to and no computed distance either
+        # -- admitting an unscreened branch station is exactly the
+        # extrapolation this task exists to remove, so every locatable WQP
+        # station is excluded rather than let through unscreened.
+        wqp_off_axis = dict.fromkeys(wqp_known, True)
+
+    wqp_usable: dict[str, float] = {}
+    for site, series in sorted(wqp_series.items()):
+        located = site in wqp_known
+        dist, gap = wqp_dist.get(site, (float("nan"), float("inf")))
+        rows = [(ts.astimezone(tz).date(), ppt) for ts, ppt in series]
+        record = build_site_record(
+            site,
+            rows,
+            located=located,
+            distance_km=dist,
+            snap_gap_m=gap,
+            max_snap_m=max_snap_m,
+            off_axis=wqp_off_axis.get(site, False),
+        )
+        if record.used:
+            wqp_usable[site] = record.distance_km
+        records.append(record)
+
+    n_off_axis = sum(1 for r in records if "axis" in r.note.lower())
+
     observations = pair_daily_means(salinity_daily, by_day, usable)
     observations += pair_daily_means(
         {s: sorted(store_means[s].items()) for s in store_usable}, by_day, store_usable
     )
+    # WQP grabs are individual observations, not daily means -- each keeps
+    # its own timestamp so it resolves to its own tidal phase rather than
+    # being averaged into a day that (for most WQP stations) holds only it.
+    for site, series in sorted(wqp_series.items()):
+        if site not in wqp_usable:
+            continue
+        dist = wqp_usable[site]
+        for ts, ppt in series:
+            day = ts.astimezone(tz).date()
+            if day in by_day:
+                observations.append((dist, by_day[day], ppt))
 
     swing_days = min(days, MAX_IV_DAYS)
     from tidescout.sources import usgs
@@ -936,4 +1138,7 @@ def collect_observations(
         if d in by_day
     ]
     span = (min(by_day), max(by_day)) if by_day else None
-    return CalibrationInput(observations, swings, records, days, span, swing_days)
+    return CalibrationInput(
+        observations, swings, records, days, span, swing_days,
+        n_off_axis=n_off_axis, stem_field_missing=stem_field_missing,
+    )

@@ -457,6 +457,21 @@ def salinity_calibrate(
         "NERRS-store swings cover everything the store holds, since it accumulates "
         "rather than serving a rolling window."
     )
+    from tidescout.pipeline.estuary import ON_AXIS_MAX_KM
+
+    console.print(
+        f"{data.n_off_axis} station(s) excluded by the off-axis screen "
+        f"(main-stem distance > {ON_AXIS_MAX_KM} km, or the YAML's declared "
+        "off_axis: true) -- see the site table above for which and why."
+    )
+    if data.stem_field_missing:
+        console.print(
+            f"[yellow]distance-to-stem field not built[/yellow] -- run "
+            f"`tidescout salinity stem {slug}` first. off_axis fell back to the "
+            "fishery YAML's declared flag for NERRS/NDBC stations, and WQP "
+            "stations (which carry no declared flag) were excluded entirely "
+            "rather than admitted with no axis screen at all."
+        )
 
     try:
         fitted, diag = salinity_fit.fit_intrusion(

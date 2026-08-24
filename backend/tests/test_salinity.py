@@ -923,3 +923,209 @@ def test_calibrate_reports_both_sources_not_just_the_usgs_window(monkeypatch):
     assert "00480 sensors over the last 90 days" not in out
     assert "NERRS store" in out
     assert "2016-01-01 .. 2026-08-22" in out
+
+
+# -- Task 5: the computed stem screen, and WQP anchors ----------------------
+# The COMPUTED distance to the main stem decides `off_axis`; the YAML's
+# declared flag becomes an override that can only ever EXCLUDE, never
+# include (see `is_off_axis`'s own docstring for why the other direction
+# would reintroduce the hand-marking this replaces).
+
+
+def test_off_axis_is_computed_from_the_stem_distance():
+    """Measured 2026-08-24: North Inlet's stations sit 7.997-11.918 km from
+    the main stem and the bay's own sit 0.651-1.393."""
+    assert salinity_fit.is_off_axis(stem_km=9.858, declared=False) is True
+    assert salinity_fit.is_off_axis(stem_km=0.651, declared=False) is False
+
+
+def test_the_yaml_flag_can_only_exclude_never_include():
+    """A hand flag that could force a station back IN would reintroduce the
+    hand-marking this replaces. One that can only exclude is a safety valve."""
+    assert salinity_fit.is_off_axis(stem_km=0.05, declared=True) is True
+    assert salinity_fit.is_off_axis(stem_km=9.9, declared=False) is True
+
+
+def test_a_station_with_no_stem_distance_is_excluded_not_admitted():
+    """NaN means the cell has no water route to the stem at all. Admitting
+    it would put an unplaceable station into the fit."""
+    assert salinity_fit.is_off_axis(stem_km=float("nan"), declared=False) is True
+
+
+def test_station_stem_km_agrees_with_the_built_field():
+    """Regression against the real built field, mirroring
+    `test_estuary.test_the_six_nerrs_stations_land_on_the_right_side_of_the_screen`
+    -- `station_stem_km` must recover exactly the value the field itself
+    holds at each station's nearest cell, not a reimplementation that could
+    drift from it. Skips rather than fails when the field has not been
+    built -- a fresh clone has no data/ directory."""
+    from tidescout.pipeline import estuary
+    from tidescout.pipeline.flowlib import grid_spec
+    from tidescout.sources import cdmo
+
+    fishery = load_fishery("winyah-bay")
+    try:
+        stem_field = estuary.load_stem_distance_field("winyah-bay")
+    except FileNotFoundError:
+        pytest.skip("stem field not built -- run `tidescout salinity stem winyah-bay`")
+
+    spec = grid_spec("winyah-bay", fishery)
+    stations = ["NIWTAWQ", "WYSS1", "NIWWBWQ", "NIWCBWQ", "NIWOLWQ", "NIWDCWQ"]
+    sites = {s: cdmo.NIW_STATION_COORDS_LONLAT[s] for s in stations}
+
+    out = salinity_fit.station_stem_km("winyah-bay", fishery, sites)
+
+    from rasterio.warp import transform as warp_transform
+
+    for station in stations:
+        lon, lat = sites[station]
+        x, y = (v[0] for v in warp_transform(
+            "EPSG:4326", f"EPSG:{fishery.bathymetry.epsg}", [lon], [lat]))
+        i = int(np.argmin((spec.xs - x) ** 2 + (spec.ys - y) ** 2))
+        assert out[station] == pytest.approx(float(stem_field[i]))
+    # And the on/off split matches the six-station gate Task 4 pinned.
+    for station in ("NIWTAWQ", "WYSS1", "NIWWBWQ"):
+        assert out[station] <= estuary.ON_AXIS_MAX_KM
+    for station in ("NIWCBWQ", "NIWOLWQ", "NIWDCWQ"):
+        assert out[station] > estuary.ON_AXIS_MAX_KM
+
+
+def test_stem_field_missing_falls_back_to_the_declared_flag_not_a_crash(monkeypatch):
+    """`load_stem_distance_field` raises `FileNotFoundError` on a machine
+    that has not run `salinity stem` yet. That must not turn `salinity
+    calibrate` into a hard crash: off_axis for NERRS/NDBC stations falls
+    back to the YAML's declared flag (the pre-Task-5 behaviour), and the
+    fallback is reported on the returned `CalibrationInput` rather than
+    silently swallowed."""
+    from datetime import datetime, timedelta
+
+    fishery = load_fishery("winyah-bay")
+
+    class _Store:
+        def salinity_series(self, station):
+            base = datetime(2026, 5, 1, 4, 0, tzinfo=UTC)
+            return [(base + timedelta(minutes=15 * i), 10.0 + (i % 8)) for i in range(96)]
+
+    def _raise(*a, **k):
+        raise FileNotFoundError("no distance-to-stem field")
+
+    monkeypatch.setattr(salinity_fit, "_open_store", lambda slug: _Store())
+    monkeypatch.setattr(
+        salinity_fit, "_store_distances",
+        lambda slug, fishery, sites: {s: (19.03, 5.0) for s in sites},
+    )
+    monkeypatch.setattr(
+        salinity_fit, "_usgs_inputs",
+        lambda *a, **k: ({}, {date(2026, 5, 1): 4000.0, date(2026, 5, 2): 4200.0}, [], {}),
+    )
+    monkeypatch.setattr(salinity_fit, "station_stem_km", _raise)
+    monkeypatch.setattr(salinity_fit, "_wqp_sites", lambda slug: {})
+
+    data = salinity_fit.collect_observations("winyah-bay", fishery, cache=None, days=90)
+
+    assert data.stem_field_missing is True
+    # WYSS1/NIWWBWQ/NIWTAWQ are declared off_axis=false, NIWCBWQ/NIWOLWQ/
+    # NIWDCWQ declared off_axis=true -- with the field unavailable, that
+    # declared flag alone must decide, exactly as it did before this task.
+    notes = {r.site: r.note for r in data.sites}
+    for station in ("WYSS1", "NIWWBWQ", "NIWTAWQ"):
+        assert notes[station] == ""
+    for station in ("NIWCBWQ", "NIWOLWQ", "NIWDCWQ"):
+        assert "axis" in notes[station].lower()
+    assert data.observations, "on-axis stations must still reach the fit"
+
+
+def test_calibrate_reports_off_axis_count_and_stem_fallback(monkeypatch):
+    """Excluded is not invisible, and neither is a degraded run: the CLI
+    must print how many stations the screen removed, and must say so out
+    loud when the stem field itself was unavailable rather than leaving a
+    machine that has not run `salinity stem` looking like a clean run."""
+    from typer.testing import CliRunner
+
+    from tidescout.cli import app
+
+    records = [
+        salinity_fit.build_site_record(
+            "WYSS1", [(date(2026, 5, 1), 6.0)], located=True, distance_km=19.03,
+            snap_gap_m=5.0, max_snap_m=500.0,
+        ),
+        salinity_fit.build_site_record(
+            "NIWCBWQ", [], located=True, distance_km=12.88, snap_gap_m=4.0,
+            max_snap_m=500.0, off_axis=True,
+        ),
+    ]
+    monkeypatch.setattr(
+        salinity_fit,
+        "collect_observations",
+        lambda *a, **k: salinity_fit.CalibrationInput(
+            [(19.03, 4000.0, 6.0), (16.68, 9000.0, 3.0), (19.03, 9000.0, 2.0)],
+            [],
+            records,
+            90,
+            (date(2016, 1, 1), date(2026, 8, 22)),
+            90,
+            n_off_axis=1,
+            stem_field_missing=True,
+        ),
+    )
+    result = CliRunner().invoke(app, ["salinity", "calibrate", "winyah-bay"])
+    out = re.sub(r"\s+", " ", re.sub(r"\x1b\[[0-9;]*m", "", result.output))
+
+    assert "1 station" in out
+    assert "stem field not built" in out.lower()
+
+
+def test_wqp_stations_enter_as_individual_grab_samples_not_daily_means(monkeypatch):
+    """WQP samples are single grabs -- a one-sample day fails the 40-reading
+    gate in `daily_means_and_swings`, correctly. They must enter the fit
+    directly, each paired with its own day's composite discharge, keeping
+    the exact timestamp so it resolves to its own tidal phase."""
+    from datetime import datetime
+
+    fishery = load_fishery("winyah-bay")
+    d1, d2 = date(2026, 5, 1), date(2026, 5, 2)
+
+    class _NerrsStore:
+        def salinity_series(self, station):
+            return []
+
+    monkeypatch.setattr(salinity_fit, "_open_store", lambda slug: _NerrsStore())
+    monkeypatch.setattr(salinity_fit, "_store_distances", lambda slug, fishery, sites: {})
+    monkeypatch.setattr(
+        salinity_fit, "_usgs_inputs",
+        lambda *a, **k: ({}, {d1: 4000.0, d2: 4200.0}, [], {}),
+    )
+    monkeypatch.setattr(
+        salinity_fit, "_wqp_sites",
+        lambda slug: {
+            "WB-06": [
+                (datetime(2026, 5, 1, 15, 0, tzinfo=UTC), 5.0),
+                (datetime(2026, 5, 2, 16, 0, tzinfo=UTC), 6.0),
+            ],
+            "OFFSTA": [(datetime(2026, 5, 1, 12, 0, tzinfo=UTC), 30.0)],
+            "NOCOORD": [(datetime(2026, 5, 1, 12, 0, tzinfo=UTC), 9.0)],
+        },
+    )
+    monkeypatch.setattr(
+        "tidescout.sources.wqp.station_coords",
+        lambda slug: {"WB-06": (-79.30, 33.30), "OFFSTA": (-79.10, 33.50)},
+    )
+    monkeypatch.setattr(
+        salinity_fit, "site_distances_km",
+        lambda slug, fishery, sites: {s: (10.28, 5.0) for s in sites},
+    )
+    stem = {"WB-06": 0.5, "OFFSTA": 9.9}
+    monkeypatch.setattr(
+        salinity_fit, "station_stem_km",
+        lambda slug, fishery, sites: {s: stem.get(s, float("nan")) for s in sites},
+    )
+
+    data = salinity_fit.collect_observations("winyah-bay", fishery, cache=None, days=90)
+
+    assert sorted(data.observations) == sorted(
+        [(10.28, 4000.0, 5.0), (10.28, 4200.0, 6.0)]
+    )
+    notes = {r.site: r.note for r in data.sites}
+    assert "WB-06" in notes and notes["WB-06"] == ""
+    assert "axis" in notes["OFFSTA"].lower()
+    assert "coordinates" in notes["NOCOORD"].lower()

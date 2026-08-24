@@ -36,14 +36,30 @@ class WaterSensor(BaseModel):
     kind: Literal["usgs", "coops", "ndbc", "cdmo"]
     station: str
     params: list[str] = []
-    # True when the station sits on a branch the 1-D along-estuary coordinate
-    # cannot place: it is stored, served and citable like any other, but the
-    # salt-intrusion fit must not read it. Measured on Winyah 2026-08-23 --
-    # North Inlet's three stations average 31.4-32.0 ppt where the bay's own
-    # three average 6.0-9.6, at distances that order them the wrong way round
-    # (North Inlet 12.88-14.18 km, the bay 16.68-19.03). Both branches
-    # respond to discharge, so this is not "no signal"; it is a 25 ppt
-    # baseline offset that one distance axis cannot carry.
+    # True when a human has independently determined this station sits on a
+    # branch the 1-D along-estuary coordinate cannot place: it is stored,
+    # served and citable like any other, but the salt-intrusion fit must not
+    # read it. Measured on Winyah 2026-08-23 -- North Inlet's three stations
+    # average 31.4-32.0 ppt where the bay's own three average 6.0-9.6, at
+    # distances that order them the wrong way round (North Inlet 12.88-14.18
+    # km, the bay 16.68-19.03). Both branches respond to discharge, so this
+    # is not "no signal"; it is a 25 ppt baseline offset that one distance
+    # axis cannot carry.
+    #
+    # As of Task 5 (salinity anchoring), this flag is no longer what DECIDES
+    # exclusion -- `pipeline.salinity_fit.is_off_axis` computes that from the
+    # station's actual distance to the estuary's main stem, walked through
+    # water (`pipeline.estuary.build_stem_distance_field`). This field is now
+    # an OVERRIDE that can only ever EXCLUDE, never re-admit a station the
+    # computed screen already excluded: `is_off_axis(stem_km, declared=True)`
+    # is unconditionally `True` regardless of `stem_km`. A hand flag able to
+    # force a station back IN would reintroduce exactly the hand-marking this
+    # computed screen exists to remove; one that can only exclude is a safety
+    # valve for geometry the criterion gets wrong (e.g. a station on a branch
+    # too short or too oddly shaped for the stem walk to catch). Leave this
+    # `False` unless you have independently confirmed the station is off the
+    # main stem -- the computed screen will still catch it if the geometry
+    # agrees, and will report it excluded either way.
     off_axis: bool = False
 
 
