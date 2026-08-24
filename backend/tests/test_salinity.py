@@ -742,11 +742,11 @@ NAN = float("nan")
         ([(date(2026, 5, 1), 4.0)], True, 10.0, 12.0, True, ""),
         ([(date(2026, 5, 1), 4.0)], True, 10.0, 900.0, False, "outside the domain"),
         # An unlocated site is never QUERIED, so it arrives with no rows. The
-        # old order tested `not rows` first and reported "no 00480 history" --
-        # a data-availability claim about a site whose problem is that nobody
-        # knows where it is.
+        # old order tested `not rows` first and reported "no salinity
+        # history" -- a data-availability claim about a site whose problem
+        # is that nobody knows where it is.
         ([], False, NAN, float("inf"), False, "no coordinates"),
-        ([], True, 10.0, 12.0, False, "no 00480 history"),
+        ([], True, 10.0, 12.0, False, "no salinity history"),
         ([(date(2026, 5, 1), 4.0)], True, NAN, 12.0, False, "no water route"),
     ],
 )
@@ -1055,6 +1055,49 @@ def test_off_axis_stations_are_still_reported_as_sites(monkeypatch):
         assert "off" in notes[station].lower() or "branch" in notes[station].lower()
 
 
+def test_store_station_with_no_known_position_reports_no_coordinates_not_off_axis(monkeypatch):
+    """A store sensor absent from `cdmo.NIW_STATION_COORDS_LONLAT` has no
+    surveyed position at all. Before this guard, `is_off_axis` read the
+    resulting NaN stem distance as "off the axis" -- the wrong REASON: NaN
+    there means "nobody knows where this sonde is," not "a real branch the
+    coordinate cannot place." `located` must win, the same guard the WQP
+    path already applies over `wqp_known` (see `wqp_off_axis`). Not
+    reachable on Winyah today (every declared store station has a surveyed
+    position) but simulated here for the stamp-out fisheries the spec names
+    (Charleston, Awendaw, Murrells Inlet), whose sondes will not all be in
+    that table."""
+    from datetime import datetime, timedelta
+
+    from tidescout.config import load_fishery
+
+    fishery = load_fishery("winyah-bay")
+
+    class _Store:
+        def salinity_series(self, station):
+            base = datetime(2026, 5, 1, 4, 0, tzinfo=UTC)
+            return [(base + timedelta(minutes=15 * i), 10.0 + (i % 8)) for i in range(96)]
+
+    monkeypatch.setattr(salinity_fit, "_open_store", lambda slug: _Store())
+    # No known position for ANY store station -- simulates a fishery whose
+    # sondes are not in `cdmo.NIW_STATION_COORDS_LONLAT`.
+    monkeypatch.setattr(salinity_fit, "_store_coords", lambda sites: {})
+    monkeypatch.setattr(salinity_fit, "_store_distances", lambda slug, fishery, sites: {})
+    monkeypatch.setattr(
+        salinity_fit, "_usgs_inputs",
+        lambda *a, **k: ({}, {date(2026, 5, 1): 4000.0, date(2026, 5, 2): 4200.0}, [], {}),
+    )
+    monkeypatch.setattr(salinity_fit, "_wqp_sites", lambda slug: {})
+
+    data = salinity_fit.collect_observations("winyah-bay", fishery, cache=None, days=90)
+    notes = {r.site: r.note for r in data.sites}
+
+    # Declared off_axis=False in the YAML, and now unlocatable -- must
+    # report "no coordinates", never "off axis".
+    for station in ("WYSS1", "NIWWBWQ", "NIWTAWQ"):
+        assert "coordinates" in notes[station].lower()
+        assert "axis" not in notes[station].lower()
+
+
 def test_calibrate_reports_both_sources_not_just_the_usgs_window(monkeypatch):
     """The header claimed "00480 sensors over the last N days". Once the
     NERRS store contributes its full held history that is wrong twice over:
@@ -1121,6 +1164,35 @@ def test_a_station_with_no_stem_distance_is_excluded_not_admitted():
     """NaN means the cell has no water route to the stem at all. Admitting
     it would put an unplaceable station into the fit."""
     assert salinity_fit.is_off_axis(stem_km=float("nan"), declared=False) is True
+
+
+def test_stem_command_reports_missing_distance_field_instead_of_a_traceback(monkeypatch):
+    """`build_stem_distance_field` reads the along-estuary field via
+    `load_distance_field`, which raises `FileNotFoundError` (with its own
+    "run `tidescout salinity field` first" guidance) until `salinity field`
+    has run. `salinity calibrate` already catches this and prints it in red
+    rather than a raw traceback; `salinity stem` did not."""
+    from typer.testing import CliRunner
+
+    from tidescout.cli import app
+    from tidescout.pipeline import estuary
+
+    def _raise(slug, fishery):
+        raise FileNotFoundError(
+            f"no along-estuary distance field at /fake/estuary_km.npy -- run "
+            f"`tidescout salinity field {slug}` first"
+        )
+
+    monkeypatch.setattr(estuary, "build_stem_distance_field", _raise)
+    result = CliRunner().invoke(app, ["salinity", "stem", "winyah-bay"])
+
+    assert result.exit_code == 1
+    # Rich wraps to the terminal width and would split this phrase across
+    # lines; collapse whitespace so the assertion tests content, not layout
+    # (same technique `test_calibrate_refuses_and_names_every_rejected_site`
+    # already uses).
+    out = re.sub(r"\s+", " ", re.sub(r"\x1b\[[0-9;]*m", "", result.output))
+    assert "tidescout salinity field winyah-bay" in out
 
 
 def test_station_stem_km_agrees_with_the_built_field():
@@ -1204,6 +1276,52 @@ def test_stem_field_missing_falls_back_to_the_declared_flag_not_a_crash(monkeypa
     for station in ("NIWCBWQ", "NIWOLWQ", "NIWDCWQ"):
         assert "axis" in notes[station].lower()
     assert data.observations, "on-axis stations must still reach the fit"
+
+
+def test_stem_km_or_fallback_distinguishes_a_missing_bathymetry_raster(monkeypatch):
+    """`station_stem_km` reads the bathymetry raster too (via `grid_spec` ->
+    `read_bathy`), on a machine that has not run `tidescout bathy build`
+    either -- a DIFFERENT missing file than the stem field, surfacing as the
+    same bare `FileNotFoundError`. Silently degrading for that one too would
+    tell the caller to run `tidescout salinity stem`, which calls this exact
+    same `grid_spec` and would fail identically -- the wrong remedy. Only
+    `load_stem_distance_field`'s own, distinctively-worded error should be
+    read as "the stem field itself is missing"."""
+    fishery = load_fishery("winyah-bay")
+
+    def _raise_bathy(*a, **k):
+        raise FileNotFoundError(
+            "[Errno 2] No such file or directory: '.../bathy_meta.json'"
+        )
+
+    monkeypatch.setattr(salinity_fit, "station_stem_km", _raise_bathy)
+
+    with pytest.raises(FileNotFoundError) as excinfo:
+        salinity_fit._stem_km_or_fallback("winyah-bay", fishery, {"WYSS1": (-79.29, 33.35)})
+
+    assert "bathymetry raster" in str(excinfo.value)
+    assert "tidescout bathy build winyah-bay" in str(excinfo.value)
+
+
+def test_stem_km_or_fallback_still_degrades_for_the_stem_field_itself(monkeypatch):
+    """The distinguishing fix above must not break the ORIGINAL fallback --
+    `load_stem_distance_field`'s own error still degrades to `({}, False)`,
+    not a re-raise."""
+    fishery = load_fishery("winyah-bay")
+
+    def _raise_stem(*a, **k):
+        raise FileNotFoundError(
+            "no distance-to-stem field at /fake/stem_km.npy -- run "
+            "`tidescout salinity stem winyah-bay` first"
+        )
+
+    monkeypatch.setattr(salinity_fit, "station_stem_km", _raise_stem)
+
+    result = salinity_fit._stem_km_or_fallback(
+        "winyah-bay", fishery, {"WYSS1": (-79.29, 33.35)}
+    )
+
+    assert result == ({}, False)
 
 
 def test_calibrate_reports_off_axis_count_and_stem_fallback(monkeypatch):
@@ -1304,6 +1422,64 @@ def test_wqp_stations_enter_as_individual_grab_samples_not_daily_means(monkeypat
     assert "WB-06" in notes and notes["WB-06"] == ""
     assert "axis" in notes["OFFSTA"].lower()
     assert "coordinates" in notes["NOCOORD"].lower()
+    assert data.n_wqp_no_discharge_day == 0
+
+
+def test_wqp_rows_with_no_composite_discharge_day_are_counted_not_silent(monkeypatch):
+    """`composite_discharge_by_day` requires every river gauge to report a
+    day before it appears in `by_day` -- the day any gauge's own record
+    starts later than a WQP station's earliest sample, that sample's day is
+    simply absent from `by_day`. That drop must be counted, not silent (this
+    codebase's reject-and-report rule), and the site table must not claim a
+    station contributed a row it did not: `n_days` is the count of rows that
+    COULD reach the fit, not the raw series length."""
+    from datetime import datetime
+
+    fishery = load_fishery("winyah-bay")
+    d1 = date(2026, 5, 1)
+
+    class _NerrsStore:
+        def salinity_series(self, station):
+            return []
+
+    monkeypatch.setattr(salinity_fit, "_open_store", lambda slug: _NerrsStore())
+    monkeypatch.setattr(salinity_fit, "_store_distances", lambda slug, fishery, sites: {})
+    monkeypatch.setattr(
+        salinity_fit, "_usgs_inputs",
+        lambda *a, **k: ({}, {d1: 4000.0}, [], {}),
+    )
+    monkeypatch.setattr(
+        salinity_fit, "_wqp_sites",
+        lambda slug: {
+            "WB-06": [
+                (datetime(2026, 5, 1, 15, 0, tzinfo=UTC), 5.0),
+                # 2026-05-03 has no composite discharge under the by_day
+                # mock above -- simulates a river gauge whose own record
+                # starts later than this station's earliest sample.
+                (datetime(2026, 5, 3, 16, 0, tzinfo=UTC), 6.0),
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "tidescout.sources.wqp.station_coords",
+        lambda slug: {"WB-06": (-79.30, 33.30)},
+    )
+    monkeypatch.setattr(
+        salinity_fit, "site_distances_km",
+        lambda slug, fishery, sites: {s: (10.28, 5.0) for s in sites},
+    )
+    monkeypatch.setattr(
+        salinity_fit, "station_stem_km",
+        lambda slug, fishery, sites: dict.fromkeys(sites, 0.5),
+    )
+
+    data = salinity_fit.collect_observations("winyah-bay", fishery, cache=None, days=90)
+
+    assert data.n_wqp_no_discharge_day == 1
+    assert data.observations == [(10.28, 4000.0, 5.0)]
+    site = next(r for r in data.sites if r.site == "WB-06")
+    assert site.used is True
+    assert site.n_days == 1, "the undischarged row must not inflate n_days"
 
 
 # -- Cross-store co-location: WQP-to-STORE only, never WQP-to-WQP -----------
@@ -1564,3 +1740,60 @@ def test_measured_coverage_does_not_imply_the_config_was_fitted():
     )
     assert f.coverage[0] == Coverage.MEASURED
     assert f.fitted is False
+
+
+# -- Spec section 4c: the raw nearest-observation distance beside `coverage` -
+# `coverage` is an ordinal derived from this number; the gate report needed
+# the number itself ("North Jetty -- nearest observation 1.862 km away") and
+# had to compute it in an ad-hoc script because it was never exposed.
+
+
+def test_nearest_observation_km_matches_a_hand_computed_value():
+    from tidescout.engine.salinity import nearest_observation_km
+
+    out = nearest_observation_km(np.array([4.442, 13.052, 2.580]), observed_km=[4.442, 13.052])
+    assert out[0] == pytest.approx(0.0)
+    assert out[1] == pytest.approx(0.0)
+    assert out[2] == pytest.approx(1.862)
+
+
+def test_nearest_observation_km_is_nan_with_no_observations():
+    """No 'nearest' of an empty set -- NaN is the honest answer, not 0.0
+    (which would falsely claim a cell sits exactly on an observation) or inf
+    (which would silently poison arithmetic done on the result)."""
+    from tidescout.engine.salinity import nearest_observation_km
+
+    out = nearest_observation_km(np.array([5.0, 15.0]), observed_km=[])
+    assert np.all(np.isnan(out))
+
+
+def test_nearest_observation_km_matches_ppt_shape_for_a_scalar_distance():
+    """Same 0-d-scalar contract `classify_coverage`/`coverage` already hold,
+    so `SalinityField.nearest_observed_km` stays aligned with `.ppt` even
+    for a bare scalar evaluation."""
+    from tidescout.engine.salinity import nearest_observation_km, salinity_at
+
+    out = nearest_observation_km(10.0, observed_km=[5.56, 10.28])
+    assert out.shape == salinity_at(10.0, 4000.0, 0.25, CFG).shape == ()
+
+
+def test_salinity_field_carries_nearest_observed_km_beside_coverage():
+    from tidescout.engine.salinity import salinity_field
+
+    d = np.array([2.58, 5.56, 13.05])
+    f = salinity_field(d, 4000.0, 0.25, CFG, observed_km=[5.56, 10.28])
+    assert f.nearest_observed_km.shape == f.ppt.shape == f.coverage.shape
+    assert f.nearest_observed_km[0] == pytest.approx(abs(2.58 - 5.56))
+    assert f.nearest_observed_km[1] == pytest.approx(0.0)
+
+
+def test_salinity_field_nearest_observed_km_is_nan_with_no_observed_km():
+    """Mirrors `test_salinity_field_defaults_to_all_extrapolated_with_no_
+    observed_km`: a caller that does not know what has been observed gets
+    the honest, empty-set answer for BOTH the ordinal and its raw
+    companion, not a crash and not an optimistic default."""
+    from tidescout.engine.salinity import salinity_field
+
+    x = np.array([2.0, 10.0, 30.0])
+    f = salinity_field(x, cfs=4000.0, phase=0.25, cfg=CFG)
+    assert np.all(np.isnan(f.nearest_observed_km))

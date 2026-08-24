@@ -390,7 +390,16 @@ def salinity_stem(slug: str) -> None:
     )
 
     fishery = load_fishery(slug)
-    path = build_stem_distance_field(slug, fishery)
+    try:
+        path = build_stem_distance_field(slug, fishery)
+    except FileNotFoundError as exc:
+        # Matches `salinity calibrate`'s own pattern: `build_stem_distance_
+        # field` reads the along-estuary field via `load_distance_field`,
+        # which raises this (with its own "run `tidescout salinity field`
+        # first" guidance) when `salinity field` has not run yet. Without
+        # this, a fresh checkout got a raw traceback here instead.
+        console.print(f"[red]{exc}[/red]")
+        raise typer.Exit(1) from exc
     d = load_stem_distance_field(slug)
     console.print(f"distance-to-stem field -> {path}")
     console.print(
@@ -471,6 +480,15 @@ def salinity_calibrate(
         f"already-declared station (within {WQP_COLOCATION_RADIUS_M:.0f} m) -- "
         "the same physical site's record, not a second one."
     )
+    if data.n_wqp_no_discharge_day:
+        console.print(
+            f"[yellow]{data.n_wqp_no_discharge_day} WQP grab(s) excluded[/yellow] -- no "
+            "composite discharge exists for that day (e.g. a river gauge's own record "
+            "starts later than the station's earliest sample). Counted per-row rather "
+            "than silently dropped; a station can still be admitted ('used: yes' above) "
+            "while some of its own rows were excluded this way -- `n_days`/`ppt range` in "
+            "the site table above already exclude them."
+        )
     if data.stem_field_missing:
         console.print(
             f"[yellow]distance-to-stem field not built[/yellow] -- run "
@@ -957,36 +975,18 @@ def salinity_import_wqp(slug: str) -> None:
         )
 
 
-@salinity_app.command("citation")
-def salinity_citation(slug: str) -> None:
-    """Print the NERRS citation, acknowledgement, and disclaimer this data
-    store actually earns -- generated from what is held, not hardcoded.
+def _print_citation_block(label: str, c) -> None:
+    """One store's `Citation`, formatted -- shared so the NERRS store and
+    the WQP store (see `salinity_citation`) print identically rather than
+    two hand-maintained copies drifting apart.
 
-    WYSS1 (NDBC-mirrored) and every CDMO station this store has ever
-    imported are NERRS System-wide Monitoring Program data; the citation
-    obligation applies from the first row on, not only once a CDMO export
-    arrives (see `sources/ndbc.py`'s "PROVENANCE AND CITATION"). Anything
-    that later publishes or displays a value derived from this store
-    should call `NdbcStore.citation()` too -- this command is the human-
-    readable front of the same function.
+    `soft_wrap=True`: this is citation text a human may copy into a
+    publication -- Rich hard-wrapping it mid-word at whatever the
+    terminal's column width happens to be would make that copy awkward
+    (and, in the CLI test suite, made a substring assertion straddle an
+    inserted newline).
     """
-    from tidescout.config import load_fishery
-    from tidescout.sources.ndbc import default_store
-
-    # Validated the same way every sibling `salinity` command validates
-    # `slug` -- without this, a typo'd slug would silently create a fresh,
-    # empty `data/<typo>/ndbc.sqlite` rather than failing the way `salinity
-    # field`/`salinity calibrate`/`salinity import-cdmo` all do.
-    fishery = load_fishery(slug)
-    store = default_store(slug)
-    c = store.citation()
-
-    # `soft_wrap=True`: this is citation text a human may copy into a
-    # publication -- Rich hard-wrapping it mid-word at whatever the
-    # terminal's column width happens to be would make that copy awkward
-    # (and, in the CLI test suite, made a substring assertion straddle an
-    # inserted newline).
-    console.print(f"[bold]{fishery.name}[/bold]")
+    console.print(f"\n[bold]{label}[/bold]")
     console.print("[bold]Citation[/bold]")
     console.print(c.text, soft_wrap=True)
     console.print("\n[bold]Acknowledgement[/bold]")
@@ -1003,6 +1003,61 @@ def salinity_citation(slug: str) -> None:
             "\n[yellow]No provenance is on record for this store -- data may predate "
             "provenance tracking, or was written by a raw append call that bypassed "
             "it. The access date above is a placeholder, not a real fact.[/yellow]"
+        )
+
+
+@salinity_app.command("citation")
+def salinity_citation(slug: str) -> None:
+    """Print the citation, acknowledgement, and disclaimer this fishery's
+    data actually earns -- generated from what is held, not hardcoded.
+
+    WYSS1 (NDBC-mirrored) and every CDMO station the NERRS store has ever
+    imported are NERRS System-wide Monitoring Program data; the citation
+    obligation applies from the first row on, not only once a CDMO export
+    arrives (see `sources/ndbc.py`'s "PROVENANCE AND CITATION").
+
+    WQP rows (`tidescout salinity import-wqp`) live in a SEPARATE store
+    file (`data/<slug>/wqp.sqlite`) -- see `sources/wqp.py`'s `default_store`
+    for why: folding them into the NERRS store would make its citation
+    overclaim SC DES/SCDHEC/EPA data as NERRS. That store's own attribution
+    is therefore printed as its own block below, when it exists -- SCDHEC,
+    SC DES and Coastal Carolina University supply the large majority of this
+    fishery's distinct along-estuary distances (56 of 58 on Winyah Bay) and
+    are owed the same footing as NERRS, not a citation command that only
+    ever looked at the other file. A fishery that has never run `import-wqp`
+    gets no WQP block at all -- skipped, not errored, and the check for its
+    existence happens before opening it so a mere citation read never
+    creates an empty `wqp.sqlite` as a side effect (the same posture
+    `wqp.station_coords` already takes).
+
+    Anything that later publishes or displays a value derived from either
+    store should call `NdbcStore.citation()` too -- this command is the
+    human-readable front of the same function, once per store held.
+    """
+    from tidescout.config import load_fishery
+    from tidescout.paths import fishery_data_dir
+    from tidescout.sources import wqp
+    from tidescout.sources.ndbc import default_store
+
+    # Validated the same way every sibling `salinity` command validates
+    # `slug` -- without this, a typo'd slug would silently create a fresh,
+    # empty `data/<typo>/ndbc.sqlite` rather than failing the way `salinity
+    # field`/`salinity calibrate`/`salinity import-cdmo` all do.
+    fishery = load_fishery(slug)
+    console.print(f"[bold]{fishery.name}[/bold]")
+
+    store = default_store(slug)
+    _print_citation_block("NERRS store (ndbc.sqlite)", store.citation())
+
+    wqp_path = fishery_data_dir(slug) / "wqp.sqlite"
+    if wqp_path.exists():
+        wqp_store = wqp.default_store(slug)
+        _print_citation_block("Water Quality Portal store (wqp.sqlite)", wqp_store.citation())
+    else:
+        console.print(
+            "\n[dim]No WQP store for this fishery yet (`wqp.sqlite` does not exist) -- "
+            f"run `tidescout salinity import-wqp {slug}` first if this fishery has WQP "
+            "anchors.[/dim]"
         )
 
 

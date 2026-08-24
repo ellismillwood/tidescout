@@ -85,12 +85,31 @@ can state that the model does not reproduce the estuary. Condition number
 12.2, every 1-sigma below its value, nothing at a bound -- numerically healthy
 and reproducing nothing, which is exactly what `_warnings` exists to surface.
 
-The reasons are structural and more data of this kind will not fix them: a
-depth-averaged single layer cannot hold a +3.30 ppt median stratification at
-one distance; one distance axis cannot carry North Inlet's 25 ppt baseline
-offset (hence `WaterSensor.off_axis`); and the bay's own observations span
-2.35 km against a 14.48 km fitted front width, entirely ABOVE the 2.58-13.05
-km reach where the fishing spots are.
+The reasons were structural and more data of THIS KIND (more NERRS-only
+daily means, all still landing at the same 16.68/19.03 km) would not have
+fixed them: a depth-averaged single layer cannot hold a +3.30 ppt median
+stratification at one distance; one distance axis cannot carry North Inlet's
+25 ppt baseline offset (at the time this was decided by hand, via
+`WaterSensor.off_axis`); and the bay's own observations spanned 2.35 km
+against a 14.48 km fitted front width, entirely ABOVE the 2.58-13.05 km
+reach where the fishing spots are.
+
+READ BOTH OF THOSE AS HISTORY TOO -- this branch changed each one:
+
+* The off-axis decision is no longer hand-marked. `pipeline.salinity_fit.
+  is_off_axis` now COMPUTES it from a station's distance to the estuary's
+  main stem, walked through water; `WaterSensor.off_axis` is left as an
+  override that can only ever EXCLUDE, never re-admit a station the
+  computed screen already excluded -- see that field's own docstring in
+  `models.py`.
+* The 2.35 km span above was NERRS-only. WQP anchoring (this branch,
+  2026-08-24) widened the observed span to 28.50 km across 58 distinct
+  distances (fitted front width now 14.68 km, up from 14.48) -- the
+  DISTANCE-COVERAGE cause is resolved and `DISTANCE COVERAGE TOO THIN` no
+  longer fires. The stratification and branch-offset causes are untouched
+  by this and still apply; `fitted` stays False, now for the model-form
+  reason alone -- see
+  `.superpowers/sdd/2026-08-24-salinity-anchoring/gate-report.md`.
 """
 
 from collections.abc import Mapping, Sequence
@@ -629,11 +648,13 @@ def build_site_record(
     real one.
 
     Order matters and is the whole point of this being a function. A site
-    whose coordinates USGS never supplied is never queried for history
-    either, so it arrives here with `rows == []` -- and a naive "no rows
-    means no history" test would report a data-availability claim about a
-    site whose actual problem is that nobody knows where it is. `located` is
-    therefore tested FIRST, before anything that depends on having asked.
+    whose coordinates were never discovered -- by USGS, WQP, or a store
+    station's own surveyed-position table, this function is shared across
+    all three -- is never queried for history either, so it arrives here
+    with `rows == []`. A naive "no rows means no history" test would report
+    a data-availability claim about a site whose actual problem is that
+    nobody knows where it is. `located` is therefore tested FIRST, before
+    anything that depends on having asked.
 
     `colocated` is tested before EVERYTHING else, including `off_axis`: a
     WQP station sitting on the same physical platform as an already-declared
@@ -659,11 +680,16 @@ def build_site_record(
         # modelling decision.
         note = "off the salt-intrusion axis -- a separate branch the 1-D coordinate cannot place"
     elif not located:
-        note = "USGS gave no coordinates for this site"
+        # Source-neutral on purpose: this function is shared by USGS, NERRS/
+        # NDBC/CDMO store, and WQP sites alike, and "USGS gave no
+        # coordinates" was a false sentence for the other two.
+        note = "no coordinates known for this site"
     elif not np.isfinite(distance_km):
         note = "no water route to the sea from the nearest in-domain cell"
     elif not rows:
-        note = "no 00480 history"
+        # Also source-neutral: "00480" is USGS's own parameter code and was
+        # a false sentence for a NERRS/store or WQP site with no history.
+        note = "no salinity history for this site"
     elif snap_gap_m > max_snap_m:
         note = f"outside the domain by {snap_gap_m:.0f} m (limit {max_snap_m:.0f} m)"
     else:
@@ -941,6 +967,15 @@ class CalibrationInput:
     # `WQP_COLOCATION_RADIUS_M`. Counted the same way as `n_off_axis`, from
     # the site records rather than tracked separately.
     n_colocated: int = 0
+    # How many individual WQP grab rows were dropped for landing on a day no
+    # composite discharge exists for (`composite_discharge_by_day` requires
+    # every river gauge to report that day; a station's own record can start
+    # earlier than a gauge's). Unlike `n_off_axis`/`n_colocated` this cannot
+    # be recovered from a site's own note -- it is a per-ROW rejection inside
+    # an otherwise-USED station, not a whole-station exclusion -- so it is
+    # tracked directly rather than derived. See where it is incremented in
+    # `collect_observations`, and this codebase's reject-and-report rule.
+    n_wqp_no_discharge_day: int = 0
 
 
 def daily_means_and_swings(
@@ -1022,12 +1057,28 @@ def _stem_km_or_fallback(
     declared flag to fall back to. The `bool` is carried onto
     `CalibrationInput.stem_field_missing` so the CLI reports the fallback
     rather than it looking like a clean, fully-screened run.
+
+    `station_stem_km` also reads the bathymetry raster (via `grid_spec` ->
+    `read_bathy`), on a machine that has not run `tidescout bathy build`
+    either -- a DIFFERENT missing file that surfaces as the same bare
+    `FileNotFoundError`. Degrading silently for that one too would tell the
+    caller to run `tidescout salinity stem`, which calls this exact same
+    `grid_spec` and would fail identically -- the wrong remedy for the real
+    problem. Only `load_stem_distance_field`'s own, distinctively-worded
+    error is treated as "the stem field itself is missing"; anything else is
+    re-raised with the correct remedy named instead of being mislabelled.
     """
     if not sites:
         return {}, True
     try:
         return station_stem_km(slug, fishery, sites), True
-    except FileNotFoundError:
+    except FileNotFoundError as exc:
+        if "distance-to-stem field" not in str(exc):
+            raise FileNotFoundError(
+                f"{exc} -- this is the bathymetry raster, not the "
+                f"distance-to-stem field; run `tidescout bathy build {slug}` "
+                f"first, not `tidescout salinity stem {slug}`"
+            ) from exc
         return {}, False
 
 
@@ -1273,9 +1324,22 @@ def collect_observations(
         rows = sorted(store_means.get(w.station, {}).items())
         off_axis = (
             is_off_axis(store_stem.get(w.station, float("nan")), w.off_axis)
-            if store_stem_ok
-            # No computed distance available -- fall back to exactly the
-            # declared flag, the behaviour before this task existed.
+            if store_stem_ok and w.station in store_coords
+            # Either no computed distance available at all, or -- the guard
+            # `w.station in store_coords` added here -- no SURVEYED POSITION
+            # for this station in the first place (not in
+            # `cdmo.NIW_STATION_COORDS_LONLAT`). Without it `store_stem.get`
+            # would default to NaN and `is_off_axis` reads NaN as "off the
+            # axis", which is the wrong REASON: NaN there means "nobody
+            # knows where this sonde is," not "a real branch the coordinate
+            # cannot place." Falling back to the declared flag alone (same
+            # posture as the stem-field-missing case) lets `located` below
+            # name the true failure instead -- the same guard the WQP path
+            # already applies over `wqp_known` (see `wqp_off_axis` below).
+            # Not reachable on Winyah (every declared store station has a
+            # surveyed position), but the stamp-out fisheries the spec names
+            # (Charleston, Awendaw, Murrells Inlet) will have sondes outside
+            # that table.
             else w.off_axis
         )
         record = build_site_record(
@@ -1311,7 +1375,17 @@ def collect_observations(
     for site, series in sorted(wqp_series.items()):
         located = site in wqp_known
         dist, gap = wqp_dist.get(site, (float("nan"), float("inf")))
-        rows = [(ts.astimezone(tz).date(), ppt) for ts, ppt in series]
+        # Filtered to days a composite discharge actually exists for -- the
+        # same gate the observation-building loop below applies (see
+        # `n_wqp_no_discharge_day`). Reporting every raw row here regardless
+        # let a station read `used=yes` with a nonzero `n_days` while every
+        # one of those rows was silently dropped downstream for lacking a
+        # paired discharge day -- asserting more than was true.
+        rows = [
+            (ts.astimezone(tz).date(), ppt)
+            for ts, ppt in series
+            if ts.astimezone(tz).date() in by_day
+        ]
         record = build_site_record(
             site,
             rows,
@@ -1363,6 +1437,7 @@ def collect_observations(
     # is scored at ITS OWN phase rather than the daily-mean phase -- a task
     # in its own right, not this one.
     wqp_obs_start = len(observations)
+    n_wqp_no_discharge_day = 0
     for site, series in sorted(wqp_series.items()):
         if site not in wqp_usable:
             continue
@@ -1371,6 +1446,15 @@ def collect_observations(
             day = ts.astimezone(tz).date()
             if day in by_day:
                 observations.append((dist, by_day[day], ppt))
+            else:
+                # No composite discharge for this grab's day -- e.g. the day
+                # a river gauge's own record starts later than this WQP
+                # station's earliest sample. Counted rather than silently
+                # dropped, per this module's reject-and-report rule; the
+                # site-record loop above already filters these same rows out
+                # of `n_days`, so a station cannot read `used=yes` while
+                # actually contributing zero rows without it showing here.
+                n_wqp_no_discharge_day += 1
     sources += ["wqp"] * (len(observations) - wqp_obs_start)
 
     swing_days = min(days, MAX_IV_DAYS)
@@ -1393,4 +1477,5 @@ def collect_observations(
         observations, swings, records, days, span, swing_days,
         n_off_axis=n_off_axis, stem_field_missing=stem_field_missing,
         observation_sources=sources, n_colocated=n_colocated,
+        n_wqp_no_discharge_day=n_wqp_no_discharge_day,
     )

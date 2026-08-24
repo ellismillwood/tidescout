@@ -104,6 +104,35 @@ class Coverage(StrEnum):
 _COVERAGE_DTYPE = f"<U{max(len(c.value) for c in Coverage)}"
 
 
+def nearest_observation_km(distance_km, observed_km: Sequence[float]) -> np.ndarray:
+    """Per-cell distance, in km, to the NEAREST along-estuary observation.
+
+    The raw number `classify_coverage`'s ordinal is derived from, exposed on
+    its own because a report (e.g. "North Jetty -- nearest observation
+    1.862 km away", spec section 4c) needs the distance itself, not just
+    which coverage bucket it falls into.
+
+    Output shape matches `distance_km`'s -- including a bare scalar, which
+    comes back 0-d, matching `salinity_at`'s own scalar behaviour so
+    `SalinityField.nearest_observed_km` always aligns elementwise with
+    `.ppt` and `.coverage`, the same contract `classify_coverage` holds.
+
+    NaN with no observations supplied -- there is no "nearest" of an empty
+    set. NaN reads honestly as "unknown"; 0.0 would falsely claim a cell
+    sits exactly on an observation, and inf would silently poison a caller
+    doing arithmetic on the result.
+    """
+    d = np.asarray(distance_km, dtype="float64")
+    obs = np.asarray(sorted(observed_km), dtype="float64")
+    if obs.size == 0:
+        return np.full(d.shape, np.nan, dtype="float64")
+    # `d[..., None]` adds a trailing axis so it broadcasts against `obs`
+    # regardless of `d`'s rank (0-d scalar included, where plain `d[:, None]`
+    # would raise); `.reshape(d.shape)` then puts the per-cell minimum back
+    # in `d`'s own shape rather than whatever shape the reduction produced.
+    return np.min(np.abs(d[..., None] - obs), axis=-1).reshape(d.shape)
+
+
 def classify_coverage(
     distance_km, observed_km: Sequence[float], near_km: float = 1.0
 ) -> np.ndarray:
@@ -139,11 +168,10 @@ def classify_coverage(
         return out
     inside = (d >= obs[0]) & (d <= obs[-1])
     out[inside] = str(Coverage.INTERPOLATED)
-    # `d[..., None]` adds a trailing axis so it broadcasts against `obs`
-    # regardless of `d`'s rank (0-d scalar included, where plain `d[:, None]`
-    # would raise); `.reshape(d.shape)` then puts the per-cell minimum back
-    # in `d`'s own shape rather than whatever shape the reduction produced.
-    nearest = np.min(np.abs(d[..., None] - obs), axis=-1).reshape(d.shape)
+    # Reuses `nearest_observation_km` rather than recomputing the same
+    # min-abs-difference here, so the two can never drift apart on what
+    # "nearest" means.
+    nearest = nearest_observation_km(d, obs)
     out[nearest <= near_km] = str(Coverage.MEASURED)
     return out
 
@@ -170,9 +198,14 @@ class SalinityField:
       `coverage=MEASURED` is NOT a trust signal on the computed VALUE --
       see `Coverage`'s docstring for the concrete, currently-live case
       (78.6% MEASURED coexisting with `fitted=False` on all of Winyah Bay).
+    * `nearest_observed_km` -- the RAW distance `coverage` is derived from
+      (spec section 4c). Also per-cell; a report that wants to say "North
+      Jetty -- nearest observation 1.862 km away" needs the number, not just
+      which of the three ordinal buckets it landed in.
 
     Neither `extrapolated` nor `fitted` changes a computed value, and
-    `coverage` changes none either. They ride alongside the numbers.
+    `coverage`/`nearest_observed_km` change none either. They ride alongside
+    the numbers.
     """
 
     ppt: np.ndarray
@@ -187,6 +220,11 @@ class SalinityField:
     # populated -- callers that build a `SalinityField` directly (as several
     # existing tests do) have no need of it.
     coverage: np.ndarray = field(default_factory=lambda: np.array([], dtype=_COVERAGE_DTYPE))
+    # Per-cell distance, in km, to the nearest along-estuary observation --
+    # `coverage`'s raw companion (see `nearest_observation_km`), aligned
+    # elementwise with `.ppt`/`.coverage` the same way. Defaults to empty,
+    # not populated, for the same reason `coverage` does.
+    nearest_observed_km: np.ndarray = field(default_factory=lambda: np.array([], dtype="float64"))
 
 
 def _effective_cfs(cfs: float) -> float:
@@ -266,8 +304,8 @@ def salinity_field(
     which change every time a store is imported, while `cfg` is authored in
     the fishery YAML and is meant to be stable and reviewable. It defaults to
     `()`, so every existing caller keeps working and gets all-EXTRAPOLATED
-    coverage -- the honest answer for a caller that has not said what it
-    observed.
+    coverage (and all-NaN `nearest_observed_km`) -- the honest answer for a
+    caller that has not said what it observed.
     """
     lo, hi = cfg.calibration_range_cfs
     effective_cfs = _effective_cfs(cfs)
@@ -277,4 +315,5 @@ def salinity_field(
         extrapolated=not (lo <= effective_cfs <= hi),
         fitted=cfg.fitted,
         coverage=classify_coverage(distance_km, observed_km),
+        nearest_observed_km=nearest_observation_km(distance_km, observed_km),
     )

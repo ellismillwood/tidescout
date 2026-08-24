@@ -339,8 +339,19 @@ class SalinityConfig(BaseModel):
     # This is deliberately SEPARATE from `salinity_field`'s `extrapolated`,
     # which asks a narrower question: was this DISCHARGE inside the span the
     # fit covered. That flag cannot express "no observation ever constrained
-    # this cell's DISTANCE", which is currently true of every cell in the
-    # bay, so a caller checking only `extrapolated` sees green everywhere.
+    # this cell's DISTANCE" -- true of every cell when this was written
+    # (2026-08-23), so a caller checking only `extrapolated` saw green
+    # everywhere. As of the salinity-anchoring branch (2026-08-24), WQP
+    # anchors mean that is no longer true fishery-wide: `engine.salinity.
+    # classify_coverage` reports 78.7% of Winyah's cells MEASURED or
+    # INTERPOLATED, not EXTRAPOLATED. `extrapolated` still cannot express
+    # per-cell distance coverage -- that is what `SalinityField.coverage`
+    # (and its companion `nearest_observed_km`) exist to carry instead, and
+    # a caller checking only `extrapolated` still cannot see it. `fitted`
+    # remains a property of the CONFIG, identical at every cell -- it says
+    # nothing about coverage even where coverage is now good; see
+    # `engine.salinity.Coverage`'s docstring for the concrete case of
+    # `coverage=MEASURED` coexisting with `fitted=False`.
     fitted: bool = False
 
     @field_validator("calibration_range_cfs")

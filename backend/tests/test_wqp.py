@@ -9,8 +9,10 @@ parser in this repo is trusted until it has met a real file.
 from datetime import UTC, datetime
 from pathlib import Path
 
+import httpx
 import pytest
 
+from tidescout.errors import SourceUnavailable
 from tidescout.sources import wqp
 
 FIXTURE = Path(__file__).parent / "fixtures" / "wqp_results_excerpt.csv"
@@ -106,11 +108,34 @@ def test_an_unknown_unit_is_rejected_and_counted_never_coerced():
 def test_a_bad_status_is_rejected_and_counted():
     """`Preliminary` and `Provisional` are not reviewed and are blocked --
     the same posture cdmo.py takes toward unvetted QAQC flags. A typo in
-    ACCEPTED_STATUSES (e.g. "Historical" -> "Historic") must fail a test,
-    not just silently narrow admission."""
+    ACCEPTED_STATUSES must fail a test, not just silently narrow admission."""
     r = _report()
     assert r.n_bad_status >= 1
     assert "Preliminary" in r.unknown_statuses
+
+
+def test_historical_status_is_rejected_and_counted():
+    """`Historical` is deliberately NOT in ACCEPTED_STATUSES, to match
+    `cdmo.ACCEPTED_FLAGS` blocking flag 4 ("Historical Data: Pre-Auto
+    QAQC") -- the two parsers must not disagree on identically-described
+    pre-auto-QAQC data. Measured 0 of 9,306 real rows carry this status, so
+    this costs nothing on real data; rejected here means counted, not
+    silently dropped."""
+    head = (
+        "MonitoringLocationIdentifier,CharacteristicName,ResultMeasureValue,"
+        "ResultMeasure/MeasureUnitCode,ActivityStartDate,ActivityStartTime/Time,"
+        "ActivityStartTime/TimeZoneCode,ActivityTypeCode,ResultStatusIdentifier,"
+        "ResultDetectionConditionText,ActivityDepthHeightMeasure/MeasureValue,"
+        "ActivityDepthHeightMeasure/MeasureUnitCode"
+    )
+    rows = [
+        head,
+        "S1,Salinity,20.0,ppt,2014-06-12,11:35:00,EDT,Sample-Routine,Historical,,,",
+    ]
+    r = wqp.parse_results(rows)
+    assert r.n_admitted == 0
+    assert r.n_bad_status == 1
+    assert "Historical" in r.unknown_statuses
 
 
 def test_quality_control_activities_are_excluded():
@@ -158,8 +183,9 @@ def test_depth_m_rejects_blank_and_unknown_units():
 def test_a_different_characteristic_is_excluded_and_counted():
     """WQP also serves Specific conductance under a neighbouring
     characteristic; it is a different quantity and not interchangeable
-    with salinity (pipeline/salinity_fit.py:832). Mixing them in would be
-    silent, and dropping the row with no counter would be too."""
+    with salinity (see `pipeline.salinity_fit.collect_observations`'s
+    docstring). Mixing them in would be silent, and dropping the row with
+    no counter would be too."""
     r = _report()
     assert r.n_other_characteristic >= 1
     assert "SYNTH-OTHER-CHARACTERISTIC-STATION" not in {s.station for s in r.samples}
@@ -319,6 +345,38 @@ def test_fetch_stations_builds_a_bbox_query_without_a_key(monkeypatch):
     assert "key" not in seen["params"] and "apiKey" not in seen["params"]
     assert seen.get("raise_for_status_called") is True
     assert text == _Resp.text
+
+
+def test_fetch_results_failure_raises_source_unavailable(monkeypatch):
+    """A non-2xx response must not surface as a bare `httpx.HTTPStatusError`
+    -- WQP is a heavily-loaded federal service and this is an unpaginated
+    full-bbox pull, and a raw traceback here would not be caught by
+    `dayloader.attempt()`'s handler the way every other source's failure is
+    (`ndbc._fetch_text`, `nwi.fetch_page`, `cache.Cache.get_or_fetch` all
+    wrap; this module did not)."""
+
+    class _Resp:
+        def raise_for_status(self):
+            raise httpx.HTTPStatusError("500", request=None, response=None)
+
+    monkeypatch.setattr(wqp.httpx, "get", lambda *a, **k: _Resp())
+
+    with pytest.raises(SourceUnavailable):
+        wqp.fetch_results((-79.45, 33.15, -79.05, 33.60))
+
+
+def test_fetch_stations_failure_raises_source_unavailable(monkeypatch):
+    """Mirrors the results-endpoint fix for its sibling Station endpoint --
+    a network fault, not just a bad status, must also become
+    `SourceUnavailable`."""
+
+    def fake_get(*a, **k):
+        raise httpx.ConnectError("down")
+
+    monkeypatch.setattr(wqp.httpx, "get", fake_get)
+
+    with pytest.raises(SourceUnavailable):
+        wqp.fetch_stations((-79.45, 33.15, -79.05, 33.60))
 
 
 def test_parse_stations_parses_a_real_station_export():

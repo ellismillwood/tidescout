@@ -35,13 +35,19 @@ from datetime import UTC, datetime, timedelta, timezone
 
 import httpx
 
+from tidescout.errors import SourceUnavailable
 from tidescout.paths import fishery_data_dir
 from tidescout.sources.ndbc import NdbcStore, Observation
 
 # The WQP characteristic this module reads, and the ONLY one it will read.
-# WQP also serves "Specific conductance" and "Conductivity"; `pipeline/salinity_fit.py:832`
+# WQP also serves "Specific conductance" and "Conductivity"; the "TWO SOURCES"
+# paragraph in `pipeline.salinity_fit.collect_observations`'s own docstring
 # already holds the line that specific conductance is a different quantity and
 # is not interchangeable with salinity. Mixing them here would be silent.
+# Cited by name, not line number -- a line number goes stale the moment
+# either file grows or shrinks above it (this exact citation drifted once
+# already, from `is_off_axis`'s docstring to here, across one intervening
+# task).
 CHARACTERISTIC = "Salinity"
 
 # Unit code -> multiplier onto psu. `0/00` is per-mille, numerically identical
@@ -89,7 +95,19 @@ _MAX_PLAUSIBLE_PSU = 45.0
 # `ResultStatusIdentifier` values admitted. "Final", "Accepted" and "Validated"
 # are reviewed; "Preliminary" and "Provisional" are not, and are blocked --
 # the same posture cdmo.py takes toward unvetted QAQC flags.
-ACCEPTED_STATUSES = frozenset({"Final", "Accepted", "Validated", "Historical"})
+#
+# "Historical" is DELIBERATELY excluded, to match `cdmo.py`'s own treatment
+# of pre-auto-QAQC data: `cdmo.ACCEPTED_FLAGS` explicitly blocks flag 4,
+# "Historical Data: Pre-Auto QAQC" (predates the automated primary check
+# entirely -- vetted by NOTHING, not merely flagged suspect). Admitting a
+# same-named WQP status here while blocking its CDMO equivalent would let
+# the two parsers disagree on identically-described data for no reason.
+# Measured against the full real bbox pull (2026-08-24, 9,306 rows across
+# every accepted unit): 0 rows carry `Historical` -- every one is `Final` --
+# so this costs nothing on real data. Rejected rows are still counted (see
+# `n_bad_status`/`unknown_statuses` below), not silently dropped, so if that
+# ever changes it will surface rather than vanish.
+ACCEPTED_STATUSES = frozenset({"Final", "Accepted", "Validated"})
 
 # `ActivityTypeCode` prefixes that are NOT estuary measurements: field blanks,
 # lab replicates, spikes. They pass every other filter and would enter the fit
@@ -184,7 +202,8 @@ def parse_results(fh: Iterable[str]) -> ParseReport:
         report.n_rows += 1
         if (row.get("CharacteristicName") or "").strip() != CHARACTERISTIC:
             # A different parameter entirely -- e.g. Specific conductance,
-            # not interchangeable with salinity (pipeline/salinity_fit.py:832).
+            # not interchangeable with salinity (see `CHARACTERISTIC`'s own
+            # comment above for where that rule is stated in full).
             # Still counted: `import_results` (Task 2) hands this parser
             # arbitrary multi-characteristic exports, and an uncounted drop
             # here would be invisible against the raw file.
@@ -274,6 +293,14 @@ SOURCE_WQP = "wqp:salinity"
 
 BATCH_ROWS = 20_000
 
+# The WQP store's filename, in exactly one place -- `default_store` and
+# `station_coords` both need it, and `station_coords` exists precisely to
+# check for this file's existence WITHOUT opening it (opening an `NdbcStore`
+# creates the file), so the two spellings diverging would be a real bug: a
+# typo in one would make `station_coords` silently look for (or avoid) the
+# wrong file forever.
+_WQP_DB_FILENAME = "wqp.sqlite"
+
 
 def default_store(slug: str) -> NdbcStore:
     """The WQP store -- a SEPARATE file from the NERRS one.
@@ -282,7 +309,7 @@ def default_store(slug: str) -> NdbcStore:
     `ndbc.py`'s stated "this store only ever holds NIW NERR data" invariant
     survives and its citation cannot overclaim.
     """
-    return NdbcStore(fishery_data_dir(slug) / "wqp.sqlite")
+    return NdbcStore(fishery_data_dir(slug) / _WQP_DB_FILENAME)
 
 
 def _bbox_params(bbox: tuple[float, float, float, float]) -> dict[str, str]:
@@ -305,9 +332,19 @@ def fetch_results(
 
     `bbox` is (lon_min, lat_min, lon_max, lat_max) -- the same order
     `Fishery.bbox` uses, so a caller passes it straight through.
+
+    Raises `SourceUnavailable` on a network fault or non-2xx response, the
+    same posture `ndbc._fetch_text`/`nwi.fetch_page`/`cache.Cache.
+    get_or_fetch` already take -- WQP is a heavily-loaded federal service
+    and this is an unpaginated full-bbox pull, so a bare
+    `httpx.HTTPStatusError` traceback here would not be caught by
+    `dayloader.attempt()`'s handler the way every other source's failure is.
     """
-    resp = httpx.get(WQP_URL, params=_bbox_params(bbox), timeout=timeout)
-    resp.raise_for_status()
+    try:
+        resp = httpx.get(WQP_URL, params=_bbox_params(bbox), timeout=timeout)
+        resp.raise_for_status()
+    except Exception as exc:
+        raise SourceUnavailable("wqp", str(exc)) from exc
     return resp.text
 
 
@@ -315,9 +352,14 @@ def fetch_stations(
     bbox: tuple[float, float, float, float], timeout: float = 180.0
 ) -> str:
     """Raw CSV of station metadata (incl. lat/lon) for every station in
-    `bbox` that reports Salinity. Same bbox convention as `fetch_results`."""
-    resp = httpx.get(WQP_STATION_URL, params=_bbox_params(bbox), timeout=timeout)
-    resp.raise_for_status()
+    `bbox` that reports Salinity. Same bbox convention as `fetch_results`,
+    including raising `SourceUnavailable` rather than a bare
+    `httpx.HTTPStatusError` -- see that function's docstring."""
+    try:
+        resp = httpx.get(WQP_STATION_URL, params=_bbox_params(bbox), timeout=timeout)
+        resp.raise_for_status()
+    except Exception as exc:
+        raise SourceUnavailable("wqp", str(exc)) from exc
     return resp.text
 
 
@@ -353,9 +395,10 @@ class ImportReport:
 
 
 # `wqp_stations` is this module's OWN table -- NdbcStore has no idea it
-# exists (see this module's docstring, "Station coordinates need a home").
-# Created lazily here rather than in `NdbcStore.__init__`, which stays
-# generic across every caller that reuses the class.
+# exists; see `NdbcStore.connection`'s own docstring for the sanctioned seam
+# this uses to add an auxiliary table to the shared store file. Created
+# lazily here rather than in `NdbcStore.__init__`, which stays generic
+# across every caller that reuses the class.
 _CREATE_STATIONS_TABLE = (
     "CREATE TABLE IF NOT EXISTS wqp_stations "
     "(station TEXT PRIMARY KEY, lon REAL NOT NULL, lat REAL NOT NULL)"
@@ -449,7 +492,7 @@ def station_coords(slug: str) -> dict[str, tuple[float, float]]:
     store. `{}` when the store's file does not exist yet -- checked before
     opening it, so a mere read never creates an empty `wqp.sqlite` as a
     side effect the way constructing `NdbcStore` normally would."""
-    path = fishery_data_dir(slug) / "wqp.sqlite"
+    path = fishery_data_dir(slug) / _WQP_DB_FILENAME
     if not path.exists():
         return {}
     return station_coords_from_store(NdbcStore(path))
