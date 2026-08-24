@@ -483,6 +483,52 @@ model_domain:
     - [669.5, 3695.0]
     - [669.5, 3681.0]
     - [662.0, 3672.0]
+  # WHICH MOUTH THE SALT COMES IN THROUGH -- distance field only, NOT the
+  # tidal boundary above. Added 2026-08-23 after measuring that the two are
+  # not the same opening here.
+  #
+  # ocean_boundary_utm_km (above) is correct as it stands and must not be
+  # narrowed: mesh.classify_boundary reads it to decide which boundary
+  # segments take the tide, North Inlet IS genuinely open to the sea, and
+  # editing it would change the hydrodynamics and invalidate the 12-regime
+  # library. But it selects ONE contiguous 950-cell coastal strip spanning
+  # UTM y 3671.3-3686.7 km (lat 33.1675-33.3061) that covers BOTH the Winyah
+  # Bay mouth AND the coast in front of North Inlet -- two genuine seaward
+  # openings in one run. estuary._largest_component's "ASSUMES exactly one
+  # seaward opening" guard does not catch this: nothing is dropped, both are
+  # kept, and Dijkstra silently gives every cell whichever is NEARER.
+  #
+  # MEASURED CONSEQUENCE (2026-08-23, by walking the built field downhill
+  # from each station): WYSS1 descended EAST across the bay and exited at
+  # -79.1529, 33.3061 -- the North Inlet coast -- in 654 steps, never going
+  # down the bay at all. Re-seeding from the bay mouth alone:
+  #     North Jetty            2.58 ->  2.58 km  (already routed out the mouth)
+  #     Georgetown Lighthouse  5.52 ->  5.52 km  (likewise)
+  #     Mud Bay Cut            9.47 -> 13.05 km  (+38%)
+  #     Thousand Acre (TA)    11.67 -> 16.68 km  (+43%)
+  #     WYSS1 / Winyah bottom 15.03 -> 19.03 km  (+27%)
+  # PHYSICAL CHECK: at high flow WYSS1 reads 0.61 ppt while Clambank (North
+  # Inlet) still reads 25.22. Nothing along the Mud Bay -> North Inlet path
+  # can dilute 25 ppt to 0.6 over 9.75 km of marsh creek -- the water
+  # diluting WYSS1 is Pee Dee/Waccamaw discharge arriving up the BAY. So the
+  # salt setting WYSS1's salinity enters through the jetties, and 19.03 km
+  # is its distance from that source.
+  #
+  # The polygon is the ocean hexagon above, clipped at y = 3679.5 km: its
+  # (669.5, 3681) -> (662, 3672) edge crosses that line at x = 668.25.
+  # Verified to select EXACTLY the ocean seed's cells with y < 3679.5
+  # (587 of 950) and to add none outside it. The northern cut is not
+  # delicate -- cuts anywhere in y = 3677.2-3681.6 km give bit-identical
+  # bay distances (13.05 / 16.68 / 19.03); 3679.5 sits mid-window. Only the
+  # three NORTH INLET stations move with the cut, because they route to the
+  # seed's EDGE rather than to a mouth -- which is itself further evidence
+  # they are off this axis (see stations.water).
+  salt_source_boundary_utm_km:
+    - [665.0, 3669.0]
+    - [676.0, 3669.0]
+    - [676.0, 3679.5]
+    - [668.25, 3679.5]
+    - [662.0, 3672.0]
   # Capped at real high water, not the old blanket 1.5 m: mean_range_m 1.10 *
   # spring factor 1.28 / 2 = 0.70 m max simulated stage, plus ~0.2 m margin.
   # Do NOT "helpfully" raise this back toward 1.5 m -- that meshes land that

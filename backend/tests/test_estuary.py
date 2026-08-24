@@ -194,3 +194,136 @@ def test_load_distance_field_names_the_missing_file(tmp_path, monkeypatch):
 
     with pytest.raises(FileNotFoundError, match="tidescout salinity field winyah-bay"):
         estuary.load_distance_field("winyah-bay")
+
+
+
+# -- Two seaward openings in one polygon ------------------------------------
+# `_largest_component` documents "ASSUMES exactly one seaward opening" and
+# guards against a DROPPED second mouth. The failure these tests pin is the
+# other one: two genuine openings CONTIGUOUS in the same coastal run, so the
+# filter keeps both and Dijkstra silently hands every cell whichever is
+# nearer. Measured on Winyah 2026-08-23: the mid/upper bay routed east
+# through Mud Bay and out North Inlet instead of down the bay past the
+# jetties, understating WYSS1 by 4.00 km (15.03 vs 19.03) and Thousand Acre
+# by 5.01 km (11.67 vs 16.68) -- 27% and 43%.
+
+
+def _two_mouth_spec():
+    """A head that can reach the sea two ways: 12 cells south down the bay's
+    own channel, or 4 cells east through a short side passage.
+
+    Both routes are real water and both ends are genuine openings, so no
+    edge/depth/polygon test tells them apart -- only which one the salt
+    front actually advances from, which is authored, not inferred.
+    """
+    mask = np.zeros((20, 20), bool)
+    mask[2:15, 3] = True   # the bay's own channel, north-south; south end is the mouth
+    mask[2, 3:8] = True    # a side passage east from the head to a second opening
+    return _Spec(mask)
+
+
+def test_a_second_opening_in_the_same_polygon_captures_the_upper_estuary():
+    """Seed both openings and the head measures to the NEARER one -- which
+    is not the mouth the salt front advances from. This is the defect."""
+    spec = _two_mouth_spec()
+    rows, cols = np.unravel_index(spec.flat_index, spec.shape)
+
+    both = ((rows == 14) & (cols == 3)) | ((rows == 2) & (cols == 7))
+    d = estuary.along_estuary_km(spec, both)
+
+    head = (rows == 2) & (cols == 3)
+    assert d[head][0] == pytest.approx(0.4)  # 4 cells east, not 12 south
+
+
+def test_seeding_only_the_main_mouth_measures_the_route_the_salt_takes():
+    """Same geometry, same head cell, three times the distance -- because
+    the coordinate now means 'distance up THIS estuary'."""
+    spec = _two_mouth_spec()
+    rows, cols = np.unravel_index(spec.flat_index, spec.shape)
+
+    main_only = (rows == 14) & (cols == 3)
+    d = estuary.along_estuary_km(spec, main_only)
+
+    head = (rows == 2) & (cols == 3)
+    assert d[head][0] == pytest.approx(1.2)  # 12 cells south down the channel
+
+
+def test_a_narrower_polygon_excludes_the_second_opening():
+    """The polygon leg is what separates them. `_Spec` puts row 0 at
+    y = 1.95 km and row 19 at y = 0.05 km, so a polygon over y < 1.0 km
+    contains the southern mouth and excludes the northern side passage."""
+    spec = _two_mouth_spec()
+    rows, cols = np.unravel_index(spec.flat_index, spec.shape)
+    bed_elev_m = np.full(spec.flat_index.size, -5.0)
+
+    south_only_km = [(0.0, 0.0), (0.0, 1.0), (2.0, 1.0), (2.0, 0.0)]
+    seeds = estuary.ocean_seed_mask(spec, south_only_km, bed_elev_m, ocean_max_z_m=-2.0)
+
+    assert seeds[(rows == 14) & (cols == 3)][0], "the main mouth must seed"
+    assert not seeds[rows == 2].any(), "the second opening must not seed"
+
+
+def test_salt_source_boundary_defaults_to_the_ocean_boundary():
+    """A fishery that has not authored a salt source keeps the old
+    behaviour exactly, so this is opt-in per fishery rather than a silent
+    re-interpretation of every existing config."""
+    from tidescout.models import ModelDomain
+
+    md = ModelDomain(
+        polygon_utm_km=[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)],
+        ocean_boundary_utm_km=[(0.0, 0.0), (2.0, 0.0), (2.0, 2.0)],
+    )
+
+    assert md.salt_source_boundary_utm_km == []
+    assert md.salt_source_polygon_utm_km == md.ocean_boundary_utm_km
+
+
+def test_an_authored_salt_source_wins_over_the_ocean_boundary():
+    """The two fields answer different questions and must not be conflated:
+    `ocean_boundary_utm_km` says which mesh boundary segments take the TIDE
+    (every genuine opening belongs, and `mesh.classify_boundary` reads it,
+    so narrowing it would change the hydrodynamics and invalidate the
+    library); `salt_source_boundary_utm_km` says which opening the salt
+    front advances FROM."""
+    from tidescout.models import ModelDomain
+
+    md = ModelDomain(
+        polygon_utm_km=[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)],
+        ocean_boundary_utm_km=[(0.0, 0.0), (2.0, 0.0), (2.0, 2.0)],
+        salt_source_boundary_utm_km=[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)],
+    )
+
+    assert md.salt_source_polygon_utm_km == [(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)]
+    assert md.salt_source_polygon_utm_km != md.ocean_boundary_utm_km
+
+
+def test_build_distance_field_seeds_from_the_salt_source(tmp_path, monkeypatch):
+    """`build_distance_field` must read the salt source, not the ocean
+    boundary -- the wiring is the whole point, and a field built from the
+    wrong polygon is silently wrong rather than an error."""
+    seen = {}
+
+    def fake_seed(spec, polygon_km, bed, ocean_max_z_m):
+        seen["polygon"] = polygon_km
+        rows, cols = np.unravel_index(spec.flat_index, spec.shape)
+        return (rows == 14) & (cols == 3)
+
+    spec = _two_mouth_spec()
+    monkeypatch.setattr(estuary, "ocean_seed_mask", fake_seed)
+    monkeypatch.setattr(estuary, "_bed_elevation_m", lambda *a: np.full(spec.flat_index.size, -5.0))
+    monkeypatch.setattr("tidescout.pipeline.flowlib.grid_spec", lambda *a: spec)
+    monkeypatch.setattr(estuary, "fishery_data_dir", lambda slug: tmp_path)
+
+    from tidescout.models import ModelDomain
+
+    class _F:
+        model_domain = ModelDomain(
+            polygon_utm_km=[(0.0, 0.0), (1.0, 0.0), (1.0, 1.0)],
+            ocean_boundary_utm_km=[(9.0, 9.0), (9.0, 8.0), (8.0, 8.0)],
+            salt_source_boundary_utm_km=[(0.0, 0.0), (0.0, 1.0), (2.0, 1.0), (2.0, 0.0)],
+        )
+
+    estuary.build_distance_field("winyah-bay", _F())
+
+    assert seen["polygon"] == _F.model_domain.salt_source_boundary_utm_km
+    assert seen["polygon"] != _F.model_domain.ocean_boundary_utm_km

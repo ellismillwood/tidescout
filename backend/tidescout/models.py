@@ -169,6 +169,30 @@ class ModelDomain(BaseModel):
     # and destroyed two library builds. Same lesson as polygon_utm_km itself.
     # (x_km, y_km) in the bathymetry EPSG, clockwise. Empty = no restriction.
     ocean_boundary_utm_km: list[tuple[float, float]] = []
+    # Which opening the SALT FRONT advances from, for the along-estuary
+    # distance field only. Empty = use ocean_boundary_utm_km, which is the
+    # old behaviour and correct for any estuary with one seaward opening.
+    #
+    # These two fields answer different questions and conflating them is a
+    # silent, measured defect. `ocean_boundary_utm_km` says which mesh
+    # boundary segments take the TIDE, so every genuine opening belongs in
+    # it -- and `mesh.classify_boundary` reads it, so narrowing it would
+    # change the hydrodynamics and invalidate a built library. The distance
+    # field asks something narrower: which mouth does the salt come in
+    # through. Where a domain holds two openings, Dijkstra hands every cell
+    # whichever is NEARER, with no error anywhere.
+    #
+    # Winyah, measured 2026-08-23: the authored ocean polygon spans one
+    # contiguous 950-cell coastal strip covering BOTH the bay mouth and the
+    # coast in front of North Inlet, so the mid/upper bay measured east
+    # through Mud Bay and out North Inlet instead of down the bay past the
+    # jetties. Re-seeding from the bay mouth alone: WYSS1 15.03 -> 19.03 km
+    # (+27%), Thousand Acre 11.67 -> 16.68 (+43%), Mud Bay Cut 9.47 -> 13.05
+    # (+38%); North Jetty (2.58) and Georgetown Lighthouse (5.52) unchanged,
+    # since both already routed out the mouth. Stable across northern cuts
+    # anywhere in y = 3677.2-3681.6 km, so it is the geometry talking, not
+    # the threshold.
+    salt_source_boundary_utm_km: list[tuple[float, float]] = []
     # islands at least this large become mesh holes (interior_holes) instead of
     # being meshed as land; smaller ones are filled as sub-mesh-scale noise.
     # Lowered 0.05 -> 0.002 2026-08-14: measured against Winyah's real 149
@@ -177,6 +201,16 @@ class ModelDomain(BaseModel):
     # remaining fill is cheap (total island area is small) and this is a
     # fidelity INCREASE, not a mesh-cost tradeoff -- do not raise it back up.
     min_island_hole_km2: float = 0.002
+
+    @property
+    def salt_source_polygon_utm_km(self) -> list[tuple[float, float]]:
+        """The polygon the along-estuary distance field seeds from.
+
+        Falls back to `ocean_boundary_utm_km` so a fishery that has not
+        authored a salt source keeps the old behaviour exactly, rather than
+        losing its seed to an empty polygon.
+        """
+        return self.salt_source_boundary_utm_km or self.ocean_boundary_utm_km
 
 
 class AnugaConfig(BaseModel):

@@ -236,7 +236,11 @@ def build_distance_field(slug: str, fishery: Fishery) -> Path:
     spec = grid_spec(slug, fishery)
     md = fishery.model_domain
     bed_elev_m = _bed_elevation_m(slug, fishery, spec)
-    seeds = ocean_seed_mask(spec, md.ocean_boundary_utm_km, bed_elev_m, md.ocean_max_z_m)
+    # The SALT SOURCE, not the tidal boundary -- see ModelDomain for why the
+    # two differ and what conflating them cost on Winyah.
+    seeds = ocean_seed_mask(
+        spec, md.salt_source_polygon_utm_km, bed_elev_m, md.ocean_max_z_m
+    )
     d = along_estuary_km(spec, seeds)
     path = fishery_data_dir(slug) / "estuary_km.npy"
     np.save(path, d.astype("float32"))
