@@ -780,8 +780,9 @@ def test_station_bias_matches_a_hand_computed_residual():
         snap_gap_m=1.0, max_snap_m=500.0,
     )
     obs = [(5.0, 4000.0, 9.0), (5.0, 4000.0, 11.0)]
-    out = salinity_fit.station_bias([site], obs, TRUTH)
+    out, dropped = salinity_fit.station_bias([site], obs, TRUTH)
 
+    assert dropped == 0
     assert len(out) == 1
     b = out[0]
     assert b.sites == ("A",)
@@ -793,6 +794,31 @@ def test_station_bias_matches_a_hand_computed_residual():
     expected = [predicted - 9.0, predicted - 11.0]
     assert b.mean_residual_ppt == pytest.approx(float(np.mean(expected)))
     assert b.rmse_ppt == pytest.approx(float(np.sqrt(np.mean(np.square(expected)))))
+
+
+def test_station_bias_drops_non_finite_rows_and_counts_them():
+    """`station_bias` must apply the same `_finite_rows` filter
+    `fit_intrusion` itself runs before scoring. A NaN reaching it unfiltered
+    would put a bare `nan` in `mean_residual_ppt`/`rmse_ppt` -- visually
+    indistinguishable, in a printed table, from a station that simply fits
+    badly. The two bad rows here (a NaN salinity, a NaN discharge) must be
+    excluded from the computation AND counted, not silently dropped."""
+    site = salinity_fit.build_site_record(
+        "A", [(date(2026, 5, 1), 10.0)], located=True, distance_km=5.0,
+        snap_gap_m=1.0, max_snap_m=500.0,
+    )
+    obs = [
+        (5.0, 4000.0, 9.0),
+        (5.0, 4000.0, float("nan")),
+        (5.0, float("nan"), 11.0),
+    ]
+    out, dropped = salinity_fit.station_bias([site], obs, TRUTH)
+
+    assert dropped == 2
+    assert len(out) == 1
+    assert out[0].n == 1
+    assert np.isfinite(out[0].mean_residual_ppt)
+    assert np.isfinite(out[0].rmse_ppt)
 
 
 def test_station_bias_combines_stations_sharing_one_distance():
@@ -809,8 +835,9 @@ def test_station_bias_combines_stations_sharing_one_distance():
         snap_gap_m=1.0, max_snap_m=500.0,
     )
     obs = [(19.03, 4000.0, 8.0), (19.03, 9000.0, 5.0)]
-    out = salinity_fit.station_bias([a, b], obs, TRUTH)
+    out, dropped = salinity_fit.station_bias([a, b], obs, TRUTH)
 
+    assert dropped == 0
     assert len(out) == 1
     assert out[0].sites == ("NIWWBWQ", "WYSS1")
     assert out[0].n == 2
@@ -833,8 +860,9 @@ def test_station_bias_omits_unused_stations_and_stations_with_no_matching_rows()
         snap_gap_m=1.0, max_snap_m=500.0,
     )
     obs = [(5.0, 4000.0, 9.0)]
-    out = salinity_fit.station_bias([used, excluded, no_rows], obs, TRUTH)
+    out, dropped = salinity_fit.station_bias([used, excluded, no_rows], obs, TRUTH)
 
+    assert dropped == 0
     assert [b.sites for b in out] == [("A",)]
 
 
@@ -848,8 +876,9 @@ def test_station_bias_is_sorted_by_distance():
         snap_gap_m=1.0, max_snap_m=500.0,
     )
     obs = [(20.0, 4000.0, 4.0), (5.0, 4000.0, 9.0)]
-    out = salinity_fit.station_bias([far, near], obs, TRUTH)
+    out, dropped = salinity_fit.station_bias([far, near], obs, TRUTH)
 
+    assert dropped == 0
     assert [b.distance_km for b in out] == [5.0, 20.0]
 
 

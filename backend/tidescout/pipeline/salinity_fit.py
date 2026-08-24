@@ -698,12 +698,18 @@ class StationBias:
 
 def station_bias(
     sites: Sequence[SiteRecord], observations: Sequence[Observation], cfg: SalinityConfig
-) -> list[StationBias]:
+) -> tuple[list[StationBias], int]:
     """Per-station residual against `cfg`, for every ADMITTED (`used`) site.
 
     Evaluated the same way the fit itself was scored: `salinity_at(distance,
     cfs, FIT_PHASE, cfg)` minus the observed value, for every row belonging
-    to that station.
+    to that station. "The same way" includes the same INPUT filter --
+    `observations` is run through `_finite_rows` first, exactly as
+    `fit_intrusion` does before it ever computes a residual. Skipping that
+    step here would let one non-finite row (a dark sensor arriving as NaN)
+    put a bare `nan` in that station's `mean_residual_ppt`/`rmse_ppt` --
+    visually indistinguishable, in a printed table, from a station that
+    simply fits badly.
 
     `Observation` is `(distance_km, cfs, ppt)` -- it carries no station id
     (see the type alias's own comment), so this groups admitted sites by
@@ -717,17 +723,24 @@ def station_bias(
     not a bug to paper over: nothing here has any way to separate their two
     residuals from an object that only ever carried one of them per row.
 
-    Stations with no rows in `observations` at their distance (e.g. an
-    admitted site whose only history is swings, not levels) are omitted
-    rather than reported with a NaN. Returned sorted by distance.
+    Stations with no (finite) rows in `observations` at their distance
+    (e.g. an admitted site whose only history is swings, not levels, or one
+    whose only rows were dropped as non-finite) are omitted rather than
+    reported with a NaN.
+
+    Returns `(stations, n_dropped)`, sorted by distance -- `n_dropped` is
+    the count `_finite_rows` removed, surfaced rather than silently
+    swallowed, per this codebase's reject-and-report rule.
     """
+    clean, dropped = _finite_rows(observations)
+
     admitted = [r for r in sites if r.used]
     stations_at: dict[float, list[str]] = {}
     for r in admitted:
         stations_at.setdefault(r.distance_km, []).append(r.site)
 
     rows_at: dict[float, list[tuple[float, float]]] = {}
-    for d, q, y in observations:
+    for d, q, y in clean:
         if d in stations_at:
             rows_at.setdefault(d, []).append((q, y))
 
@@ -748,7 +761,7 @@ def station_bias(
                 rmse_ppt=float(np.sqrt(np.mean(resid**2))),
             )
         )
-    return out
+    return out, dropped
 
 
 def composite_discharge_by_day(
