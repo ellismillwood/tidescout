@@ -27,7 +27,8 @@ structural defects in it (full arithmetic in
   2. A single length scale is over-constrained: it has to set BOTH how salty
      the mouth stays and how fresh the head gets, and a plain exponential has
      no second knob to keep those apart. Forcing 1 ppt at the real domain's
-     31.57 km head drove L down to 8.95 km, which alone cost North Jetty
+     31.57 km head (36.19 km since the 2026-08-23 re-seeding) drove L down
+     to 8.95 km, which alone cost North Jetty
      (2.58 km) 8.5 of its 34 ppt -- a compromise a least-squares fit would
      have landed on silently.
 

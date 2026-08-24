@@ -291,7 +291,8 @@ class SalinityConfig(BaseModel):
     # Half-width of the logistic transition, in km -- the salt front's
     # SHARPNESS, independent of l0_km's POSITION. Added because a single
     # length scale is over-constrained: forcing near-fresh (1 ppt) at the
-    # real domain's 31.57 km head with a plain exponential forced l0_km down
+    # real domain's 31.57 km head (36.19 km since the 2026-08-23 re-seeding)
+    # with a plain exponential forced l0_km down
     # to 8.95 km, which alone cost North Jetty (2.58 km) 8.5 of its 34 ppt.
     # Splitting position from sharpness fixes that -- under the same head
     # constraint here, North Jetty loses 0.01 ppt. 5.0 km is a starting

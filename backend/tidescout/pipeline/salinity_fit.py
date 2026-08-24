@@ -62,6 +62,35 @@ parameter sets whose rmse differed by 0.016 ppt -- 60x below the data's own
 1 ppt quantisation -- predicted 19.8-34.0 ppt at North Jetty and 12.6-33.9 ppt
 at Mud Bay Cut. The fit is not constrained where it is read. That is a
 statement about the data, not about the optimizer.
+
+EVERY DISTANCE ABOVE PREDATES THE 2026-08-23 RE-SEEDING -- READ THEM AS HISTORY
+------------------------------------------------------------------------------
+The field those numbers were measured on routed the mid/upper bay east through
+Mud Bay and out North Inlet instead of down the bay past the jetties, because
+`ocean_seed_mask` seeded from a coastal strip holding BOTH openings. See
+`models.ModelDomain.salt_source_boundary_utm_km`. The field now maxes at
+36.19 km, not 31.57, and the same USGS pair snaps to 36.19. Distances quoted
+anywhere in this repo alongside a date before 2026-08-23 were measured on the
+old routing; the conclusions they support still hold -- the re-seeding made
+the coverage gap larger, not smaller -- but the kilometre figures moved.
+
+WHAT THE FULL NERRS RECORD THEN SHOWED (2026-08-23)
+---------------------------------------------------
+10,864 observations and 10,864 tidal swings over 2016-01-01..2026-08-22, a
+149x discharge span, from three in-bay stations at 16.68 and 19.03 km. rmse
+4.060 ppt against an observation resolution of 0.003 -- 1,353x, where Task 5's
+1.719 ppt was only 1.7x its 1.0 ppt USGS quantum. That difference is the whole
+result: Task 5 could report only that its data could not tell, and this run
+can state that the model does not reproduce the estuary. Condition number
+12.2, every 1-sigma below its value, nothing at a bound -- numerically healthy
+and reproducing nothing, which is exactly what `_warnings` exists to surface.
+
+The reasons are structural and more data of this kind will not fix them: a
+depth-averaged single layer cannot hold a +3.30 ppt median stratification at
+one distance; one distance axis cannot carry North Inlet's 25 ppt baseline
+offset (hence `WaterSensor.off_axis`); and the bay's own observations span
+2.35 km against a 14.48 km fitted front width, entirely ABOVE the 2.58-13.05
+km reach where the fishing spots are.
 """
 
 from collections.abc import Sequence
