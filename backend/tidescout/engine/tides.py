@@ -90,12 +90,16 @@ def interpolate_tide_hours(events: list[TideEvent], day: date, tz: str) -> list[
 # are a chunking artefact, not evidence that a genuine half-cycle runs this
 # long.
 #
-# The remaining 5 (8.23-8.37 h) were a DST spring-forward artefact: `span`
+# The remaining 5 (8.05-8.37 h) were a DST spring-forward artefact: `span`
 # below used to be computed by subtracting two datetimes that shared one
 # ZoneInfo object, which Python resolves as naive wall-clock arithmetic
 # (silently dropping the offset change) rather than true elapsed time. Fixed
-# by differencing in UTC (see `phase_at`); their true elapsed time is ~7.2 h,
-# so they no longer land in this band.
+# by differencing in UTC (see `phase_at`); their true elapsed times are
+# 7.05-7.37 h, so they no longer land in this band. (Both ranges above were
+# reconstructed from the real cached payloads: the five are 8.05, 8.15,
+# 8.233, 8.317 and 8.367 h under the old arithmetic, on 2003-04-05,
+# 2023-03-11, 2007-03-11, 2011-03-13 and 2001-04-01 -- every one an H -> L
+# pair spanning a spring-forward transition.)
 #
 # 9.0 sits between the observed genuine maximum and the ~12.4 h gap a
 # single missing event would produce, so it clears real half-cycles with
