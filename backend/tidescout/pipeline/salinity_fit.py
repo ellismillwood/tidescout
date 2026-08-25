@@ -25,14 +25,29 @@ Held, each for a specific reason rather than convenience:
   problem rank-deficient by construction and the pair lands wherever the
   optimizer's path happens to stop.
 
-`excursion_km` is the subtle one. Observations are daily means, so the fit
-evaluates the model at phase 0.25 -- and at phase 0.25 `cos(2*pi*phase)` is
-exactly zero, which means the profile residual is IDENTICALLY independent of
-`excursion_km`. Handed to the optimizer against a spatial-only objective it
-comes back as its starting value with zero gradient, indistinguishable in the
-output from a fitted number. It is therefore held unless swing observations
-(high-water minus low-water salinity) are supplied, which are the only data
-that carry information about it. Task 3 measured why this matters: held at
+`excursion_km` is the subtle one, and what makes it subtle changed within
+this branch. BEFORE per-row tidal phase (Task 3 of this plan), every
+observation -- with no exception -- was evaluated at the one shared
+`FIT_PHASE` (0.25), and at phase 0.25 `cos(2*pi*phase)` is exactly zero. That
+made the level residual IDENTICALLY independent of `excursion_km` for every
+row: a fact about the phase every row shared, not a property of
+`excursion_km` itself.
+
+That is no longer true of the whole population. 1,860 of the 12,725 rows --
+the WQP grabs Task 3 resolves to their own tidal phase instead of
+`FIT_PHASE` -- now carry phases spanning 0.003-0.999, where
+`cos(2*pi*phase)` is generally nonzero. The level residual therefore now HAS
+a nonzero gradient with respect to `excursion_km` on that subset, WITH OR
+WITHOUT swing observations supplied. The gate below
+(`["excursion_km"] if swing_obs else []`) is unchanged, but it is now a
+DELIBERATE, conservative choice rather than a mathematical necessity: a
+scattered population of single, individually-timed grabs is a noisier and
+more entangled signal for a tidal-amplitude parameter than a genuine
+high-water-minus-low-water swing pair, which isolates the tidal term
+directly by construction. It is therefore still held unless swing
+observations (high-water minus low-water salinity) are supplied, and freeing
+it off the WQP phase spread alone is not a change this branch makes. Task 3
+measured why holding it wrongly matters: held at
 7.0 km with a climatology-scale profile the model implies a 22-29 ppt tidal
 swing at North Jetty and Mud Bay Cut, which is unphysical, and the same is
 true of the clipped-exponential form it replaced (20-24 ppt) -- both forms
@@ -233,10 +248,17 @@ def _by_discharge(rows: Sequence[Observation]) -> list[tuple[float, np.ndarray, 
     ]
 
 
-def _levels(groups, cfg: SalinityConfig, n: int) -> np.ndarray:
+def _levels(groups, cfg: SalinityConfig, n: int, phases: np.ndarray) -> np.ndarray:
+    """Modelled salinity per row, each at its OWN tidal phase.
+
+    `salinity_at` broadcasts over an array phase -- `x + excursion *
+    cos(2*pi*phase)` with both arrays the same shape -- so the existing
+    group-by-discharge vectorisation is preserved exactly. Verified
+    bit-identical to a per-row loop.
+    """
     out = np.empty(n, dtype="float64")
     for q, idx, dist in groups:
-        out[idx] = salinity_at(dist, q, FIT_PHASE, cfg)
+        out[idx] = salinity_at(dist, q, phases[idx], cfg)
     return out
 
 
@@ -306,6 +328,7 @@ def fit_intrusion(
     cfg: SalinityConfig,
     swings: Sequence[Observation] = (),
     sources: Sequence[str] = (),
+    phases: Sequence[float] = (),
 ) -> tuple[SalinityConfig, dict]:
     """Least-squares fit of the intrusion model to `observations`.
 
@@ -322,12 +345,27 @@ def fit_intrusion(
     `sources` only controls what `rmse_by_source_ppt` reports back. This
     matters because `collect_observations` as of Task 5 mixes two
     population shapes -- 15-minute daily means and single WQP grab samples
-    entered at `FIT_PHASE` as though they were tidal averages (see the
-    comment where WQP rows are appended) -- and those populations were
-    measured to residualise very differently (NERRS daily means rmse 4.061
-    ppt on 10,880 rows vs WQP grabs rmse 6.102 ppt on 1,860, 2026-08-24).
-    A single headline rmse hides that split; empty (the default) omits it,
-    and `rmse_by_source_ppt` is then `{}`.
+    (see the comment where WQP rows are appended) -- and those populations
+    were measured to residualise very differently. SUPERSEDED, pre-phase
+    figures (2026-08-24, before Task 3 of this plan scored each WQP grab at
+    its own resolved phase instead of `FIT_PHASE`): NERRS daily means rmse
+    4.061 ppt on 10,880 rows vs WQP grabs rmse 6.102 ppt on 1,860. CURRENT
+    figures, same day, after per-row phase scoring: NERRS 4.0596 ppt on
+    10,865 rows vs WQP 5.783 ppt on 1,860 rows. A single headline rmse hides
+    that split; empty (the default) omits it, and `rmse_by_source_ppt` is
+    then `{}`.
+
+    `phases`, when given, is ALSO a sequence the SAME LENGTH AND ORDER as
+    `observations` -- NEVER `swings`, which are already a different length
+    in practice (12,725 vs 10,865) and carry no single phase of their own (a
+    swing is a DIFFERENCE between a high-water and a low-water phase; see
+    `_swing`, which is unaffected by this parameter). Each entry scores that
+    row's own tidal phase instead of the shared `FIT_PHASE` -- correct for a
+    daily mean (whose tidal term already averages to zero at `FIT_PHASE`)
+    but necessary for an instantaneous grab, which was taken at one real
+    instant, not a tidal average. Empty (the default) reproduces exactly
+    today's behaviour: every row scored at `FIT_PHASE`, backward compatible
+    with every existing caller.
 
     Returns the fitted config -- constructed through validation, not
     `model_copy`, which skips it -- and a diagnostics dict. Read the
@@ -351,6 +389,13 @@ def fit_intrusion(
             f"sources has {len(sources)} entries but observations has "
             f"{len(observations)} -- they must be the same length, in the same order"
         )
+    if phases and len(phases) != len(observations):
+        raise ValueError(
+            f"phases has {len(phases)} entries but observations has "
+            f"{len(observations)} -- they must be the same length, in the same "
+            "order. Note phases aligns with `observations`, never with `swings`: "
+            "a swing is a DIFFERENCE between two phases and has no single one."
+        )
     obs, dropped = _finite_rows(observations)
     swing_obs, swing_dropped = _finite_rows(swings)
     if len(obs) < 3:
@@ -366,6 +411,35 @@ def fit_intrusion(
             "observations across at least two distinct flows."
         )
 
+    # `_finite_rows` drops non-finite observations, so `phases` (which arrived
+    # the same length as the PRE-filter `observations`) must be filtered by
+    # the identical predicate to stay row-for-row aligned with `obs`. Mirrors
+    # `kept_sources` below, built from the same duplicated predicate for the
+    # same reason.
+    kept_phases = [
+        ph
+        for (d, q, y_), ph in zip(observations, phases, strict=True)
+        if np.isfinite(d) and np.isfinite(q) and np.isfinite(y_)
+    ] if phases else []
+    # Deliberately named `_supplied`, not `_resolved`: this counts every row
+    # scored with a caller-supplied phase array entry, WHATEVER that value
+    # is -- it does NOT distinguish an individually-resolved WQP grab phase
+    # from a daily mean carrying the shared FIT_PHASE default. `fit_intrusion`
+    # has no way to tell those apart from the phase values alone (both are
+    # ordinary floats), and a name implying "individually resolved" here
+    # would overstate what this counts by ~7x on the real Winyah run (12,725
+    # supplied vs. 1,860 individually resolved -- see
+    # `CalibrationInput.n_wqp_phase_resolved`, which IS the per-row-provenance
+    # count, tracked where that provenance is actually known).
+    n_phase_supplied = len(kept_phases)
+    # Empty `phases` reproduces today's behaviour exactly: every row scored
+    # at FIT_PHASE, the phase at which a daily mean's tidal term is zero.
+    level_phases = (
+        np.asarray(kept_phases, dtype="float64")
+        if phases
+        else np.full(len(obs), FIT_PHASE, dtype="float64")
+    )
+
     names = [*_SPATIAL_PARAMS] + (["excursion_km"] if swing_obs else [])
     lo = [_BOUNDS[n][0] for n in names]
     hi = [_BOUNDS[n][1] for n in names]
@@ -378,7 +452,7 @@ def fit_intrusion(
 
     def residual(params: np.ndarray) -> np.ndarray:
         trial = cfg.model_copy(update=dict(zip(names, map(float, params), strict=True)))
-        r = _levels(groups, trial, len(obs)) - y
+        r = _levels(groups, trial, len(obs), level_phases) - y
         if swing_obs:
             r = np.concatenate([r, _swing(swing_groups, trial, len(swing_obs)) - y_swing])
         return r
@@ -395,7 +469,7 @@ def fit_intrusion(
     n_interior = int(((frac > band_lo) & (frac < band_hi)).sum())
     n_distinct_d = len({round(v, 6) for v in d})
     distance_span = float(d.max() - d.min())
-    level_resid = _levels(groups, solution, len(obs)) - y
+    level_resid = _levels(groups, solution, len(obs), level_phases) - y
     rmse = float(np.sqrt(np.mean(level_resid**2)))
     rmse_by_source: dict[str, float] = {}
     if sources:
@@ -461,6 +535,7 @@ def fit_intrusion(
         "rmse_ppt": rmse,
         "rmse_by_source_ppt": rmse_by_source,
         "n_obs": len(obs),
+        "n_phase_supplied": n_phase_supplied,
         "n_interior_obs": n_interior,
         "cfs_span": cfs_span,
         "warning": warning,
@@ -717,25 +792,50 @@ class StationBias:
     sites: tuple[str, ...]
     distance_km: float
     n: int
-    # predicted - observed, at each row's own discharge and FIT_PHASE.
+    # predicted - observed, at each row's own discharge and its own tidal
+    # phase (the phase `phases` supplied for that row, or FIT_PHASE for any
+    # row `phases` left unsupplied / for callers that pass no `phases` at
+    # all -- see `station_bias`'s docstring).
     mean_residual_ppt: float
     rmse_ppt: float
 
 
 def station_bias(
-    sites: Sequence[SiteRecord], observations: Sequence[Observation], cfg: SalinityConfig
+    sites: Sequence[SiteRecord],
+    observations: Sequence[Observation],
+    cfg: SalinityConfig,
+    phases: Sequence[float] = (),
 ) -> tuple[list[StationBias], int]:
     """Per-station residual against `cfg`, for every ADMITTED (`used`) site.
 
     Evaluated the same way the fit itself was scored: `salinity_at(distance,
-    cfs, FIT_PHASE, cfg)` minus the observed value, for every row belonging
-    to that station. "The same way" includes the same INPUT filter --
-    `observations` is run through `_finite_rows` first, exactly as
-    `fit_intrusion` does before it ever computes a residual. Skipping that
-    step here would let one non-finite row (a dark sensor arriving as NaN)
-    put a bare `nan` in that station's `mean_residual_ppt`/`rmse_ppt` --
-    visually indistinguishable, in a printed table, from a station that
-    simply fits badly.
+    cfs, phase, cfg)` minus the observed value, for every row belonging to
+    that station. "The same way" includes both the same INPUT filter and the
+    same PHASE convention `fit_intrusion` uses:
+
+    * `observations` is run through `_finite_rows` first, exactly as
+      `fit_intrusion` does before it ever computes a residual. Skipping that
+      step here would let one non-finite row (a dark sensor arriving as NaN)
+      put a bare `nan` in that station's `mean_residual_ppt`/`rmse_ppt` --
+      visually indistinguishable, in a printed table, from a station that
+      simply fits badly.
+    * `phases`, when given, is a sequence the SAME LENGTH AND ORDER as
+      `observations` -- the identical contract `fit_intrusion` takes (see
+      its own docstring). Each entry scores that row at its own resolved
+      tidal phase instead of the shared `FIT_PHASE`. This MUST be the same
+      `phases` array passed to the `fit_intrusion` call that produced `cfg`,
+      or this table stops describing the fit it is printed beside -- which
+      is exactly what happened between Task 3 (carrying phase into
+      `fit_intrusion`) and this fix: `station_bias` kept scoring every row,
+      WQP grabs included, at `FIT_PHASE`, so its per-station numbers for all
+      56 WQP distances no longer matched what the fit itself had actually
+      scored those rows against. Empty (the default) reproduces the old
+      behaviour exactly -- every row at `FIT_PHASE` -- so existing callers
+      that never carried phase are unaffected.
+    * `phases` is filtered by the identical `_finite_rows` predicate the
+      observations get, for the same row-alignment reason `fit_intrusion`
+      does this (see its own `kept_phases`): `_finite_rows` can drop rows,
+      and `phases` arrived the same length as the PRE-filter `observations`.
 
     `Observation` is `(distance_km, cfs, ppt)` -- it carries no station id
     (see the type alias's own comment), so this groups admitted sites by
@@ -758,17 +858,32 @@ def station_bias(
     the count `_finite_rows` removed, surfaced rather than silently
     swallowed, per this codebase's reject-and-report rule.
     """
+    if phases and len(phases) != len(observations):
+        raise ValueError(
+            f"phases has {len(phases)} entries but observations has "
+            f"{len(observations)} -- they must be the same length, in the same order."
+        )
     clean, dropped = _finite_rows(observations)
+    # Mirrors `fit_intrusion`'s `kept_phases` exactly: `phases` arrived the
+    # same length as the PRE-filter `observations`, so it must be run
+    # through the identical finite-value predicate to stay row-for-row
+    # aligned with `clean`.
+    kept_phases = [
+        ph
+        for (d, q, y), ph in zip(observations, phases, strict=True)
+        if np.isfinite(d) and np.isfinite(q) and np.isfinite(y)
+    ] if phases else []
+    row_phases = kept_phases if phases else [FIT_PHASE] * len(clean)
 
     admitted = [r for r in sites if r.used]
     stations_at: dict[float, list[str]] = {}
     for r in admitted:
         stations_at.setdefault(r.distance_km, []).append(r.site)
 
-    rows_at: dict[float, list[tuple[float, float]]] = {}
-    for d, q, y in clean:
+    rows_at: dict[float, list[tuple[float, float, float]]] = {}
+    for (d, q, y), ph in zip(clean, row_phases, strict=True):
         if d in stations_at:
-            rows_at.setdefault(d, []).append((q, y))
+            rows_at.setdefault(d, []).append((q, y, ph))
 
     out = []
     for d, names in sorted(stations_at.items()):
@@ -776,7 +891,7 @@ def station_bias(
         if not rows:
             continue
         resid = np.array(
-            [salinity_at(d, q, FIT_PHASE, cfg) - y for q, y in rows], dtype="float64"
+            [salinity_at(d, q, ph, cfg) - y for q, y, ph in rows], dtype="float64"
         )
         out.append(
             StationBias(
@@ -976,6 +1091,35 @@ class CalibrationInput:
     # tracked directly rather than derived. See where it is incremented in
     # `collect_observations`, and this codebase's reject-and-report rule.
     n_wqp_no_discharge_day: int = 0
+    # Same length and order as `observations` -- each row's tidal phase, 0.0
+    # (LOW water) to 1.0 (exclusive). NERRS/USGS daily means carry `FIT_PHASE`
+    # (see the comment where they are appended -- CORRECT, not a fallback: a
+    # daily mean already averages the tide out). WQP grabs carry the real
+    # phase `engine.tides.phase_at` resolved for that sample's own timestamp.
+    # Fed to `fit_intrusion` as `phases=` so each row is scored at ITS OWN
+    # phase rather than one shared phase for every row (Task 3). Default `[]`
+    # for the same reason `observation_sources` defaults empty.
+    observation_phases: list[float] = field(default_factory=list)
+    # How many WQP grab rows were EXCLUDED because no tidal phase could be
+    # determined for their timestamp (outside the fetched tide predictions,
+    # inside a prediction gap, or between two same-kind events -- see
+    # `engine.tides.phase_at`). Reject-and-report, per this module's rule: a
+    # grab with no determinable phase is dropped, never silently scored at
+    # `FIT_PHASE` as though it were a tidal average.
+    n_no_phase: int = 0
+    # How many `observation_phases` entries are an INDIVIDUALLY RESOLVED WQP
+    # grab phase (from `phase_at`), as opposed to the shared `FIT_PHASE`
+    # default every NERRS/USGS daily mean carries. Tracked directly at the
+    # one place this is exactly known (the WQP loop below), rather than
+    # inferred later by comparing phase values against `FIT_PHASE` -- that
+    # comparison would be a fragile heuristic (a resolved phase landing
+    # exactly on 0.25 would misclassify) where this is exact. This is the
+    # number a reader wants when asking "how many rows got their OWN phase,"
+    # not `fit_intrusion`'s `n_phase_supplied`, which counts every row
+    # scored with ANY caller-supplied phase -- daily means included -- and
+    # so overstates this by roughly 7x on the real Winyah run (12,725 vs.
+    # 1,860, measured 2026-08-24).
+    n_wqp_phase_resolved: int = 0
 
 
 def daily_means_and_swings(
@@ -1379,20 +1523,47 @@ def collect_observations(
         # station is excluded rather than let through unscreened.
         wqp_off_axis = dict.fromkeys(wqp_known, True)
 
+    # Tide events for resolving each WQP grab's own phase, fetched ONCE here
+    # (not per row): measured 2026-08-24, 1,260 unique dates over 1999-2026,
+    # which is 28 yearly chunks against a permanently-cached, deterministic
+    # product. `tide_events_range` returns every hi/lo prediction in every
+    # calendar year the observations span (a deliberate superset -- see that
+    # function's own docstring).
+    #
+    # Needed here, BEFORE the site-table loop below, not just at the
+    # observation-building loop further down: a WQP grab whose phase does
+    # not resolve is dropped from the fit the same as one whose day has no
+    # paired discharge (see `n_no_phase` / `n_wqp_no_discharge_day` below),
+    # so the site table's `rows` filter has to apply the same gate or a
+    # station can read `used: yes` with `n_days` counting rows that never
+    # actually reached the fit.
+    from tidescout.engine.tides import phase_at
+    from tidescout.sources import noaa
+
+    events = (
+        noaa.tide_events_range(
+            fishery.stations.tide[0], min(by_day), max(by_day), fishery.timezone, cache
+        )
+        if by_day and fishery.stations.tide
+        else []
+    )
+
     wqp_usable: dict[str, float] = {}
     for site, series in sorted(wqp_series.items()):
         located = site in wqp_known
         dist, gap = wqp_dist.get(site, (float("nan"), float("inf")))
-        # Filtered to days a composite discharge actually exists for -- the
-        # same gate the observation-building loop below applies (see
-        # `n_wqp_no_discharge_day`). Reporting every raw row here regardless
-        # let a station read `used=yes` with a nonzero `n_days` while every
-        # one of those rows was silently dropped downstream for lacking a
-        # paired discharge day -- asserting more than was true.
+        # Filtered to days a composite discharge actually exists for, AND to
+        # timestamps whose tidal phase actually resolves -- the same two
+        # gates the observation-building loop below applies (see
+        # `n_wqp_no_discharge_day` and `n_no_phase`). Reporting every raw
+        # row here regardless let a station read `used=yes` with a nonzero
+        # `n_days` while some of those rows were silently dropped downstream
+        # for lacking a paired discharge day OR a determinable phase --
+        # asserting more than was true.
         rows = [
             (ts.astimezone(tz).date(), ppt)
             for ts, ppt in series
-            if ts.astimezone(tz).date() in by_day
+            if ts.astimezone(tz).date() in by_day and phase_at(events, ts) is not None
         ]
         record = build_site_record(
             site,
@@ -1413,48 +1584,35 @@ def collect_observations(
 
     observations = pair_daily_means(salinity_daily, by_day, usable)
     sources = ["usgs"] * len(observations)
+    # FIT_PHASE here is CORRECT, not a fallback: a daily mean IS a tidal
+    # average, and 0.25 is exactly the phase at which the model's tidal
+    # term vanishes. Only instantaneous samples need a real phase.
+    obs_phases = [FIT_PHASE] * len(observations)
     store_obs = pair_daily_means(
         {s: sorted(store_means[s].items()) for s in store_usable}, by_day, store_usable
     )
     observations += store_obs
     sources += ["nerrs"] * len(store_obs)
+    obs_phases += [FIT_PHASE] * len(store_obs)
 
     # WQP grabs are individual observations, not daily means -- each keeps
     # its own timestamp so it resolves to its own tidal phase rather than
     # being averaged into a day that (for most WQP stations) holds only it.
-    #
-    # KNOWN LIMITATION, not fixed here: `Observation` carries no tidal
-    # phase, and `_levels`/`fit_intrusion` evaluate EVERY row -- daily mean
-    # or grab alike -- at `FIT_PHASE` (0.25, the phase where the tidal term
-    # is exactly zero). That is correct for a daily mean, which already
-    # averages the tide out, but wrong for a single instantaneous grab: a
-    # sample taken near high or low water is being scored as though it were
-    # a tidal average when it is not one. The model's own tidal swing at the
-    # distances where WQP grabs sit is 8.3-12.3 ppt, so phase mismatch alone
-    # can account for ~4-6 ppt of error on a single grab. This is very
-    # likely why the two populations residualise so differently (measured
-    # 2026-08-24: NERRS daily means rmse 4.061 ppt on 10,880 rows vs WQP
-    # grabs rmse 6.102 ppt on 1,860, mean residuals -0.594 vs -1.250 -- see
-    # `rmse_by_source_ppt` in `fit_intrusion`'s diagnostics). The spec's
-    # justification for grab samples was that each one "resolves to a known
-    # distance, discharge AND tidal phase" -- this interface accepts the
-    # first two and drops the third. A real fix needs historical tide
-    # predictions spanning 1999-2026 (this repo currently predicts tides
-    # forward from CO-OPS harmonics, not backward over WQP's date range) and
-    # a phase-carrying change to `Observation`/`fit_intrusion` so each row
-    # is scored at ITS OWN phase rather than the daily-mean phase -- a task
-    # in its own right, not this one.
-    wqp_obs_start = len(observations)
+    # Task 3: each grab is scored at ITS OWN tidal phase rather than
+    # `FIT_PHASE`, using `events` (fetched once, above, ahead of the
+    # site-table loop -- see that comment for why it has to be fetched
+    # there rather than here).
+
     n_wqp_no_discharge_day = 0
+    n_no_phase = 0
+    n_wqp_phase_resolved = 0
     for site, series in sorted(wqp_series.items()):
         if site not in wqp_usable:
             continue
         dist = wqp_usable[site]
         for ts, ppt in series:
             day = ts.astimezone(tz).date()
-            if day in by_day:
-                observations.append((dist, by_day[day], ppt))
-            else:
+            if day not in by_day:
                 # No composite discharge for this grab's day -- e.g. the day
                 # a river gauge's own record starts later than this WQP
                 # station's earliest sample. Counted rather than silently
@@ -1463,7 +1621,21 @@ def collect_observations(
                 # of `n_days`, so a station cannot read `used=yes` while
                 # actually contributing zero rows without it showing here.
                 n_wqp_no_discharge_day += 1
-    sources += ["wqp"] * (len(observations) - wqp_obs_start)
+                continue
+            ph = phase_at(events, ts) if events else None
+            if ph is None:
+                # A grab with no determinable phase is dropped, never scored
+                # at FIT_PHASE. This module already refuses a fabricated
+                # timestamp at parse time on the same reasoning -- a
+                # fabricated phase is that error one layer down, and it is
+                # worth up to half the local tidal swing (8.3-12.3 ppt where
+                # these samples sit).
+                n_no_phase += 1
+                continue
+            observations.append((dist, by_day[day], ppt))
+            sources.append("wqp")
+            obs_phases.append(ph)
+            n_wqp_phase_resolved += 1
 
     swing_days = min(days, MAX_IV_DAYS)
     from tidescout.sources import usgs
@@ -1486,4 +1658,6 @@ def collect_observations(
         n_off_axis=n_off_axis, stem_field_missing=stem_field_missing,
         observation_sources=sources, n_colocated=n_colocated,
         n_wqp_no_discharge_day=n_wqp_no_discharge_day,
+        observation_phases=obs_phases, n_no_phase=n_no_phase,
+        n_wqp_phase_resolved=n_wqp_phase_resolved,
     )

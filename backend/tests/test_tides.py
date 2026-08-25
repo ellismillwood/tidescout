@@ -1,6 +1,8 @@
-from datetime import date, datetime
+from datetime import UTC, date, datetime, timedelta
 from itertools import pairwise
 from zoneinfo import ZoneInfo
+
+import pytest
 
 from tidescout.engine.tides import (
     CurrentHour,
@@ -8,6 +10,7 @@ from tidescout.engine.tides import (
     _cosine_height,
     interpolate_current_hours,
     interpolate_tide_hours,
+    phase_at,
     stage_at,
 )
 
@@ -96,3 +99,111 @@ def test_interpolate_current_hours_exact_grid_passthrough():
     assert by_time[datetime(2026, 8, 15, 0, 0, tzinfo=ET)] == points[0]
     assert by_time[datetime(2026, 8, 15, 1, 0, tzinfo=ET)] == points[1]
     assert by_time[datetime(2026, 8, 15, 2, 0, tzinfo=ET)] == points[2]
+
+
+# Mapping a timestamp to the salinity model's tidal phase.
+#
+# The convention is load-bearing and stated in `engine/salinity.py`: phase 0
+# is LOW water, 0.5 is high water. Reversing it inverts the tidal salinity
+# swing across the entire bay, which no test of the fit itself would catch --
+# it would simply fit different parameters to compensate.
+
+
+def _phase_events():
+    """Low at 00:00, high at 06:00, low at 12:00, high at 18:00."""
+    base = datetime(2026, 5, 1, tzinfo=UTC)
+    return [
+        TideEvent(base, "L", -0.5),
+        TideEvent(base + timedelta(hours=6), "H", 4.0),
+        TideEvent(base + timedelta(hours=12), "L", -0.4),
+        TideEvent(base + timedelta(hours=18), "H", 4.2),
+    ]
+
+
+def test_low_water_is_phase_zero():
+    assert phase_at(_phase_events(), datetime(2026, 5, 1, 0, 0, tzinfo=UTC)) == pytest.approx(0.0)
+
+
+def test_high_water_is_phase_one_half():
+    assert phase_at(_phase_events(), datetime(2026, 5, 1, 6, 0, tzinfo=UTC)) == pytest.approx(0.5)
+
+
+def test_midway_rising_is_a_quarter():
+    assert phase_at(_phase_events(), datetime(2026, 5, 1, 3, 0, tzinfo=UTC)) == pytest.approx(0.25)
+
+
+def test_midway_falling_is_three_quarters():
+    """The falling limb runs 0.5 -> 1.0, so halfway down is 0.75. Getting
+    this branch backwards would put ebb water where flood water belongs."""
+    assert phase_at(_phase_events(), datetime(2026, 5, 1, 9, 0, tzinfo=UTC)) == pytest.approx(0.75)
+
+
+def test_the_next_low_wraps_to_zero_not_one():
+    """Phase is in [0, 1). A low returning 1.0 would be a different number
+    for the same physical state, and cos(2*pi*1.0) == cos(0) makes that
+    invisible in the model but visible in any grouping or reporting."""
+    p = phase_at(_phase_events(), datetime(2026, 5, 1, 12, 0, tzinfo=UTC))
+    assert p == pytest.approx(0.0)
+
+
+def test_a_time_before_the_first_event_is_undeterminable():
+    assert phase_at(_phase_events(), datetime(2026, 4, 30, 23, 0, tzinfo=UTC)) is None
+
+
+def test_a_time_after_the_last_event_is_undeterminable():
+    assert phase_at(_phase_events(), datetime(2026, 5, 1, 19, 0, tzinfo=UTC)) is None
+
+
+def test_a_gap_in_the_events_is_undeterminable():
+    """A missing prediction must not be interpolated across -- a 12-hour
+    'interval' spanning a real gap would put phase 0.25 in the middle of
+    what was actually a whole missing cycle."""
+    base = datetime(2026, 5, 1, tzinfo=UTC)
+    sparse = [TideEvent(base, "L", -0.5), TideEvent(base + timedelta(hours=30), "H", 4.0)]
+    assert phase_at(sparse, base + timedelta(hours=15)) is None
+
+
+def test_unsorted_events_are_handled():
+    """CO-OPS returns sorted data, but a caller concatenating yearly
+    fetches can produce unsorted input at the seams."""
+    ev = list(reversed(_phase_events()))
+    assert phase_at(ev, datetime(2026, 5, 1, 6, 0, tzinfo=UTC)) == pytest.approx(0.5)
+
+
+def test_two_consecutive_events_of_the_same_kind_are_undeterminable():
+    """A missing intervening event: two lows in a row means the high
+    between them was not predicted, and the interval is not half a cycle."""
+    base = datetime(2026, 5, 1, tzinfo=UTC)
+    bad = [TideEvent(base, "L", -0.5), TideEvent(base + timedelta(hours=12), "L", -0.4)]
+    assert phase_at(bad, base + timedelta(hours=6)) is None
+
+
+def test_exact_hit_on_interior_event_prefers_valid_side_over_a_gap():
+    """A `t` equal to an interior event's own timestamp matches two adjacent
+    pairs (inclusive bounds on both ends): the one ending there and the one
+    starting there. Here the earlier pair (L@00:00 -> H@20:00) is a 20h span,
+    well past MAX_HALF_CYCLE_H -- a real gap, not a long half-cycle -- but
+    the later pair (H@20:00 -> L@26:00) is a valid 6h half-cycle and t IS
+    that high water. Returning None because the invalid pair happened to be
+    checked first would silently drop a determinable grab sample."""
+    base = datetime(2026, 5, 1, tzinfo=UTC)
+    events = [
+        TideEvent(base, "L", -0.5),
+        TideEvent(base + timedelta(hours=20), "H", 4.0),
+        TideEvent(base + timedelta(hours=26), "L", -0.4),
+    ]
+    assert phase_at(events, base + timedelta(hours=20)) == pytest.approx(0.5)
+
+
+def test_exact_hit_on_interior_event_prefers_valid_side_over_same_kind_pair():
+    """Same ambiguity as above, but the invalid neighbour is a same-kind
+    pair (missing intervening high) instead of a gap: L@00:00 -> L@06:00 is
+    unusable, but L@06:00 -> H@12:00 is a valid half-cycle and t IS that low
+    water, so the answer should be 0.0, not None."""
+    base = datetime(2026, 5, 1, tzinfo=UTC)
+    events = [
+        TideEvent(base, "L", -0.5),
+        TideEvent(base + timedelta(hours=6), "L", -0.3),
+        TideEvent(base + timedelta(hours=12), "H", 4.0),
+    ]
+    assert phase_at(events, base + timedelta(hours=6)) == pytest.approx(0.0)

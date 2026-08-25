@@ -514,12 +514,73 @@ def test_fit_rmse_by_source_matches_a_hand_computed_group_rmse():
     assert diag["rmse_by_source_ppt"]["b"] == pytest.approx(expected_b, rel=1e-9)
 
 
+# -- per-row tidal phase ------------------------------------------------------
+# Task 3: 56 of the fit's 58 distinct along-estuary distances come from
+# instantaneous WQP grabs, every one of which was previously scored at
+# FIT_PHASE as though it were a tidal average. `phases` carries each row's
+# own phase instead.
+
+
+def test_phases_default_to_fit_phase_and_reproduce_todays_behaviour():
+    """The backward-compatibility guarantee. Every existing caller passes no
+    phases; all of them must keep getting exactly what they get today."""
+    obs = [(5.0, 4000.0, 30.0), (12.0, 4000.0, 18.0), (20.0, 9000.0, 6.0)]
+    a, da = fit_intrusion(obs, cfg=CFG)
+    b, db = fit_intrusion(obs, cfg=CFG, phases=[salinity_fit.FIT_PHASE] * 3)
+    assert da["rmse_ppt"] == pytest.approx(db["rmse_ppt"], rel=0, abs=0)
+    assert a.l0_km == pytest.approx(b.l0_km, rel=0, abs=0)
+
+
+def test_a_phase_actually_changes_the_residual():
+    """If phase were ignored, these two fits would be identical -- which is
+    exactly the bug this task exists to fix."""
+    obs = [(5.0, 4000.0, 30.0), (12.0, 4000.0, 18.0), (20.0, 9000.0, 6.0)]
+    _, flat = fit_intrusion(obs, cfg=CFG, phases=[0.25, 0.25, 0.25])
+    _, tidal = fit_intrusion(obs, cfg=CFG, phases=[0.0, 0.5, 0.0])
+    assert flat["rmse_ppt"] != pytest.approx(tidal["rmse_ppt"])
+
+
+def test_phases_length_mismatch_raises():
+    """Mirrors the contract `sources` already holds."""
+    obs = [(5.0, 4000.0, 30.0), (12.0, 4000.0, 18.0), (20.0, 9000.0, 6.0)]
+    with pytest.raises(ValueError, match="phases"):
+        fit_intrusion(obs, cfg=CFG, phases=[0.25, 0.5])
+
+
+def test_phases_is_validated_against_observations_not_swings():
+    """The two sequences are different lengths in the real fit (12,725 vs
+    10,865). Validating against the wrong one would misalign every phase."""
+    obs = [(5.0, 4000.0, 30.0), (12.0, 4000.0, 18.0), (20.0, 9000.0, 6.0)]
+    swings = [(5.0, 4000.0, 8.0)]
+    fitted, _ = fit_intrusion(obs, cfg=CFG, swings=swings, phases=[0.1, 0.2, 0.3])
+    assert fitted is not None  # 3 phases for 3 observations, 1 swing -- valid
+
+
 # -- Assembling real observations -------------------------------------------
 
 from datetime import UTC, date, datetime  # noqa: E402
 
 from tidescout.config import load_fishery  # noqa: E402
 from tidescout.pipeline import salinity_fit  # noqa: E402
+
+
+def _bracketing_tide_events(start: datetime, end: datetime) -> list:
+    """Alternating hi/lo events spanning [start, end], every ~6h12m -- enough
+    to bracket any timestamp in that range so `phase_at` resolves rather than
+    returning `None`. For tests exercising the WQP phase-lookup PATH itself,
+    not `phase_at`'s own edge cases (covered in `test_tides.py`)."""
+    from datetime import timedelta
+
+    from tidescout.engine.tides import TideEvent
+
+    events = []
+    t = start
+    kind = "L"
+    while t <= end:
+        events.append(TideEvent(t, kind, 3.0 if kind == "H" else 0.5))
+        kind = "H" if kind == "L" else "L"
+        t += timedelta(hours=6, minutes=12)
+    return events
 
 
 def test_composite_discharge_drops_days_a_gauge_is_dark():
@@ -882,6 +943,58 @@ def test_station_bias_is_sorted_by_distance():
     assert [b.distance_km for b in out] == [5.0, 20.0]
 
 
+def test_station_bias_scores_each_row_at_its_own_phase():
+    """A WQP-style grab must be scored at ITS OWN resolved tidal phase, the
+    same `phases` contract `fit_intrusion` takes -- not silently defaulted to
+    the daily-mean FIT_PHASE. `TRUTH.excursion_km` is 7.0 (nonzero), so
+    `salinity_at`'s tidal term (`excursion_km * cos(2*pi*phase)`) is exactly
+    zero at FIT_PHASE=0.25 but nonzero at phase=0.0 (low water) -- if
+    `station_bias` ignored `phases` and always scored at FIT_PHASE (the bug
+    this test pins against), this row's residual would come out equal to the
+    FIT_PHASE prediction minus the observation, not the low-water one, and
+    the assertion below would fail.
+    """
+    site = salinity_fit.build_site_record(
+        "WQP1", [(date(2026, 5, 1), 10.0)], located=True, distance_km=5.0,
+        snap_gap_m=1.0, max_snap_m=500.0,
+    )
+    obs = [(5.0, 4000.0, 9.0)]
+    low_water_phase = 0.0
+    out, dropped = salinity_fit.station_bias([site], obs, TRUTH, phases=[low_water_phase])
+
+    assert dropped == 0
+    assert len(out) == 1
+    predicted_low_water = float(
+        salinity.salinity_at(np.array([5.0]), 4000.0, low_water_phase, TRUTH)[0]
+    )
+    predicted_fit_phase = float(
+        salinity.salinity_at(np.array([5.0]), 4000.0, salinity_fit.FIT_PHASE, TRUTH)[0]
+    )
+    # Guard against a degenerate test: if these two predictions happened to
+    # be equal, the assertion below would pass whether or not `phases` were
+    # honoured, and the test would not be able to fail on the bug it names.
+    assert predicted_low_water != pytest.approx(predicted_fit_phase)
+    assert out[0].mean_residual_ppt == pytest.approx(predicted_low_water - 9.0)
+
+
+def test_station_bias_default_phases_reproduces_fit_phase_behaviour():
+    """No `phases` argument at all (the pre-Task-3 call shape) must still
+    score every row at FIT_PHASE, exactly as before -- existing callers that
+    never carried phase are unaffected by this fix."""
+    site = salinity_fit.build_site_record(
+        "A", [(date(2026, 5, 1), 10.0)], located=True, distance_km=5.0,
+        snap_gap_m=1.0, max_snap_m=500.0,
+    )
+    obs = [(5.0, 4000.0, 9.0)]
+    out, dropped = salinity_fit.station_bias([site], obs, TRUTH)
+
+    assert dropped == 0
+    predicted = float(
+        salinity.salinity_at(np.array([5.0]), 4000.0, salinity_fit.FIT_PHASE, TRUTH)[0]
+    )
+    assert out[0].mean_residual_ppt == pytest.approx(predicted - 9.0)
+
+
 # -- The CLI refusal path ---------------------------------------------------
 
 
@@ -1019,6 +1132,13 @@ def test_store_stations_are_read_and_off_axis_ones_are_skipped(monkeypatch):
         salinity_fit, "_usgs_inputs",
         lambda *a, **k: ({}, {date(2026, 5, 1): 4000.0, date(2026, 5, 2): 4200.0}, [], {}),
     )
+    # NERRS/USGS daily means always score at FIT_PHASE regardless of tide
+    # events (see the comment in `collect_observations`); this test has no
+    # WQP fixture that needs a resolvable phase, so an empty events list is
+    # enough to avoid the real `tide_events_range` hitting `cache=None`.
+    from tidescout.sources import noaa
+
+    monkeypatch.setattr(noaa, "tide_events_range", lambda *a, **k: [])
 
     data = salinity_fit.collect_observations("winyah-bay", fishery, cache=None, days=90)
 
@@ -1087,6 +1207,11 @@ def test_store_station_with_no_known_position_reports_no_coordinates_not_off_axi
         lambda *a, **k: ({}, {date(2026, 5, 1): 4000.0, date(2026, 5, 2): 4200.0}, [], {}),
     )
     monkeypatch.setattr(salinity_fit, "_wqp_sites", lambda slug: {})
+    # No WQP fixture here needs a resolvable phase; an empty events list
+    # just avoids the real `tide_events_range` hitting `cache=None`.
+    from tidescout.sources import noaa
+
+    monkeypatch.setattr(noaa, "tide_events_range", lambda *a, **k: [])
 
     data = salinity_fit.collect_observations("winyah-bay", fishery, cache=None, days=90)
     notes = {r.site: r.note for r in data.sites}
@@ -1136,6 +1261,11 @@ def test_store_station_declared_off_axis_true_and_unlocated_reports_no_coordinat
         lambda *a, **k: ({}, {date(2026, 5, 1): 4000.0, date(2026, 5, 2): 4200.0}, [], {}),
     )
     monkeypatch.setattr(salinity_fit, "_wqp_sites", lambda slug: {})
+    # No WQP fixture here needs a resolvable phase; an empty events list
+    # just avoids the real `tide_events_range` hitting `cache=None`.
+    from tidescout.sources import noaa
+
+    monkeypatch.setattr(noaa, "tide_events_range", lambda *a, **k: [])
 
     data = salinity_fit.collect_observations("winyah-bay", fishery, cache=None, days=90)
     notes = {r.site: r.note for r in data.sites}
@@ -1312,6 +1442,11 @@ def test_stem_field_missing_falls_back_to_the_declared_flag_not_a_crash(monkeypa
     )
     monkeypatch.setattr(salinity_fit, "station_stem_km", _raise)
     monkeypatch.setattr(salinity_fit, "_wqp_sites", lambda slug: {})
+    # No WQP fixture here needs a resolvable phase; an empty events list
+    # just avoids the real `tide_events_range` hitting `cache=None`.
+    from tidescout.sources import noaa
+
+    monkeypatch.setattr(noaa, "tide_events_range", lambda *a, **k: [])
 
     data = salinity_fit.collect_observations("winyah-bay", fishery, cache=None, days=90)
 
@@ -1461,6 +1596,15 @@ def test_wqp_stations_enter_as_individual_grab_samples_not_daily_means(monkeypat
         salinity_fit, "station_stem_km",
         lambda slug, fishery, sites: {s: stem.get(s, float("nan")) for s in sites},
     )
+    # Bracketing events so both WB-06 grabs resolve a real phase and survive
+    # into `data.observations` -- this test is about which STATIONS/rows
+    # reach the fit, not about `phase_at` itself (covered in test_tides.py).
+    from tidescout.sources import noaa
+
+    events = _bracketing_tide_events(
+        datetime(2026, 4, 28, tzinfo=UTC), datetime(2026, 5, 5, tzinfo=UTC)
+    )
+    monkeypatch.setattr(noaa, "tide_events_range", lambda *a, **k: events)
 
     data = salinity_fit.collect_observations("winyah-bay", fishery, cache=None, days=90)
 
@@ -1472,6 +1616,28 @@ def test_wqp_stations_enter_as_individual_grab_samples_not_daily_means(monkeypat
     assert "axis" in notes["OFFSTA"].lower()
     assert "coordinates" in notes["NOCOORD"].lower()
     assert data.n_wqp_no_discharge_day == 0
+    assert data.n_no_phase == 0
+    # Both surviving WQP rows carry a real (non-FIT_PHASE-defaulted) phase.
+    assert len(data.observation_phases) == len(data.observations)
+    # VALUE assertions, not just length/count: each row's phase must equal
+    # `phase_at` computed independently against the SAME events for that
+    # row's OWN timestamp -- not merely differ from FIT_PHASE by
+    # coincidence, and not silently reintroducible by reverting
+    # `obs_phases.append(ph)` back to `obs_phases.append(FIT_PHASE)` in
+    # `collect_observations` (that regression would leave `n_no_phase`,
+    # `n_wqp_no_discharge_day` and the length check above all unchanged).
+    from tidescout.engine.tides import phase_at as _phase_at
+
+    phase_by_row = dict(zip(data.observations, data.observation_phases, strict=True))
+    assert phase_by_row[(10.28, 4000.0, 5.0)] == pytest.approx(
+        _phase_at(events, datetime(2026, 5, 1, 15, 0, tzinfo=UTC))
+    )
+    assert phase_by_row[(10.28, 4200.0, 6.0)] == pytest.approx(
+        _phase_at(events, datetime(2026, 5, 2, 16, 0, tzinfo=UTC))
+    )
+    assert phase_by_row[(10.28, 4000.0, 5.0)] != pytest.approx(salinity_fit.FIT_PHASE)
+    assert phase_by_row[(10.28, 4200.0, 6.0)] != pytest.approx(salinity_fit.FIT_PHASE)
+    assert data.n_wqp_phase_resolved == 2
 
 
 def test_wqp_rows_with_no_composite_discharge_day_are_counted_not_silent(monkeypatch):
@@ -1521,14 +1687,36 @@ def test_wqp_rows_with_no_composite_discharge_day_are_counted_not_silent(monkeyp
         salinity_fit, "station_stem_km",
         lambda slug, fishery, sites: dict.fromkeys(sites, 0.5),
     )
+    # The surviving row (2026-05-01) needs a resolvable phase; the other
+    # (2026-05-03) is already dropped for lacking a discharge day, before
+    # phase is ever consulted.
+    from tidescout.sources import noaa
+
+    events = _bracketing_tide_events(
+        datetime(2026, 4, 28, tzinfo=UTC), datetime(2026, 5, 5, tzinfo=UTC)
+    )
+    monkeypatch.setattr(noaa, "tide_events_range", lambda *a, **k: events)
 
     data = salinity_fit.collect_observations("winyah-bay", fishery, cache=None, days=90)
 
     assert data.n_wqp_no_discharge_day == 1
+    assert data.n_no_phase == 0
     assert data.observations == [(10.28, 4000.0, 5.0)]
     site = next(r for r in data.sites if r.site == "WB-06")
     assert site.used is True
     assert site.n_days == 1, "the undischarged row must not inflate n_days"
+    # VALUE assertion, not just a count: the surviving row's phase must
+    # equal `phase_at` computed independently for its own timestamp against
+    # the same events -- catches a revert of `obs_phases.append(ph)` back to
+    # `obs_phases.append(FIT_PHASE)`, which would leave every assertion
+    # above this one unchanged (see the sibling test's comment for why).
+    from tidescout.engine.tides import phase_at as _phase_at
+
+    assert data.observation_phases == [
+        pytest.approx(_phase_at(events, datetime(2026, 5, 1, 15, 0, tzinfo=UTC)))
+    ]
+    assert data.observation_phases[0] != pytest.approx(salinity_fit.FIT_PHASE)
+    assert data.n_wqp_phase_resolved == 1
 
 
 # -- Cross-store co-location: WQP-to-STORE only, never WQP-to-WQP -----------
@@ -1648,6 +1836,12 @@ def test_colocated_wqp_station_is_excluded_and_not_double_counted(monkeypatch):
             {"WB08"} if "WB08" in wqp_coords else set()
         ),
     )
+    # WB08 is excluded as co-located before the phase lookup is ever
+    # consulted; an empty events list just avoids the real
+    # `tide_events_range` hitting `cache=None`.
+    from tidescout.sources import noaa
+
+    monkeypatch.setattr(noaa, "tide_events_range", lambda *a, **k: [])
 
     data = salinity_fit.collect_observations("winyah-bay", fishery, cache=None, days=90)
 
@@ -1846,3 +2040,99 @@ def test_salinity_field_nearest_observed_km_is_nan_with_no_observed_km():
     x = np.array([2.0, 10.0, 30.0])
     f = salinity_field(x, cfs=4000.0, phase=0.25, cfg=CFG)
     assert np.all(np.isnan(f.nearest_observed_km))
+
+
+# -- Pinning the "one tide station suffices" ruling --------------------------
+# The spec's Sec 2 rules that no per-location phase-lag model is needed for
+# this 4.4-32.9 km estuary, on the strength of a MEASURED lag of <= 0.011
+# phase units at 16.68-19.03 km against station 8662549 -- see the spec's
+# Sec 2 ("Up-estuary phase lag is negligible -- one tide station suffices",
+# `docs/superpowers/specs/2026-08-24-tidal-phase-and-ocean-endmember-design.md`)
+# on why the whole fit uses ONE station's phase; the module docstring for
+# `pipeline/salinity_fit.py` never discusses tide stations or phase sourcing
+# at all. That ruling is what keeps this work small (the alternative was a
+# per-cell lag model across a 36 km domain); nothing before this test
+# protected it from silently going false.
+
+
+def test_up_estuary_tidal_lag_stays_negligible():
+    """The spec rules that ONE tide station's phase serves the whole
+    estuary, because the measured lag at 16.68-19.03 km is <= 0.011 phase
+    units against the ~0.25 error the old code made. That ruling is what
+    keeps this work small; this pins it against becoming FALSE -- a future
+    change to the tide station, the phase convention, or the interpolation
+    that pushes the real lag past this bay's tidal-averaging tolerance.
+
+    Measured 2026-08-24 over 2026-07-01..21 against CO-OPS station 8662549,
+    from each NERRS station's own `depth_m` record (its high-water time
+    compared against the tide station's predicted high, matched within a
+    4-hour window, median lag across 37-39 matched highs per station):
+        NIWTAWQ  16.68 km   -2.0 min  (-0.003 phase units)
+        WYSS1    19.03 km   +4.0 min  (+0.005 phase units)
+        NIWWBWQ  19.03 km   +8.0 min  (+0.011 phase units)
+
+    The 0.05 threshold below is deliberately NOT the measured 0.011: it
+    guards the ruling from becoming wrong, not the exact measurement, which
+    will vary a little with the window chosen. Tightening it to 0.011 would
+    make this test fail on ordinary variation and invite deletion.
+
+    Skips cleanly when the NERRS store or the tide predictions are
+    unavailable -- a fresh clone has no `data/` directory, and this asserts
+    about real measured geography, like the other real-data tests here."""
+    from zoneinfo import ZoneInfo
+
+    from tidescout.errors import SourceUnavailable
+    from tidescout.sources import ndbc, noaa
+    from tidescout.sources.cache import default_cache
+
+    fishery = load_fishery("winyah-bay")
+    store = ndbc.default_store("winyah-bay")
+    if not store.stations():
+        pytest.skip("NERRS store not present")
+
+    zone = ZoneInfo(fishery.timezone)
+    try:
+        events = noaa.tide_events_range(
+            fishery.stations.tide[0], date(2026, 7, 1), date(2026, 7, 21),
+            fishery.timezone, default_cache(),
+        )
+    except SourceUnavailable:
+        pytest.skip("tide predictions unavailable")
+    highs = sorted(e.time for e in events if e.kind == "H")
+
+    checked = 0
+    for station in ("NIWTAWQ", "WYSS1", "NIWWBWQ"):
+        rows = [
+            (t, r.depth_m)
+            for t, r in (
+                (o.ts.astimezone(zone), o)
+                for o in store.read(
+                    station,
+                    datetime(2026, 7, 1, tzinfo=zone),
+                    datetime(2026, 7, 21, tzinfo=zone),
+                )
+            )
+            if r.depth_m is not None
+        ]
+        if len(rows) < 500:
+            continue  # this station's window is too sparse to trust here; try the others
+        times = [t for t, _ in rows]
+        depths = np.array([d for _, d in rows], dtype="float64")
+        lags = []
+        for h in highs:
+            idx = [i for i, t in enumerate(times) if abs((t - h).total_seconds()) < 4 * 3600]
+            if len(idx) < 20:
+                continue
+            j = idx[int(np.argmax(depths[idx]))]
+            lags.append((times[j] - h).total_seconds() / 60.0)
+        if not lags:
+            continue
+        checked += 1
+        phase_units = abs(float(np.median(lags))) / (12.42 * 60)
+        assert phase_units <= 0.05, (
+            f"{station}'s tidal lag is {phase_units:.3f} phase units -- the spec's "
+            "'one station suffices' ruling assumed <= 0.011. If this is real, a "
+            "per-location lag model is now needed and the spec must be revisited."
+        )
+    if checked == 0:
+        pytest.skip("no NERRS station had enough depth readings in the 2026-07-01..21 window")

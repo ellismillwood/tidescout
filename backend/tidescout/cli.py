@@ -425,6 +425,7 @@ def salinity_calibrate(
     and this is the only place that difference is visible.
     """
     from tidescout.config import load_fishery
+    from tidescout.errors import SourceUnavailable
     from tidescout.pipeline import salinity_fit
     from tidescout.sources.cache import default_cache
 
@@ -433,7 +434,11 @@ def salinity_calibrate(
         data = salinity_fit.collect_observations(
             slug, fishery, default_cache(), days=days, max_snap_m=max_snap_m
         )
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, SourceUnavailable) as exc:
+        # `collect_observations` now fetches tide predictions (for WQP grab
+        # phase) as well as reading the distance field -- a first run with
+        # no cached predictions and CO-OPS down must fail the same way a
+        # missing distance field already does, not with a raw traceback.
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
@@ -466,6 +471,22 @@ def salinity_calibrate(
         "NERRS-store swings cover everything the store holds, since it accumulates "
         "rather than serving a rolling window."
     )
+    # Two DIFFERENT counts, named so neither can be misread as the other:
+    # `n_wqp_phase_resolved` is exact per-row provenance (each WQP grab's
+    # OWN timestamp resolved via phase_at); the remainder are NERRS/USGS
+    # daily means, which correctly carry the shared FIT_PHASE default (a
+    # daily mean already averages the tide out, so FIT_PHASE is not a
+    # fallback for them). `fit_intrusion`'s own `n_phase_supplied`
+    # diagnostic (printed below) is the AGGREGATE of both and must not be
+    # read as "this many were individually resolved" -- see its docstring.
+    console.print(
+        f"{data.n_wqp_phase_resolved} of those {len(data.observations)} salinity "
+        "observations carry a tidal phase individually resolved from their own WQP "
+        f"grab timestamp; the remaining "
+        f"{len(data.observations) - data.n_wqp_phase_resolved} (NERRS/USGS daily "
+        "means) score at the fixed daily-mean FIT_PHASE, which is correct for a "
+        "quantity that already averages the tide out."
+    )
     from tidescout.pipeline.estuary import ON_AXIS_MAX_KM
 
     console.print(
@@ -489,6 +510,14 @@ def salinity_calibrate(
             "while some of its own rows were excluded this way -- `n_days`/`ppt range` in "
             "the site table above already exclude them."
         )
+    if data.n_no_phase:
+        console.print(
+            f"[yellow]{data.n_no_phase} WQP grab(s) excluded[/yellow] -- no tidal phase "
+            "could be determined for that sample's timestamp (outside the fetched tide "
+            "predictions, inside a prediction gap, or between two same-kind events -- see "
+            "`engine.tides.phase_at`). Counted rather than silently scored at the "
+            "daily-mean phase, which would fabricate up to half the local tidal swing."
+        )
     if data.stem_field_missing:
         console.print(
             f"[yellow]distance-to-stem field not built[/yellow] -- run "
@@ -501,7 +530,7 @@ def salinity_calibrate(
     try:
         fitted, diag = salinity_fit.fit_intrusion(
             data.observations, cfg=fishery.salinity, swings=data.swings,
-            sources=data.observation_sources,
+            sources=data.observation_sources, phases=data.observation_phases,
         )
     except ValueError as exc:
         console.print(f"\n[red]CANNOT CALIBRATE[/red]: {exc}")
@@ -572,7 +601,9 @@ def salinity_calibrate(
             "from them carries no observational signal."
         )
 
-    bias, bias_dropped = salinity_fit.station_bias(data.sites, data.observations, fitted)
+    bias, bias_dropped = salinity_fit.station_bias(
+        data.sites, data.observations, fitted, phases=data.observation_phases
+    )
     if bias:
         bias_table = Table(title="per-station bias against the fitted config")
         for col in ("station(s)", "along-estuary km", "n", "mean residual ppt", "rmse ppt"):
@@ -588,9 +619,11 @@ def salinity_calibrate(
         console.print(bias_table)
         console.print(
             "[dim]residual is predicted minus observed, evaluated at each row's own "
-            "discharge and FIT_PHASE — the same scoring `fit_intrusion` itself uses. "
-            "Two stations sharing one row above sit at the exact same along-estuary "
-            "distance and cannot be told apart from Observation alone.[/dim]"
+            "discharge and its own resolved tidal phase (FIT_PHASE for rows with no "
+            "individually resolved phase) — the same scoring `fit_intrusion` itself "
+            "uses. Two stations sharing one row above sit at the exact same "
+            "along-estuary distance and cannot be told apart from Observation "
+            "alone.[/dim]"
         )
     if bias_dropped:
         console.print(
