@@ -943,6 +943,58 @@ def test_station_bias_is_sorted_by_distance():
     assert [b.distance_km for b in out] == [5.0, 20.0]
 
 
+def test_station_bias_scores_each_row_at_its_own_phase():
+    """A WQP-style grab must be scored at ITS OWN resolved tidal phase, the
+    same `phases` contract `fit_intrusion` takes -- not silently defaulted to
+    the daily-mean FIT_PHASE. `TRUTH.excursion_km` is 7.0 (nonzero), so
+    `salinity_at`'s tidal term (`excursion_km * cos(2*pi*phase)`) is exactly
+    zero at FIT_PHASE=0.25 but nonzero at phase=0.0 (low water) -- if
+    `station_bias` ignored `phases` and always scored at FIT_PHASE (the bug
+    this test pins against), this row's residual would come out equal to the
+    FIT_PHASE prediction minus the observation, not the low-water one, and
+    the assertion below would fail.
+    """
+    site = salinity_fit.build_site_record(
+        "WQP1", [(date(2026, 5, 1), 10.0)], located=True, distance_km=5.0,
+        snap_gap_m=1.0, max_snap_m=500.0,
+    )
+    obs = [(5.0, 4000.0, 9.0)]
+    low_water_phase = 0.0
+    out, dropped = salinity_fit.station_bias([site], obs, TRUTH, phases=[low_water_phase])
+
+    assert dropped == 0
+    assert len(out) == 1
+    predicted_low_water = float(
+        salinity.salinity_at(np.array([5.0]), 4000.0, low_water_phase, TRUTH)[0]
+    )
+    predicted_fit_phase = float(
+        salinity.salinity_at(np.array([5.0]), 4000.0, salinity_fit.FIT_PHASE, TRUTH)[0]
+    )
+    # Guard against a degenerate test: if these two predictions happened to
+    # be equal, the assertion below would pass whether or not `phases` were
+    # honoured, and the test would not be able to fail on the bug it names.
+    assert predicted_low_water != pytest.approx(predicted_fit_phase)
+    assert out[0].mean_residual_ppt == pytest.approx(predicted_low_water - 9.0)
+
+
+def test_station_bias_default_phases_reproduces_fit_phase_behaviour():
+    """No `phases` argument at all (the pre-Task-3 call shape) must still
+    score every row at FIT_PHASE, exactly as before -- existing callers that
+    never carried phase are unaffected by this fix."""
+    site = salinity_fit.build_site_record(
+        "A", [(date(2026, 5, 1), 10.0)], located=True, distance_km=5.0,
+        snap_gap_m=1.0, max_snap_m=500.0,
+    )
+    obs = [(5.0, 4000.0, 9.0)]
+    out, dropped = salinity_fit.station_bias([site], obs, TRUTH)
+
+    assert dropped == 0
+    predicted = float(
+        salinity.salinity_at(np.array([5.0]), 4000.0, salinity_fit.FIT_PHASE, TRUTH)[0]
+    )
+    assert out[0].mean_residual_ppt == pytest.approx(predicted - 9.0)
+
+
 # -- The CLI refusal path ---------------------------------------------------
 
 

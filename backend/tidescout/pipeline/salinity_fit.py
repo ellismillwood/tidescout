@@ -773,25 +773,50 @@ class StationBias:
     sites: tuple[str, ...]
     distance_km: float
     n: int
-    # predicted - observed, at each row's own discharge and FIT_PHASE.
+    # predicted - observed, at each row's own discharge and its own tidal
+    # phase (the phase `phases` supplied for that row, or FIT_PHASE for any
+    # row `phases` left unsupplied / for callers that pass no `phases` at
+    # all -- see `station_bias`'s docstring).
     mean_residual_ppt: float
     rmse_ppt: float
 
 
 def station_bias(
-    sites: Sequence[SiteRecord], observations: Sequence[Observation], cfg: SalinityConfig
+    sites: Sequence[SiteRecord],
+    observations: Sequence[Observation],
+    cfg: SalinityConfig,
+    phases: Sequence[float] = (),
 ) -> tuple[list[StationBias], int]:
     """Per-station residual against `cfg`, for every ADMITTED (`used`) site.
 
     Evaluated the same way the fit itself was scored: `salinity_at(distance,
-    cfs, FIT_PHASE, cfg)` minus the observed value, for every row belonging
-    to that station. "The same way" includes the same INPUT filter --
-    `observations` is run through `_finite_rows` first, exactly as
-    `fit_intrusion` does before it ever computes a residual. Skipping that
-    step here would let one non-finite row (a dark sensor arriving as NaN)
-    put a bare `nan` in that station's `mean_residual_ppt`/`rmse_ppt` --
-    visually indistinguishable, in a printed table, from a station that
-    simply fits badly.
+    cfs, phase, cfg)` minus the observed value, for every row belonging to
+    that station. "The same way" includes both the same INPUT filter and the
+    same PHASE convention `fit_intrusion` uses:
+
+    * `observations` is run through `_finite_rows` first, exactly as
+      `fit_intrusion` does before it ever computes a residual. Skipping that
+      step here would let one non-finite row (a dark sensor arriving as NaN)
+      put a bare `nan` in that station's `mean_residual_ppt`/`rmse_ppt` --
+      visually indistinguishable, in a printed table, from a station that
+      simply fits badly.
+    * `phases`, when given, is a sequence the SAME LENGTH AND ORDER as
+      `observations` -- the identical contract `fit_intrusion` takes (see
+      its own docstring). Each entry scores that row at its own resolved
+      tidal phase instead of the shared `FIT_PHASE`. This MUST be the same
+      `phases` array passed to the `fit_intrusion` call that produced `cfg`,
+      or this table stops describing the fit it is printed beside -- which
+      is exactly what happened between Task 3 (carrying phase into
+      `fit_intrusion`) and this fix: `station_bias` kept scoring every row,
+      WQP grabs included, at `FIT_PHASE`, so its per-station numbers for all
+      56 WQP distances no longer matched what the fit itself had actually
+      scored those rows against. Empty (the default) reproduces the old
+      behaviour exactly -- every row at `FIT_PHASE` -- so existing callers
+      that never carried phase are unaffected.
+    * `phases` is filtered by the identical `_finite_rows` predicate the
+      observations get, for the same row-alignment reason `fit_intrusion`
+      does this (see its own `kept_phases`): `_finite_rows` can drop rows,
+      and `phases` arrived the same length as the PRE-filter `observations`.
 
     `Observation` is `(distance_km, cfs, ppt)` -- it carries no station id
     (see the type alias's own comment), so this groups admitted sites by
@@ -814,17 +839,32 @@ def station_bias(
     the count `_finite_rows` removed, surfaced rather than silently
     swallowed, per this codebase's reject-and-report rule.
     """
+    if phases and len(phases) != len(observations):
+        raise ValueError(
+            f"phases has {len(phases)} entries but observations has "
+            f"{len(observations)} -- they must be the same length, in the same order."
+        )
     clean, dropped = _finite_rows(observations)
+    # Mirrors `fit_intrusion`'s `kept_phases` exactly: `phases` arrived the
+    # same length as the PRE-filter `observations`, so it must be run
+    # through the identical finite-value predicate to stay row-for-row
+    # aligned with `clean`.
+    kept_phases = [
+        ph
+        for (d, q, y), ph in zip(observations, phases, strict=True)
+        if np.isfinite(d) and np.isfinite(q) and np.isfinite(y)
+    ] if phases else []
+    row_phases = kept_phases if phases else [FIT_PHASE] * len(clean)
 
     admitted = [r for r in sites if r.used]
     stations_at: dict[float, list[str]] = {}
     for r in admitted:
         stations_at.setdefault(r.distance_km, []).append(r.site)
 
-    rows_at: dict[float, list[tuple[float, float]]] = {}
-    for d, q, y in clean:
+    rows_at: dict[float, list[tuple[float, float, float]]] = {}
+    for (d, q, y), ph in zip(clean, row_phases, strict=True):
         if d in stations_at:
-            rows_at.setdefault(d, []).append((q, y))
+            rows_at.setdefault(d, []).append((q, y, ph))
 
     out = []
     for d, names in sorted(stations_at.items()):
@@ -832,7 +872,7 @@ def station_bias(
         if not rows:
             continue
         resid = np.array(
-            [salinity_at(d, q, FIT_PHASE, cfg) - y for q, y in rows], dtype="float64"
+            [salinity_at(d, q, ph, cfg) - y for q, y, ph in rows], dtype="float64"
         )
         out.append(
             StationBias(

@@ -596,7 +596,9 @@ def salinity_calibrate(
             "from them carries no observational signal."
         )
 
-    bias, bias_dropped = salinity_fit.station_bias(data.sites, data.observations, fitted)
+    bias, bias_dropped = salinity_fit.station_bias(
+        data.sites, data.observations, fitted, phases=data.observation_phases
+    )
     if bias:
         bias_table = Table(title="per-station bias against the fitted config")
         for col in ("station(s)", "along-estuary km", "n", "mean residual ppt", "rmse ppt"):
@@ -612,9 +614,11 @@ def salinity_calibrate(
         console.print(bias_table)
         console.print(
             "[dim]residual is predicted minus observed, evaluated at each row's own "
-            "discharge and FIT_PHASE — the same scoring `fit_intrusion` itself uses. "
-            "Two stations sharing one row above sit at the exact same along-estuary "
-            "distance and cannot be told apart from Observation alone.[/dim]"
+            "discharge and its own resolved tidal phase (FIT_PHASE for rows with no "
+            "individually resolved phase) — the same scoring `fit_intrusion` itself "
+            "uses. Two stations sharing one row above sit at the exact same "
+            "along-estuary distance and cannot be told apart from Observation "
+            "alone.[/dim]"
         )
     if bias_dropped:
         console.print(
