@@ -25,14 +25,29 @@ Held, each for a specific reason rather than convenience:
   problem rank-deficient by construction and the pair lands wherever the
   optimizer's path happens to stop.
 
-`excursion_km` is the subtle one. Observations are daily means, so the fit
-evaluates the model at phase 0.25 -- and at phase 0.25 `cos(2*pi*phase)` is
-exactly zero, which means the profile residual is IDENTICALLY independent of
-`excursion_km`. Handed to the optimizer against a spatial-only objective it
-comes back as its starting value with zero gradient, indistinguishable in the
-output from a fitted number. It is therefore held unless swing observations
-(high-water minus low-water salinity) are supplied, which are the only data
-that carry information about it. Task 3 measured why this matters: held at
+`excursion_km` is the subtle one, and what makes it subtle changed within
+this branch. BEFORE per-row tidal phase (Task 3 of this plan), every
+observation -- with no exception -- was evaluated at the one shared
+`FIT_PHASE` (0.25), and at phase 0.25 `cos(2*pi*phase)` is exactly zero. That
+made the level residual IDENTICALLY independent of `excursion_km` for every
+row: a fact about the phase every row shared, not a property of
+`excursion_km` itself.
+
+That is no longer true of the whole population. 1,860 of the 12,725 rows --
+the WQP grabs Task 3 resolves to their own tidal phase instead of
+`FIT_PHASE` -- now carry phases spanning 0.003-0.999, where
+`cos(2*pi*phase)` is generally nonzero. The level residual therefore now HAS
+a nonzero gradient with respect to `excursion_km` on that subset, WITH OR
+WITHOUT swing observations supplied. The gate below
+(`["excursion_km"] if swing_obs else []`) is unchanged, but it is now a
+DELIBERATE, conservative choice rather than a mathematical necessity: a
+scattered population of single, individually-timed grabs is a noisier and
+more entangled signal for a tidal-amplitude parameter than a genuine
+high-water-minus-low-water swing pair, which isolates the tidal term
+directly by construction. It is therefore still held unless swing
+observations (high-water minus low-water salinity) are supplied, and freeing
+it off the WQP phase spread alone is not a change this branch makes. Task 3
+measured why holding it wrongly matters: held at
 7.0 km with a climatology-scale profile the model implies a 22-29 ppt tidal
 swing at North Jetty and Mud Bay Cut, which is unphysical, and the same is
 true of the clipped-exponential form it replaced (20-24 ppt) -- both forms
@@ -331,10 +346,14 @@ def fit_intrusion(
     matters because `collect_observations` as of Task 5 mixes two
     population shapes -- 15-minute daily means and single WQP grab samples
     (see the comment where WQP rows are appended) -- and those populations
-    were measured to residualise very differently (NERRS daily means rmse
-    4.061 ppt on 10,880 rows vs WQP grabs rmse 6.102 ppt on 1,860,
-    2026-08-24). A single headline rmse hides that split; empty (the
-    default) omits it, and `rmse_by_source_ppt` is then `{}`.
+    were measured to residualise very differently. SUPERSEDED, pre-phase
+    figures (2026-08-24, before Task 3 of this plan scored each WQP grab at
+    its own resolved phase instead of `FIT_PHASE`): NERRS daily means rmse
+    4.061 ppt on 10,880 rows vs WQP grabs rmse 6.102 ppt on 1,860. CURRENT
+    figures, same day, after per-row phase scoring: NERRS 4.0596 ppt on
+    10,865 rows vs WQP 5.783 ppt on 1,860 rows. A single headline rmse hides
+    that split; empty (the default) omits it, and `rmse_by_source_ppt` is
+    then `{}`.
 
     `phases`, when given, is ALSO a sequence the SAME LENGTH AND ORDER as
     `observations` -- NEVER `swings`, which are already a different length
@@ -1504,20 +1523,47 @@ def collect_observations(
         # station is excluded rather than let through unscreened.
         wqp_off_axis = dict.fromkeys(wqp_known, True)
 
+    # Tide events for resolving each WQP grab's own phase, fetched ONCE here
+    # (not per row): measured 2026-08-24, 1,260 unique dates over 1999-2026,
+    # which is 28 yearly chunks against a permanently-cached, deterministic
+    # product. `tide_events_range` returns every hi/lo prediction in every
+    # calendar year the observations span (a deliberate superset -- see that
+    # function's own docstring).
+    #
+    # Needed here, BEFORE the site-table loop below, not just at the
+    # observation-building loop further down: a WQP grab whose phase does
+    # not resolve is dropped from the fit the same as one whose day has no
+    # paired discharge (see `n_no_phase` / `n_wqp_no_discharge_day` below),
+    # so the site table's `rows` filter has to apply the same gate or a
+    # station can read `used: yes` with `n_days` counting rows that never
+    # actually reached the fit.
+    from tidescout.engine.tides import phase_at
+    from tidescout.sources import noaa
+
+    events = (
+        noaa.tide_events_range(
+            fishery.stations.tide[0], min(by_day), max(by_day), fishery.timezone, cache
+        )
+        if by_day and fishery.stations.tide
+        else []
+    )
+
     wqp_usable: dict[str, float] = {}
     for site, series in sorted(wqp_series.items()):
         located = site in wqp_known
         dist, gap = wqp_dist.get(site, (float("nan"), float("inf")))
-        # Filtered to days a composite discharge actually exists for -- the
-        # same gate the observation-building loop below applies (see
-        # `n_wqp_no_discharge_day`). Reporting every raw row here regardless
-        # let a station read `used=yes` with a nonzero `n_days` while every
-        # one of those rows was silently dropped downstream for lacking a
-        # paired discharge day -- asserting more than was true.
+        # Filtered to days a composite discharge actually exists for, AND to
+        # timestamps whose tidal phase actually resolves -- the same two
+        # gates the observation-building loop below applies (see
+        # `n_wqp_no_discharge_day` and `n_no_phase`). Reporting every raw
+        # row here regardless let a station read `used=yes` with a nonzero
+        # `n_days` while some of those rows were silently dropped downstream
+        # for lacking a paired discharge day OR a determinable phase --
+        # asserting more than was true.
         rows = [
             (ts.astimezone(tz).date(), ppt)
             for ts, ppt in series
-            if ts.astimezone(tz).date() in by_day
+            if ts.astimezone(tz).date() in by_day and phase_at(events, ts) is not None
         ]
         record = build_site_record(
             site,
@@ -1552,23 +1598,10 @@ def collect_observations(
     # WQP grabs are individual observations, not daily means -- each keeps
     # its own timestamp so it resolves to its own tidal phase rather than
     # being averaged into a day that (for most WQP stations) holds only it.
-    #
-    # Task 3: each grab is now scored at ITS OWN tidal phase rather than
-    # `FIT_PHASE`. `tide_events_range` returns every hi/lo prediction in
-    # every calendar year the observations span (a deliberate superset --
-    # see that function's own docstring), fetched ONCE here rather than per
-    # row: measured 2026-08-24, 1,260 unique dates over 1999-2026, which is
-    # 28 yearly chunks against a permanently-cached, deterministic product.
-    from tidescout.engine.tides import phase_at
-    from tidescout.sources import noaa
-
-    events = (
-        noaa.tide_events_range(
-            fishery.stations.tide[0], min(by_day), max(by_day), fishery.timezone, cache
-        )
-        if by_day and fishery.stations.tide
-        else []
-    )
+    # Task 3: each grab is scored at ITS OWN tidal phase rather than
+    # `FIT_PHASE`, using `events` (fetched once, above, ahead of the
+    # site-table loop -- see that comment for why it has to be fetched
+    # there rather than here).
 
     n_wqp_no_discharge_day = 0
     n_no_phase = 0

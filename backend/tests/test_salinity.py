@@ -2045,11 +2045,14 @@ def test_salinity_field_nearest_observed_km_is_nan_with_no_observed_km():
 # -- Pinning the "one tide station suffices" ruling --------------------------
 # The spec's Sec 2 rules that no per-location phase-lag model is needed for
 # this 4.4-32.9 km estuary, on the strength of a MEASURED lag of <= 0.011
-# phase units at 16.68-19.03 km against station 8662549 -- see the module
-# docstring for `pipeline/salinity_fit.py` on why the whole fit uses ONE
-# station's phase. That ruling is what keeps this work small (the
-# alternative was a per-cell lag model across a 36 km domain); nothing
-# before this test protected it from silently going false.
+# phase units at 16.68-19.03 km against station 8662549 -- see the spec's
+# Sec 2 ("Up-estuary phase lag is negligible -- one tide station suffices",
+# `docs/superpowers/specs/2026-08-24-tidal-phase-and-ocean-endmember-design.md`)
+# on why the whole fit uses ONE station's phase; the module docstring for
+# `pipeline/salinity_fit.py` never discusses tide stations or phase sourcing
+# at all. That ruling is what keeps this work small (the alternative was a
+# per-cell lag model across a 36 km domain); nothing before this test
+# protected it from silently going false.
 
 
 def test_up_estuary_tidal_lag_stays_negligible():

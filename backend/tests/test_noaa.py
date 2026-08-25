@@ -267,11 +267,23 @@ def test_tide_events_range_rejects_a_200_status_error_shaped_response(tmp_path):
 def test_tide_events_range_parses_a_real_coops_response():
     """A recorded real response, not a hand-built one. CO-OPS returns naive
     local-time strings with `time_zone=lst_ldt`; parsing them as UTC would
-    shift every phase by 4-5 hours -- a third of a tidal cycle."""
+    shift every phase by 4-5 hours -- a third of a tidal cycle.
+
+    The non-empty/tz-aware/kind checks below all still pass if `_parse_t`
+    used `tzinfo=UTC` instead of the station's local zone -- none of them
+    look at the absolute instant a timestamp names. The last two assertions
+    do: the fixture's first row is `{"t": "1999-01-01 02:00", "type": "L"}`,
+    and comparing the parsed result against that SAME wall-clock reading
+    attached to `America/New_York` only matches if `_parse_t` attached the
+    right zone -- UTC 02:00 and EST 02:00 (UTC-5) are different instants
+    five hours apart, so a UTC-tagged parse fails the equality outright.
+    `phase_at` at that instant must then read exactly 0.0 (a low, at its own
+    timestamp)."""
     import json
-    from datetime import date
+    from datetime import date, datetime
     from pathlib import Path
 
+    from tidescout.engine.tides import phase_at
     from tidescout.sources import noaa
 
     payload = json.loads(
@@ -287,4 +299,6 @@ def test_tide_events_range_parses_a_real_coops_response():
     assert out, "the real fixture must yield events"
     assert all(e.time.tzinfo is not None for e in out)
     assert all(e.kind in ("H", "L") for e in out)
+    assert out[0].time == datetime(1999, 1, 1, 2, 0, tzinfo=ET)
+    assert phase_at(out, out[0].time) == 0.0
     assert out == sorted(out, key=lambda e: e.time)

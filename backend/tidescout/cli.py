@@ -425,6 +425,7 @@ def salinity_calibrate(
     and this is the only place that difference is visible.
     """
     from tidescout.config import load_fishery
+    from tidescout.errors import SourceUnavailable
     from tidescout.pipeline import salinity_fit
     from tidescout.sources.cache import default_cache
 
@@ -433,7 +434,11 @@ def salinity_calibrate(
         data = salinity_fit.collect_observations(
             slug, fishery, default_cache(), days=days, max_snap_m=max_snap_m
         )
-    except FileNotFoundError as exc:
+    except (FileNotFoundError, SourceUnavailable) as exc:
+        # `collect_observations` now fetches tide predictions (for WQP grab
+        # phase) as well as reading the distance field -- a first run with
+        # no cached predictions and CO-OPS down must fail the same way a
+        # missing distance field already does, not with a raw traceback.
         console.print(f"[red]{exc}[/red]")
         raise typer.Exit(1) from exc
 
