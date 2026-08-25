@@ -383,10 +383,47 @@ salinity:
   #   "Invalid ip" until a human submits their form. Until then these
   #   constants stay theoretical.
   #
-  # Open-ocean end-member off the SC coast; typical nearshore Atlantic
-  # salinity runs ~34-36 ppt. Not measured at Winyah's mouth specifically --
-  # Task 5's fit should check it against the wettest USGS 00480 readings.
-  ocean_ppt: 34.0
+  # DERIVED FROM MEASUREMENT 2026-08-25 (was 34.0, an unsourced regional
+  # convention -- "typical nearshore Atlantic salinity runs ~34-36 ppt" -- with
+  # no station behind it). This value now comes from data.
+  #
+  # HOW: the seaward end-member is what the sea reads when it is least diluted,
+  # so North Inlet's three NERRS stations were conditioned on genuinely marine
+  # conditions -- composite river discharge at or below its 10th percentile
+  # (3,263 cfs) AND tidal phase in [0.40, 0.60], i.e. near high water. North
+  # Inlet is flushed by its OWN ocean inlet rather than by the Pee Dee, which
+  # is exactly what makes it a cleaner shelf proxy than any on-axis station
+  # (see stations.water's off_axis note -- being off the profile's axis is a
+  # qualification here, not a disqualification).
+  #
+  # MEASURED: 18,454 readings over 389 distinct days. The three stations agree
+  # to within 0.25 ppt, which is the strongest evidence this is a real signal
+  # and not one sonde's drift:
+  #     NIWCBWQ  n=6,628  mean 35.37 ppt
+  #     NIWOLWQ  n=7,406  mean 35.59
+  #     NIWDCWQ  n=4,420  mean 35.34
+  # Mean of DAILY means 35.47, sd 0.90 (daily means, not pooled readings, so a
+  # day with more samples does not count extra). Rounded to 35.5: the standard
+  # error is ~0.20 ppt, so one decimal is all the data supports.
+  #
+  # STILL HELD, NOT FITTED, AND THAT IS DELIBERATE -- do not "improve" this by
+  # freeing it without changing the model form first. Measured 2026-08-25 on
+  # the anchored, phase-corrected fit: freeing ocean_ppt with no anchor drives
+  # it to **20.78 ppt** with a healthy-looking 1-sigma of 0.25 and condition
+  # 23.5, while 367 real observations (2.9%) EXCEED that value and one reads
+  # 43.5 ppt. The model is falsified (see the block above), so a freed
+  # parameter absorbs the misfit, and ocean_ppt is simply where that shows up
+  # most visibly because we know what seawater is.
+  # Anchoring it on North Inlet does not rescue freeing it either: weighting
+  # the anchor by its HONEST independent information -- 389 daily means carry a
+  # lag-1 autocorrelation of 0.903, so n_eff is about 20 -- still yields
+  # 22.25 ppt. Only overweighting the anchor by roughly 1,000x its information
+  # content produces a marine answer, which is choosing the result and then
+  # picking a weight that delivers it.
+  # Cost of this change to the fit: rmse 4.3542 -> 4.3866 ppt. It gets slightly
+  # WORSE, which is the honest direction -- an arbitrary value the falsified
+  # model happened to prefer is replaced by a measured one.
+  ocean_ppt: 35.5
   # Rough guess at the intrusion length at median flow, pending Task 5.
   l0_km: 18.0
   # Matches this fishery's own discharge distribution: close to the 3866 cfs

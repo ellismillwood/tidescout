@@ -2136,3 +2136,96 @@ def test_up_estuary_tidal_lag_stays_negligible():
         )
     if checked == 0:
         pytest.skip("no NERRS station had enough depth readings in the 2026-07-01..21 window")
+
+
+# -- The ocean end-member's provenance --------------------------------------
+
+
+OCEAN_PPT_TOLERANCE_PPT = 1.0
+
+
+def test_ocean_ppt_matches_the_north_inlet_marine_measurement():
+    """`ocean_ppt` is HELD, not fitted -- so nothing else checks that the value
+    in the fishery YAML still matches the data it claims to come from.
+
+    Derived 2026-08-25 from North Inlet's three NERRS stations conditioned on
+    genuinely marine conditions: composite discharge at or below its 10th
+    percentile (3,263 cfs) AND tidal phase in [0.40, 0.60], near high water.
+    18,454 readings over 389 days; the three stations agree within 0.25 ppt;
+    mean of daily means 35.47, sd 0.90, standard error ~0.20.
+
+    The tolerance is 1.0 ppt, about 5 standard errors -- loose enough to
+    tolerate a re-import shifting the record, tight enough to catch the two
+    failures that matter: a silent reversion to the old unsourced 34.0
+    (1.47 ppt away), or the ~20.8 ppt a freed, unanchored fit drives it to.
+
+    Skips when the store or the tide predictions are unavailable, like the
+    other real-data tests here -- a fresh clone has no `data/` directory.
+    """
+    import sqlite3
+    from collections import defaultdict
+    from datetime import date, datetime
+    from zoneinfo import ZoneInfo
+
+    import numpy as np
+
+    from tidescout.config import load_fishery
+    from tidescout.engine.tides import phase_at
+    from tidescout.errors import SourceUnavailable
+    from tidescout.pipeline.salinity_fit import composite_discharge_by_day
+    from tidescout.sources import ndbc, noaa, usgs
+    from tidescout.sources.cache import default_cache
+
+    fishery = load_fishery("winyah-bay")
+    store = ndbc.default_store("winyah-bay")
+    stations = [s for s in ("NIWCBWQ", "NIWOLWQ", "NIWDCWQ") if s in store.stations()]
+    if not stations:
+        pytest.skip("NERRS store not present")
+
+    cache = default_cache()
+    daily = usgs.fetch_daily(
+        [r.usgs_site for r in fishery.rivers if r.usgs_site],
+        usgs.PARAM_DISCHARGE, "2016-01-01", "2026-08-23", cache,
+    )
+    by_day = composite_discharge_by_day(fishery, daily)
+    if not by_day:
+        pytest.skip("no composite discharge available")
+    low_flow = float(np.percentile(list(by_day.values()), 10))
+
+    try:
+        events = noaa.tide_events_range(
+            fishery.stations.tide[0], date(2016, 1, 1), date(2026, 12, 31),
+            fishery.timezone, cache,
+        )
+    except SourceUnavailable:
+        pytest.skip("tide predictions unavailable")
+
+    zone = ZoneInfo(fishery.timezone)
+    per_day: dict[date, list[float]] = defaultdict(list)
+    con = sqlite3.connect(f"file:{store._db_path}?mode=ro", uri=True)
+    for station in stations:
+        rows = con.execute(
+            "SELECT ts, salinity_psu FROM observations "
+            "WHERE station = ? AND salinity_psu IS NOT NULL",
+            (station,),
+        )
+        for ts, psu in rows:
+            when = datetime.fromisoformat(ts).astimezone(zone)
+            if by_day.get(when.date(), float("inf")) > low_flow:
+                continue
+            phase = phase_at(events, when)
+            if phase is not None and 0.40 <= phase <= 0.60:
+                per_day[when.date()].append(psu)
+
+    if len(per_day) < 50:
+        pytest.skip(f"only {len(per_day)} marine-condition days available")
+
+    measured = float(np.mean([np.mean(v) for v in per_day.values()]))
+    assert fishery.salinity.ocean_ppt == pytest.approx(
+        measured, abs=OCEAN_PPT_TOLERANCE_PPT
+    ), (
+        f"ocean_ppt is {fishery.salinity.ocean_ppt} but North Inlet's "
+        f"marine-condition record now measures {measured:.2f} ppt over "
+        f"{len(per_day)} days. Re-derive the YAML value and update its comment "
+        "rather than widening this tolerance."
+    )
