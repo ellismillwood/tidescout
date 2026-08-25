@@ -664,3 +664,161 @@ def test_citation_includes_the_disclaimer_and_niw_acknowledgement(tmp_path):
     assert "cdmodata@baruch.sc.edu" in c.acknowledgement
     assert "Federal government does not assume liability" in c.disclaimer
     assert "reimburse or indemnify" in c.disclaimer  # the clause the dispatch's quote dropped
+
+
+def test_citation_names_the_sources_the_store_actually_holds(tmp_path):
+    """Task 10's ruling was that the citation is GENERATED from the store so
+    it cannot overclaim. A hardcoded NERRS template does exactly that the
+    moment the store holds anything else."""
+    from datetime import UTC, datetime
+
+    from tidescout.sources import ndbc, wqp
+
+    store = ndbc.NdbcStore(tmp_path / "wqp.sqlite")
+    store.append("WB-06", [ndbc.Observation(
+        ts=datetime(2014, 6, 12, 15, 35, tzinfo=UTC), depth_m=None, water_temp_c=None,
+        cond_ms_cm=None, salinity_psu=20.0, o2_pct=None, o2_ppm=None,
+        chlorophyll_ug_l=None, turbidity_ftu=None, ph=None, eh_mv=None)])
+    store.record_provenance(wqp.SOURCE_WQP, ["WB-06"], None, 1)
+
+    cit = store.citation()
+    assert "Water Quality Portal" in cit.text
+    assert "National Estuarine Research Reserve" not in cit.text, (
+        "a WQP-only store must not claim NERRS provenance"
+    )
+
+
+def test_a_nerrs_store_still_gets_the_nerrs_citation(tmp_path):
+    from datetime import UTC, datetime
+
+    from tidescout.sources import ndbc
+
+    store = ndbc.NdbcStore(tmp_path / "ndbc.sqlite")
+    store.append("WYSS1", [ndbc.Observation(
+        ts=datetime(2026, 8, 23, 12, 0, tzinfo=UTC), depth_m=None, water_temp_c=None,
+        cond_ms_cm=None, salinity_psu=10.5, o2_pct=None, o2_ppm=None,
+        chlorophyll_ug_l=None, turbidity_ftu=None, ph=None, eh_mv=None)])
+    store.record_provenance("ndbc:realtime2", ["WYSS1"], None, 1)
+
+    assert "doi:10.25921/vw8a-8031" in store.citation().text
+
+
+# -- Task 3 review fixes ----------------------------------------------------
+#
+# Finding 1: `.acknowledgement`/`.disclaimer` were left hardcoded to NERRS
+# after Task 3 made only `.text` source-aware -- the same overclaim the
+# task existed to remove, relocated to a different field.
+#
+# Finding 2: an unrecognised provenance `source` prefix silently fell back
+# to the NERRS citation (complete with NERRS's DOI) rather than being
+# treated as the genuinely different case it is from "no provenance at
+# all". Tested as two separate states below.
+#
+# Finding 3: the mixed wqp: + ndbc:/cdmo: case had no test pinning its
+# (correct, manually-verified) behaviour.
+
+
+def test_wqp_only_store_gets_wqp_acknowledgement_and_no_nerrs_disclaimer(tmp_path):
+    """Finding 1: a WQP-only store must not instruct the reader to credit or
+    contact NERRS in ANY field, not just `.text`. WQP contributes no
+    disclaimer of its own, so the disclaimer must be empty rather than
+    either NERRS's or an invented one."""
+    from tidescout.sources import ndbc, wqp
+
+    store = ndbc.NdbcStore(tmp_path / "wqp.sqlite")
+    store.record_provenance(wqp.SOURCE_WQP, ["WB-06"], None, 1)
+
+    c = store.citation()
+    assert "Water Quality Portal" in c.acknowledgement
+    assert "originating monitoring organisations" in c.acknowledgement
+    assert "NERRS" not in c.acknowledgement
+    assert "North Inlet-Winyah Bay" not in c.acknowledgement
+    assert c.disclaimer == ""
+
+
+def test_a_nerrs_store_gets_nerrs_acknowledgement_and_disclaimer(tmp_path):
+    """The NERRS-side counterpart of the test above: a store whose
+    provenance is genuinely ndbc:/cdmo: still gets NERRS's own required
+    acknowledgement and disclaimer text, verbatim."""
+    from tidescout.sources import ndbc
+
+    store = ndbc.NdbcStore(tmp_path / "ndbc.sqlite")
+    store.record_provenance("ndbc:realtime2", ["WYSS1"], None, 1)
+
+    c = store.citation()
+    assert c.acknowledgement == ndbc.NERRS_ACKNOWLEDGEMENT
+    assert c.disclaimer == ndbc.NERRS_DISCLAIMER
+
+
+def test_unrecognised_source_gets_a_loud_marker_not_a_nerrs_citation(tmp_path):
+    """Finding 2: a store whose only provenance is a prefix this module has
+    no citation rule for (the reviewer's `noaa:something_future` example)
+    must never fall back to a real citation -- that would misattribute
+    non-NERRS data to NERRS, complete with NERRS's DOI. It must instead
+    carry an unmistakable marker naming the unrecognised source, in every
+    field, and must not resemble a real NERRS citation anywhere."""
+    from tidescout.sources import ndbc
+
+    store = ndbc.NdbcStore(tmp_path / "future.sqlite")
+    store.record_provenance("noaa:something_future", ["X1"], None, 1)
+
+    c = store.citation()
+    for field in (c.text, c.acknowledgement, c.disclaimer):
+        assert "UNRECOGNISED SOURCE" in field
+        assert "noaa:something_future" in field
+        assert "doi:10.25921/vw8a-8031" not in field
+        assert "National Estuarine Research Reserve" not in field
+
+    # Real provenance IS on record here (unlike the truly-empty-store case
+    # below), so the access date must be the real one, not the "[NO
+    # RECORDED ACCESS ...]" placeholder that case uses.
+    assert c.accessed_date is not None
+
+
+def test_a_store_with_no_provenance_at_all_is_a_different_case(tmp_path):
+    """Finding 2's other half, pinned separately so the two states can never
+    be conflated again: a store with NO provenance whatsoever (empty, or
+    predating provenance tracking) is not an unrecognised-source defect --
+    it is the pre-existing honest fallback, and must keep producing it
+    (including `accessed_date=None`), never the unrecognised-source
+    marker."""
+    from tidescout.sources import ndbc
+
+    store = ndbc.NdbcStore(tmp_path / "empty.sqlite")
+    c = store.citation()
+    assert c.accessed_date is None
+    assert "NO RECORDED ACCESS" in c.text
+    assert "UNRECOGNISED SOURCE" not in c.text
+    assert "UNRECOGNISED SOURCE" not in c.acknowledgement
+    assert "UNRECOGNISED SOURCE" not in c.disclaimer
+
+
+def test_citation_for_a_mixed_wqp_and_nerrs_store_emits_both_blocks_once_each(tmp_path):
+    """Finding 3: a store holding both `wqp:` and NERRS-family (`ndbc:`/
+    `cdmo:`) provenance must emit both blocks in `.text`, and the NERRS
+    block must appear exactly ONCE even though two different NERRS-family
+    prefixes (`ndbc:` and `cdmo:`) are both present -- they map to the same
+    NERRS constants and must collapse, not duplicate. Same collapsing
+    applies to `.acknowledgement`; `.disclaimer` gets only the NERRS block,
+    since WQP contributes none."""
+    from tidescout.sources import ndbc, wqp
+
+    store = ndbc.NdbcStore(tmp_path / "mixed.sqlite")
+    store.record_provenance(wqp.SOURCE_WQP, ["WB-06"], None, 1)
+    store.record_provenance("ndbc:realtime2", ["WYSS1"], None, 1)
+    store.record_provenance("cdmo:water_quality", ["NIWCBWQ"], None, 1)
+
+    c = store.citation()
+
+    assert "Water Quality Portal" in c.text
+    assert "doi:10.25921/vw8a-8031" in c.text
+    assert "Water Quality Portal" in c.acknowledgement
+    assert "NERRS" in c.acknowledgement
+
+    assert c.text.count("doi:10.25921/vw8a-8031") == 1
+    assert c.text.count("National Estuarine Research Reserve System (NERRS)") == 1
+    assert c.acknowledgement.count("North Inlet-Winyah Bay NERR") == 1
+
+    # WQP contributes no disclaimer, so the mixed store's disclaimer is
+    # exactly NERRS's -- not NERRS's plus a filler block for WQP.
+    assert c.disclaimer == ndbc.NERRS_DISCLAIMER

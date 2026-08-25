@@ -136,6 +136,8 @@ __all__ = [
     "NERRS_CITATION_TEMPLATE",
     "NERRS_DISCLAIMER",
     "SOURCE_NDBC_REALTIME2",
+    "WQP_ACKNOWLEDGEMENT",
+    "WQP_ATTRIBUTION",
     "Citation",
     "MetObservation",
     "NdbcStore",
@@ -287,11 +289,27 @@ NERRS_CITATION_TEMPLATE = (
     "doi:10.25921/vw8a-8031."
 )
 
-# This store only ever holds North Inlet-Winyah Bay (NIW) NERR data (every
-# station in `sources/cdmo.py`'s coordinate tables is NIW), so naming that
-# one reserve here is a fact, not a premature generalisation -- see NERRS's
-# distribution clause, which requires the SPECIFIC reserve be credited, not
-# NERRS-in-the-abstract. Contact per this task's dispatch.
+# Attribution for Water Quality Portal holdings. WQP is an aggregator: the
+# data belongs to the contributing organisation (SC DES, SCDHEC, EPA), and
+# WQP itself asks to be named as the access route. `{date}` is the only part
+# this codebase fills in, matching NERRS_CITATION_TEMPLATE's contract.
+WQP_ATTRIBUTION = (
+    "Water quality data accessed from the Water Quality Portal "
+    "(https://www.waterqualitydata.us), a cooperative service of the U.S. "
+    "Environmental Protection Agency, the U.S. Geological Survey and the "
+    "National Water Quality Monitoring Council; accessed {date}. Data are "
+    "contributed by the originating monitoring organisations, which retain "
+    "credit for having collected them."
+)
+
+# Every `ndbc:`/`cdmo:`-sourced row this store ever holds is North Inlet-
+# Winyah Bay (NIW) NERR data (every station in `sources/cdmo.py`'s
+# coordinate tables is NIW), so naming that one reserve here is a fact, not
+# a premature generalisation -- see NERRS's distribution clause, which
+# requires the SPECIFIC reserve be credited, not NERRS-in-the-abstract.
+# Contact per this task's dispatch. This same `NdbcStore` class also holds
+# `wqp:`-sourced rows (via `sources/wqp.py`); those are not NIW data and get
+# `WQP_ACKNOWLEDGEMENT` below instead, never this constant.
 NERRS_ACKNOWLEDGEMENT = (
     "The NERRS retains the right to be fully credited for having collected "
     "and processed the data. Following academic courtesy standards, the "
@@ -316,15 +334,104 @@ NERRS_DISCLAIMER = (
     "data."
 )
 
+# UNLIKE NERRS_ACKNOWLEDGEMENT and NERRS_DISCLAIMER above, this is NOT a
+# quotation from anywhere -- WQP issues no acknowledgement text of its own to
+# quote. This is this codebase's own plain statement of fact: WQP is an
+# aggregator, the data are contributed by the originating monitoring
+# organisations (for this project, principally SC DES, SCDHEC, and EPA),
+# those organisations retain credit for having collected the data, and
+# questions about its quality belong to them, not to WQP as the access
+# route. Do not extend this into official-sounding legal language; if that
+# ever becomes necessary it must come from WQP itself, quoted, like the
+# NERRS strings above.
+WQP_ACKNOWLEDGEMENT = (
+    "Water Quality Portal data held in this store were contributed by the "
+    "originating monitoring organisations (for this project, principally "
+    "SC DES, SCDHEC, and EPA), which retain credit for having collected "
+    "them. Questions about the quality of this data belong to the "
+    "originating organisation, not to the Water Quality Portal as the "
+    "route through which it was retrieved."
+)
+
+# Provenance `source` prefix -> the citation block that source requires.
+# Keyed on prefix so "cdmo:water_quality" and "cdmo:meteorological" share one
+# entry without listing every variant. Sibling tables below do the same job
+# for `.acknowledgement` and `.disclaimer` -- kept as separate tables, not
+# one shared structure, because the three fields don't all apply to every
+# source: WQP contributes no disclaimer of its own (see
+# `_DISCLAIMER_BY_SOURCE_PREFIX`), so it simply has no entry there.
+_CITATION_BY_SOURCE_PREFIX: tuple[tuple[str, str], ...] = (
+    ("wqp:", WQP_ATTRIBUTION),
+    ("ndbc:", NERRS_CITATION_TEMPLATE),
+    ("cdmo:", NERRS_CITATION_TEMPLATE),
+)
+
+_ACKNOWLEDGEMENT_BY_SOURCE_PREFIX: tuple[tuple[str, str], ...] = (
+    ("wqp:", WQP_ACKNOWLEDGEMENT),
+    ("ndbc:", NERRS_ACKNOWLEDGEMENT),
+    ("cdmo:", NERRS_ACKNOWLEDGEMENT),
+)
+
+# No `"wqp:"` entry: WQP contributes no disclaimer of its own, so a WQP-only
+# store correctly ends up with an empty disclaimer rather than an invented
+# one (see `citation()`'s docstring and this module's Task 3 review report).
+_DISCLAIMER_BY_SOURCE_PREFIX: tuple[tuple[str, str], ...] = (
+    ("ndbc:", NERRS_DISCLAIMER),
+    ("cdmo:", NERRS_DISCLAIMER),
+)
+
+# Every prefix this module knows how to cite -- derived from
+# `_CITATION_BY_SOURCE_PREFIX` (the most complete of the three tables) so it
+# can never silently drift out of sync with the tables above.
+_KNOWN_SOURCE_PREFIXES: tuple[str, ...] = tuple(prefix for prefix, _ in _CITATION_BY_SOURCE_PREFIX)
+
+
+def _blocks_for(sources: tuple[str, ...], table: tuple[tuple[str, str], ...]) -> list[str]:
+    """The distinct templates in `table` whose prefix matches at least one of
+    `sources`, in the table's own priority order. Two source strings that map
+    to the SAME template object (e.g. `cdmo:water_quality` and
+    `ndbc:realtime2`, which share `NERRS_CITATION_TEMPLATE`) still produce
+    exactly one block, not one per matching source -- the dedupe finding 3
+    of the Task 3 review pinned a test on."""
+    blocks: list[str] = []
+    for prefix, template in table:
+        if any(s.startswith(prefix) for s in sources) and template not in blocks:
+            blocks.append(template)
+    return blocks
+
+
+def _unrecognised_source_block(unmatched: tuple[str, ...]) -> str:
+    """A LOUD, unmistakable marker for a provenance `source` string this
+    module has no citation rule for -- never a real citation. Finding 2 of
+    the Task 3 review: falling back to the NERRS citation here (the
+    pre-fix behaviour) attributes non-NERRS data to NERRS, which is a worse
+    failure than an ugly but honest gap. This is a code defect, not a data
+    problem: add the missing prefix to `_CITATION_BY_SOURCE_PREFIX` (and its
+    acknowledgement/disclaimer siblings above) rather than trusting this
+    text as a real attribution."""
+    named = ", ".join(repr(s) for s in unmatched)
+    return (
+        f"[UNRECOGNISED SOURCE -- this store holds data recorded under "
+        f"source(s) {named} that this module has no citation rule for. No "
+        f"attribution can be generated for it; nothing here should be "
+        f"copied into a publication. Fix _CITATION_BY_SOURCE_PREFIX in "
+        f"tidescout/sources/ndbc.py.]"
+    )
+
 
 @dataclass(frozen=True)
 class Citation:
     """Everything `NdbcStore.citation()` derives from the store's own
     provenance and data tables -- see this module's docstring, "PROVENANCE
-    AND CITATION". `text` is NERRS's exact requested citation line with the
-    access date filled in; `subset_lines` is this codebase's own answer to
-    NERRS's OTHER requirement ("the subset of data that was used"), which
-    NERRS's template has no placeholder for."""
+    AND CITATION". `text`, `acknowledgement`, and `disclaimer` are each
+    composed from one block per source family the store actually holds
+    (never a hardcoded NERRS string -- see `_CITATION_BY_SOURCE_PREFIX` and
+    its siblings), so a field is empty if no held source contributes one
+    (e.g. `disclaimer` for a WQP-only store) and carries an unmistakable
+    `[UNRECOGNISED SOURCE ...]` marker instead of a real citation if the
+    store holds a source this module has no rule for. `subset_lines` is
+    this codebase's own answer to NERRS's OTHER requirement ("the subset of
+    data that was used"), which NERRS's template has no placeholder for."""
 
     text: str
     acknowledgement: str
@@ -496,6 +603,7 @@ class NdbcStore:
 
     def __init__(self, db_path: Path):
         db_path.parent.mkdir(parents=True, exist_ok=True)
+        self._db_path = db_path
         self._conn = sqlite3.connect(db_path)
         self._conn.execute(
             "CREATE TABLE IF NOT EXISTS observations ("
@@ -530,6 +638,22 @@ class NdbcStore:
             " n_new INTEGER NOT NULL)"
         )
         self._conn.commit()
+
+    def connection(self) -> sqlite3.Connection:
+        """The sanctioned seam for a caller that owns an AUXILIARY table in
+        this same store file -- one `NdbcStore` doesn't know about and has
+        no reason to (e.g. `sources/wqp.py`'s `wqp_stations`, discovered
+        station positions kept alongside the readings they belong to).
+
+        `NdbcStore` stays generic: it is never taught about any particular
+        caller's table. What it DOES guarantee is that this is the same
+        connection `bulk_writer`'s transaction commits/rolls back, so DDL
+        and DML a caller issues here through the returned connection share
+        that same atomicity for free -- write into it inside a
+        `with store.bulk_writer(...)` block and a rollback takes it with
+        the rest of that batch.
+        """
+        return self._conn
 
     def append(self, station: str, rows: Sequence[Observation]) -> int:
         """Insert `rows`, de-duplicated by (station, timestamp).
@@ -576,6 +700,17 @@ class NdbcStore:
             "SELECT COUNT(*) FROM observations WHERE station = ?", (station,)
         ).fetchone()
         return n
+
+    def stations(self) -> list[str]:
+        """Every distinct station with at least one row in `observations`,
+        sorted -- e.g. for a caller (`sources/wqp.py`) that needs to compare
+        what has been imported against what has a known position."""
+        return [
+            r[0]
+            for r in self._conn.execute(
+                "SELECT DISTINCT station FROM observations ORDER BY station"
+            )
+        ]
 
     def time_span(self, station: str) -> tuple[datetime, datetime] | None:
         """(earliest, latest) stored timestamp for `station`, or `None` if empty."""
@@ -723,11 +858,26 @@ class NdbcStore:
         return out
 
     def citation(self) -> Citation:
-        """Generate the NERRS citation from what THIS store actually holds
-        right now -- never a hardcoded string (see this module's docstring).
+        """Generate the citation from what THIS store actually holds right
+        now -- never a hardcoded string (see this module's docstring).
         Always returns a complete `Citation`, even for an empty store or one
         with data but no provenance (an honest `accessed_date=None` rather
         than a fabricated date -- see `.text`'s wording in that case).
+
+        Two different "nothing to go on" states, kept deliberately distinct
+        (Task 3 review, finding 2):
+
+        - NO provenance at all (`sources == ()`; an empty store, or one that
+          predates provenance tracking): there is nothing to generate FROM,
+          so this falls back to the same NERRS-shaped "[NO RECORDED ACCESS
+          ...]" text this store has always produced for that case.
+        - Provenance IS on record but names a source this module has no
+          citation rule for (an unrecognised prefix): unlike the empty-store
+          case, silently falling back to the NERRS citation here would be a
+          real misattribution -- it would credit NERRS for data that might
+          not be NERRS's. So this produces a loud `[UNRECOGNISED SOURCE
+          ...]` marker instead of any real citation, for `.text`,
+          `.acknowledgement`, and `.disclaimer` alike.
         """
         prov = self.provenance()
         accessed_dt = max((p.accessed_at for p in prov), default=None)
@@ -738,7 +888,38 @@ class NdbcStore:
             date_str = f"{accessed_date.day} {accessed_date:%B} {accessed_date.year}"
         else:
             date_str = "[NO RECORDED ACCESS -- this store predates provenance tracking]"
-        text = NERRS_CITATION_TEMPLATE.format(date=date_str)
+
+        if not sources:
+            # Nothing recorded at all -- the honest fallback, unchanged by
+            # this rewrite: state the NERRS default this store has always
+            # defaulted to, with the "[NO RECORDED ACCESS ...]" date making
+            # clear no real access is actually on file.
+            text = NERRS_CITATION_TEMPLATE.format(date=date_str)
+            acknowledgement = NERRS_ACKNOWLEDGEMENT
+            disclaimer = NERRS_DISCLAIMER
+        else:
+            unmatched = tuple(
+                s for s in sources if not any(s.startswith(p) for p in _KNOWN_SOURCE_PREFIXES)
+            )
+            marker = _unrecognised_source_block(unmatched) if unmatched else None
+
+            # One block per source family actually present. Task 10's ruling
+            # was that this is GENERATED from the store so it can neither
+            # overclaim nor underclaim; a fixed NERRS template overclaims
+            # the moment the store holds anything else.
+            text_blocks = [
+                t.format(date=date_str) for t in _blocks_for(sources, _CITATION_BY_SOURCE_PREFIX)
+            ]
+            ack_blocks = _blocks_for(sources, _ACKNOWLEDGEMENT_BY_SOURCE_PREFIX)
+            disclaimer_blocks = _blocks_for(sources, _DISCLAIMER_BY_SOURCE_PREFIX)
+            if marker is not None:
+                text_blocks.append(marker)
+                ack_blocks.append(marker)
+                disclaimer_blocks.append(marker)
+
+            text = "\n\n".join(text_blocks)
+            acknowledgement = "\n\n".join(ack_blocks)
+            disclaimer = "\n\n".join(disclaimer_blocks)
 
         wq_stations = [
             r[0] for r in self._conn.execute("SELECT DISTINCT station FROM observations")
@@ -761,8 +942,8 @@ class NdbcStore:
 
         return Citation(
             text=text,
-            acknowledgement=NERRS_ACKNOWLEDGEMENT,
-            disclaimer=NERRS_DISCLAIMER,
+            acknowledgement=acknowledgement,
+            disclaimer=disclaimer,
             accessed_date=accessed_date,
             subset_lines=subset_lines,
             sources=sources,
