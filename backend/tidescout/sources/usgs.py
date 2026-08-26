@@ -320,7 +320,44 @@ def _daily_means(points: list[tuple[datetime, float]]) -> dict:
     return {d: fmean(vs) for d, vs in days.items()}
 
 
-def water_summary(fishery: Fishery, cache: Cache, month: int) -> WaterSummary:
+def water_summary(
+    fishery: Fishery, cache: Cache, month: int, day: date | None = None
+) -> WaterSummary:
+    """Water temperature and (bay-wide) salinity -- LIVE by default, a past
+    date's own daily mean when `day` names one.
+
+    The SAME split `discharge_summary` uses, for the SAME reason: `day=None`,
+    `day` == today, or `day` in the future all take `_live_water_summary`
+    (the original, unconditional behaviour); a `day` strictly before today
+    takes `_historical_water_summary` instead, reading that date's own USGS
+    daily mean via `fetch_daily` rather than whatever the live 7-day window
+    happens to read right now. `month` still selects the climatology
+    fallback either way -- callers pass `day.month` today (see `dayloader.
+    load_day`) and could pass `day.month` derived from `day` itself once
+    both are threaded through, but keeping them as two separate parameters
+    matches `discharge_summary`'s shape and does not force every existing
+    caller (three in `test_usgs.py` alone) to change.
+
+    This was the last day-blind input `dayloader.load_day` still had after
+    `discharge_summary` was fixed (2026-08-26 review): `water_temp` carries
+    weight 1.0 for speckled trout and southern flounder (joint-highest of
+    the nine factors) and 0.8 for redfish, so scoring a July day on today's
+    live August water was a larger error than the discharge blindness this
+    mirrors.
+
+    `source` stays exactly as honest (and exactly as limited) as the live
+    path already was: it names whichever sensor supplied TEMPERATURE (or
+    `"climatology"` if none did), never necessarily the one that supplied
+    SALINITY -- see `payload._bay_salinity_reading`'s docstring for the
+    concrete gap that leaves. Closing THAT is a `WaterSensor`/`WaterSummary`
+    shape change, not a `day`-threading one, and stays out of scope here.
+    """
+    if day is not None and day < datetime.now(UTC).date():
+        return _historical_water_summary(fishery, cache, month, day)
+    return _live_water_summary(fishery, cache, month)
+
+
+def _live_water_summary(fishery: Fishery, cache: Cache, month: int) -> WaterSummary:
     usgs_sensors = [w for w in fishery.stations.water if w.kind == "usgs"]
     temp_f = trend = salinity = None
     source = "climatology"
@@ -340,6 +377,46 @@ def water_summary(fishery: Fishery, cache: Cache, month: int) -> WaterSummary:
             sal_points = series.get((w.station, PARAM_SALINITY), [])
             if sal_points and salinity is None:
                 salinity = sal_points[-1][1]
+    if temp_f is None:
+        temp_f = fishery.climatology.water_temp_f_by_month[month]
+        source = "climatology"
+    if salinity is None:
+        salinity = fishery.climatology.salinity_ppt_by_month[month]
+    return WaterSummary(temp_f, trend, salinity, source)
+
+
+def _historical_water_summary(
+    fishery: Fishery, cache: Cache, month: int, day: date
+) -> WaterSummary:
+    """`day`'s own USGS daily means (NWIS `dv`, statCd 00003) for temperature
+    and salinity, each independently -- mirrors `_live_water_summary`'s
+    per-parameter fallback and its exact trend shape (latest vs the mean of
+    the 3 most recent PRIOR days with data, not necessarily calendar-
+    consecutive), just evaluated at a fixed `day` instead of "now". `fetch_
+    daily` already returns one value per calendar day, so there is no
+    `_daily_means`-style collapse step to run first, unlike the live path's
+    `fetch_series` (instantaneous values, many per day).
+    """
+    usgs_sensors = [w for w in fishery.stations.water if w.kind == "usgs"]
+    temp_f = trend = salinity = None
+    source = "climatology"
+    if usgs_sensors:
+        sites = [w.station for w in usgs_sensors]
+        start = day - timedelta(days=7)
+        temp_daily = fetch_daily(sites, PARAM_TEMP_C, str(start), str(day), cache)
+        sal_daily = fetch_daily(sites, PARAM_SALINITY, str(start), str(day), cache)
+        for w in usgs_sensors:
+            temp_by_day = dict(temp_daily.get(w.station, []))
+            if day in temp_by_day and temp_f is None:
+                temp_f = temp_by_day[day] * 9 / 5 + 32
+                days = sorted(temp_by_day)
+                if len(days) >= 4:
+                    latest, prior = days[-1], days[-4:-1]
+                    trend = (temp_by_day[latest] - fmean([temp_by_day[d] for d in prior])) * 9 / 5
+                source = f"usgs:{w.station}"
+            sal_by_day = dict(sal_daily.get(w.station, []))
+            if day in sal_by_day and salinity is None:
+                salinity = sal_by_day[day]
     if temp_f is None:
         temp_f = fishery.climatology.water_temp_f_by_month[month]
         source = "climatology"

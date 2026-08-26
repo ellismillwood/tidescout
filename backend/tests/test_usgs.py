@@ -299,6 +299,59 @@ def test_water_summary_mixed_live_temp_climatology_salinity(tmp_path):
     assert summary.salinity_ppt == fishery.climatology.salinity_ppt_by_month[8]
 
 
+def test_water_summary_reads_the_days_own_daily_mean_for_a_past_date(monkeypatch, fishery, cache):
+    """The last day-blind input `dayloader.load_day` had (2026-08-26
+    review): before this, `water_summary` always read the live 7-day
+    window regardless of `day`, so a July date scored on today's live
+    August water was wrong by up to half a sub-score on `water_temp`
+    (weight 1.0 for speckled trout/southern flounder). Proven here by
+    reading a DIFFERENT temperature from the live path and the historical
+    path in the SAME test, on the SAME station.
+    """
+    station = fishery.stations.water[0].station
+    target = date(2020, 1, 15)
+
+    def fake_fetch_series(sites, params, period_days, cache):
+        # LIVE path: "today", 30.0 C.
+        return {(station, usgs.PARAM_TEMP_C): [(datetime.now(UTC), 30.0)]}
+
+    def fake_fetch_daily(sites, param, start, end, cache):
+        # HISTORICAL path: `target`, a different value (18.0 C) -- and no
+        # salinity at all, so that half falls to climatology, exactly as
+        # the live path's own per-parameter fallback already allows.
+        if param == usgs.PARAM_TEMP_C:
+            return {station: [(target, 18.0)]}
+        return {}
+
+    monkeypatch.setattr(usgs, "fetch_series", fake_fetch_series)
+    monkeypatch.setattr(usgs, "fetch_daily", fake_fetch_daily)
+
+    live = usgs.water_summary(fishery, cache, month=1)
+    historical = usgs.water_summary(fishery, cache, month=1, day=target)
+
+    assert live.temp_f == pytest.approx(30.0 * 9 / 5 + 32)
+    assert historical.temp_f == pytest.approx(18.0 * 9 / 5 + 32)
+    assert live.temp_f != historical.temp_f
+    assert historical.source == f"usgs:{station}"
+    assert historical.salinity_ppt == fishery.climatology.salinity_ppt_by_month[1]
+
+
+def test_water_summary_ignores_day_for_today_and_the_future(monkeypatch, fishery, cache):
+    """Mirrors `test_discharge_summary_ignores_day_for_today_and_the_future`:
+    a future date has no daily mean to read (USGS has not measured it yet),
+    and `day` == today must not change existing callers' behaviour."""
+    calls = []
+    monkeypatch.setattr(usgs, "_live_water_summary", lambda f, c, m: calls.append("live") or None)
+    monkeypatch.setattr(
+        usgs, "_historical_water_summary", lambda f, c, m, d: calls.append("historical") or None
+    )
+    today = datetime.now(UTC).date()
+    usgs.water_summary(fishery, cache, month=8, day=None)
+    usgs.water_summary(fishery, cache, month=8, day=today)
+    usgs.water_summary(fishery, cache, month=8, day=today + timedelta(days=3))
+    assert calls == ["live", "live", "live"]
+
+
 def _summary(now, lagged):
     return DischargeSummary(now, lagged, "med", [], [], [])
 
