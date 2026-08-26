@@ -1038,6 +1038,29 @@ def daily_swings(
     return out
 
 
+def _store_swing_pairs(
+    store_usable: dict[str, float],
+    store_swings: dict[str, dict[date, float]],
+    discharge_by_day: dict[date, float],
+) -> list[Observation]:
+    """(distance, that day's composite discharge, that day's tidal swing) for
+    every admitted store station's swing reading whose day has a paired
+    discharge in `discharge_by_day`.
+
+    Factored out of `collect_observations` (previously an inline list
+    comprehension) so it can be called against BOTH the smoothed and the RAW
+    discharge maps and the two counts diffed -- see
+    `CalibrationInput.n_swing_no_discharge_history` -- without a second,
+    drift-prone copy of the same filter.
+    """
+    return [
+        (store_usable[s], discharge_by_day[d], v)
+        for s in sorted(store_usable)
+        for d, v in sorted(store_swings.get(s, {}).items())
+        if d in discharge_by_day
+    ]
+
+
 def is_off_axis(stem_km: float, declared: bool) -> bool:
     """Whether a station sits on a branch the 1-D coordinate cannot place.
 
@@ -1196,6 +1219,24 @@ class CalibrationInput:
     # itself was dark (`composite_discharge_by_day`), which is a different
     # failure with a different remedy.
     n_no_discharge_history: int = 0
+    # How many OBSERVATION rows (USGS + NERRS daily means, WQP grabs
+    # combined) were dropped because their day had a genuine raw composite
+    # discharge that did NOT survive `smooth_discharge`'s window -- i.e. a
+    # DIFFERENT reason from `n_wqp_no_discharge_day` (no discharge for that
+    # day at all, e.g. a river gauge's own record starting later than a
+    # station's earliest sample). `n_no_discharge_history` above counts DAYS
+    # lost from the series; a day can carry more than one admitted station's
+    # reading, so the day-level count alone cannot be read as an
+    # observation-level one -- e.g. 112 days lost at tau=7 on the real
+    # Winyah record cost 164 observations, not 112. Reject-and-report at the
+    # granularity a reader actually needs: a smaller `len(observations)` is
+    # not visibility.
+    n_obs_no_discharge_history: int = 0
+    # The same accounting as `n_obs_no_discharge_history`, for `swings`
+    # instead of `observations` -- tracked separately because the two lists
+    # are separate populations with separate row counts (e.g. 142 swings
+    # lost at tau=7, a different number from the 164 observations above).
+    n_swing_no_discharge_history: int = 0
     # `fishery.salinity.discharge_memory_days` this input's discharge was
     # smoothed at -- carried through so a caller (the CLI, `profile_memory`)
     # can report the window actually used rather than assume it.
@@ -1704,14 +1745,25 @@ def collect_observations(
     # average, and 0.25 is exactly the phase at which the model's tidal
     # term vanishes. Only instantaneous samples need a real phase.
     obs_phases = [FIT_PHASE] * len(observations)
-    store_pairs = _dated_daily_mean_pairs(
-        {s: sorted(store_means[s].items()) for s in store_usable}, by_day, store_usable
-    )
+    # Rows that WOULD have paired against `raw_by_day` (genuine discharge
+    # existed for that day) but did not survive `smooth_discharge`'s window
+    # -- i.e. observations lost specifically to insufficient history, not to
+    # a day with no discharge at all. Diffed against the raw pairing rather
+    # than tracked incrementally, so this can never drift from what
+    # `_dated_daily_mean_pairs` itself actually admits.
+    n_usgs_lost_to_history = len(
+        _dated_daily_mean_pairs(salinity_daily, raw_by_day, usable)
+    ) - len(usgs_pairs)
+    store_daily = {s: sorted(store_means[s].items()) for s in store_usable}
+    store_pairs = _dated_daily_mean_pairs(store_daily, by_day, store_usable)
     store_obs = [obs for _, obs in store_pairs]
     observations += store_obs
     obs_days += [d for d, _ in store_pairs]
     sources += ["nerrs"] * len(store_obs)
     obs_phases += [FIT_PHASE] * len(store_obs)
+    n_store_lost_to_history = len(
+        _dated_daily_mean_pairs(store_daily, raw_by_day, store_usable)
+    ) - len(store_obs)
 
     # WQP grabs are individual observations, not daily means -- each keeps
     # its own timestamp so it resolves to its own tidal phase rather than
@@ -1722,6 +1774,7 @@ def collect_observations(
     # there rather than here).
 
     n_wqp_no_discharge_day = 0
+    n_wqp_lost_to_history = 0
     n_no_phase = 0
     n_wqp_phase_resolved = 0
     for site, series in sorted(wqp_series.items()):
@@ -1730,15 +1783,29 @@ def collect_observations(
         dist = wqp_usable[site]
         for ts, ppt in series:
             day = ts.astimezone(tz).date()
-            if day not in by_day:
-                # No composite discharge for this grab's day -- e.g. the day
-                # a river gauge's own record starts later than this WQP
-                # station's earliest sample. Counted rather than silently
-                # dropped, per this module's reject-and-report rule; the
-                # site-record loop above already filters these same rows out
-                # of `n_days`, so a station cannot read `used=yes` while
-                # actually contributing zero rows without it showing here.
+            if day not in raw_by_day:
+                # No composite discharge for this grab's day AT ALL -- e.g.
+                # the day a river gauge's own record starts later than this
+                # WQP station's earliest sample. Counted rather than
+                # silently dropped, per this module's reject-and-report
+                # rule; the site-record loop above already filters these
+                # same rows out of `n_days`, so a station cannot read
+                # `used=yes` while actually contributing zero rows without
+                # it showing here. Tested against `raw_by_day` (not `by_day`)
+                # so this stays true of every row it counts -- a day that
+                # DID have a genuine discharge but lost it to smoothing is a
+                # different failure, counted below instead.
                 n_wqp_no_discharge_day += 1
+                continue
+            if day not in by_day:
+                # This day HAD a real composite discharge, but
+                # `smooth_discharge` dropped it for insufficient preceding
+                # history at `memory_days` -- the observation-level sibling
+                # of `n_no_discharge_history` (a day count), rolled into
+                # `n_obs_no_discharge_history` alongside the USGS/NERRS rows
+                # lost the same way, not into `n_wqp_no_discharge_day`
+                # above, whose CLI text names a different cause.
+                n_wqp_lost_to_history += 1
                 continue
             ph = phase_at(events, ts) if events else None
             if ph is None:
@@ -1764,13 +1831,22 @@ def collect_observations(
         if usable
         else {}
     )
-    swings = daily_swings(iv, usgs.PARAM_SALINITY, by_day, usable)
-    swings += [
-        (store_usable[s], by_day[d], v)
-        for s in sorted(store_usable)
-        for d, v in sorted(store_swings.get(s, {}).items())
-        if d in by_day
-    ]
+    usgs_swings = daily_swings(iv, usgs.PARAM_SALINITY, by_day, usable)
+    # Diffed against the raw discharge map the same way `n_usgs_lost_to_history`
+    # is above -- swing rows that would have paired against `raw_by_day` but
+    # lost their day to `smooth_discharge`'s window.
+    n_usgs_swing_lost_to_history = len(
+        daily_swings(iv, usgs.PARAM_SALINITY, raw_by_day, usable)
+    ) - len(usgs_swings)
+    store_swing_rows = _store_swing_pairs(store_usable, store_swings, by_day)
+    n_store_swing_lost_to_history = len(
+        _store_swing_pairs(store_usable, store_swings, raw_by_day)
+    ) - len(store_swing_rows)
+    swings = usgs_swings + store_swing_rows
+    n_obs_no_discharge_history = (
+        n_usgs_lost_to_history + n_store_lost_to_history + n_wqp_lost_to_history
+    )
+    n_swing_no_discharge_history = n_usgs_swing_lost_to_history + n_store_swing_lost_to_history
     span = (min(by_day), max(by_day)) if by_day else None
     return CalibrationInput(
         observations, swings, records, days, span, swing_days,
@@ -1780,6 +1856,8 @@ def collect_observations(
         observation_phases=obs_phases, n_no_phase=n_no_phase,
         n_wqp_phase_resolved=n_wqp_phase_resolved,
         n_no_discharge_history=n_no_discharge_history,
+        n_obs_no_discharge_history=n_obs_no_discharge_history,
+        n_swing_no_discharge_history=n_swing_no_discharge_history,
         memory_days=fishery.salinity.discharge_memory_days,
         discharge_by_day=raw_by_day, observation_days=obs_days,
     )
@@ -1797,6 +1875,23 @@ def collect_observations(
 # would not give it. THIS IS A DIAGNOSTIC SCAN, not a calibration: nothing
 # here writes `discharge_memory_days` anywhere, and adopting a value off the
 # curve is a decision for a human, made in a later task.
+
+
+def _largest_tau_retained_days(
+    data: CalibrationInput, taus: Sequence[float]
+) -> dict[date, float]:
+    """The LARGEST tau in `taus`, smoothed against `data.discharge_by_day` --
+    both `_memory_rows_by_tau` and `_memory_row_phases` restrict to this
+    map's keys, so it is computed once here rather than twice, independently,
+    where a future edit could let the two drift apart on which population
+    "the largest tau" means.
+
+    Empty (rather than raising) when there is nothing to restrict to: no
+    candidates, or a `CalibrationInput` built without dating information.
+    """
+    if not taus or not data.discharge_by_day:
+        return {}
+    return smooth_discharge(data.discharge_by_day, max(taus))[0]
 
 
 def _memory_rows_by_tau(
@@ -1828,8 +1923,7 @@ def _memory_rows_by_tau(
     """
     if not taus or not data.discharge_by_day or not data.observation_days:
         return {tau: [] for tau in taus}
-    largest = max(taus)
-    retained_at_largest, _ = smooth_discharge(data.discharge_by_day, largest)
+    retained_at_largest = _largest_tau_retained_days(data, taus)
     by_tau: dict[float, list[Observation]] = {}
     for tau in taus:
         smoothed, _ = smooth_discharge(data.discharge_by_day, tau)
@@ -1841,6 +1935,38 @@ def _memory_rows_by_tau(
             if day in retained_at_largest
         ]
     return by_tau
+
+
+def _memory_row_phases(data: CalibrationInput, taus: Sequence[float]) -> tuple[float, ...]:
+    """Each row `_memory_rows_by_tau` retains, restricted and ordered the
+    IDENTICAL way, at its OWN resolved tidal phase.
+
+    A row's phase does not depend on tau (only its discharge does), so this
+    is computed once, independently of which tau is being scored, and reused
+    for every candidate -- `profile_memory` passes the SAME tuple to
+    `fit_intrusion` at every tau in the grid.
+
+    `()` (empty, `fit_intrusion`'s own "score every row at the shared
+    FIT_PHASE" default) when `data.observation_phases` was never populated --
+    the same degrade-safe posture `data.observation_sources` /
+    `data.observation_phases` already take elsewhere in this module for a
+    `CalibrationInput` that has no need of them.
+    """
+    if (
+        not data.observation_phases
+        or not taus
+        or not data.discharge_by_day
+        or not data.observation_days
+    ):
+        return ()
+    retained_at_largest = _largest_tau_retained_days(data, taus)
+    return tuple(
+        ph
+        for _obs, day, ph in zip(
+            data.observations, data.observation_days, data.observation_phases, strict=True
+        )
+        if day in retained_at_largest
+    )
 
 
 def profile_memory_row_counts(data: CalibrationInput, taus: Sequence[float]) -> list[int]:
@@ -1863,17 +1989,33 @@ def profile_memory(
 ) -> list[tuple[float, float]]:
     """(tau, rmse) for every candidate discharge-memory timescale in `taus`.
 
-    Fits `l0_km`/`k`/`front_width_km` fresh at each tau via `fit_intrusion`
-    (no swings -- see `_memory_rows_by_tau`, which only tracks dates for the
-    level `observations`, not `swings`), on the SAME row population at every
-    tau -- the days the LARGEST tau in `taus` retains. `rmse` is
-    `fit_intrusion`'s own `rmse_ppt`, the LEVEL residual only, matching what
-    `_warnings` itself reads as the fit quality signal.
+    Fits `l0_km`/`k`/`front_width_km` fresh at each tau via `fit_intrusion`,
+    on the SAME row population at every tau (the days the LARGEST tau in
+    `taus` retains -- see `_memory_rows_by_tau`), each row scored at its OWN
+    resolved tidal phase via `_memory_row_phases` -- NOT the shared
+    `FIT_PHASE` every row would otherwise default to. That matters here as
+    much as it does for the headline fit: 1,860 of a real 12,725-row
+    collection are WQP grabs whose individually-resolved phase is worth up
+    to 12.3 ppt at some sites (see `fit_intrusion`'s own docstring), and this
+    scan would silently misscore every one of them if it dropped `phases` on
+    the floor while `collect_observations` carries them.
 
-    A candidate whose restricted population is too thin to fit at all
-    (fewer than 3 rows, or every row sharing one discharge --
-    `fit_intrusion`'s own guards) reports `nan` rather than raising, so one
-    unfittable tau does not blank the whole curve.
+    No `swings` are scored here -- `_memory_rows_by_tau`/`_memory_row_phases`
+    only track dates for the LEVEL `observations`, not `swings`, so
+    `excursion_km` is never freed in this scan regardless of `cfg`. `rmse` is
+    therefore `fit_intrusion`'s `rmse_ppt`, which is ALWAYS the level-only
+    residual (see that function's own `level_resid`) whether or not swings
+    were supplied to it -- not because it is what `_warnings` favours
+    (`_warnings` reports level AND swing rmse separately when both are
+    present), but because level rmse is the only residual this scan ever
+    produces.
+
+    A candidate whose restricted population is too thin to fit at all --
+    fewer than 3 rows, or every row sharing one discharge, `fit_intrusion`'s
+    own preconditions (see its `ValueError`s) -- reports `nan` rather than
+    calling it, so one unfittable tau does not blank the whole curve and a
+    genuine bug inside `fit_intrusion` itself is not swallowed as `nan`
+    alongside it.
 
     DIAGNOSTIC ONLY. This does not write `cfg.discharge_memory_days`, does
     not touch `fitted`, and picks nothing: the caller (today, `salinity
@@ -1881,13 +2023,14 @@ def profile_memory(
     later task, whether anything on it is worth adopting.
     """
     rows_by_tau = _memory_rows_by_tau(data, taus)
+    phases = _memory_row_phases(data, taus)
     out: list[tuple[float, float]] = []
     for tau in taus:
         rows = rows_by_tau[tau]
-        try:
-            _, diag = fit_intrusion(rows, cfg)
-            rmse = diag["rmse_ppt"]
-        except ValueError:
-            rmse = float("nan")
-        out.append((tau, rmse))
+        flows = {q for _, q, _ in rows}
+        if len(rows) < 3 or len(flows) < 2:
+            out.append((tau, float("nan")))
+            continue
+        _, diag = fit_intrusion(rows, cfg, phases=phases)
+        out.append((tau, diag["rmse_ppt"]))
     return out

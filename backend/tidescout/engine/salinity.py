@@ -69,18 +69,22 @@ WHAT `cfs` MEANS WHEN `discharge_memory_days` IS NONZERO
 `SalinityConfig.discharge_memory_days` (see `models.py`) names a timescale
 this module does not read and cannot enforce. Every function below --
 `salinity_at`, `salinity_field`, `front_width_at`, `intrusion_length_km` --
-takes `cfs` as a bare float and uses it exactly as given, whatever it
-represents. If a config was FITTED (`pipeline.salinity_fit.
-collect_observations` / `profile_memory`) against MEMORY-SMOOTHED discharge
-(`discharge_memory_days > 0`), every `cfs` passed here afterward must be
-that SAME smoothed quantity -- `pipeline.salinity_fit.smooth_discharge`,
-same `tau_days` -- not the raw same-day reading. A caller that passes raw
-discharge to a config fitted with memory is applying the fitted parameters
-to a different physical quantity than they were fitted to, and NOTHING
-here or in `SalinityConfig` can detect it: a smoothed float and a raw one
-are indistinguishable once they arrive as `cfs`. `discharge_memory_days`
-stays 0.0 (its default, "read today's discharge only") on every fishery
-this codebase ships today, so no shipped caller is exposed to this yet --
+takes `cfs` as a bare float and, once past `_effective_cfs`'s 1 cfs floor
+(below which 0.0, 0.5 and 1.0 all evaluate identically -- see that
+function's own docstring), uses it exactly as given, whatever it
+represents. If a config was FITTED (`pipeline.salinity_fit.fit_intrusion`,
+typically called on `collect_observations`'s output -- `profile_memory`
+does NOT fit a config; it discards the one it builds internally and returns
+`rmse` only) against MEMORY-SMOOTHED discharge (`discharge_memory_days >
+0`), every `cfs` passed here afterward must be that SAME smoothed quantity
+-- `pipeline.salinity_fit.smooth_discharge`, same `tau_days` -- not the raw
+same-day reading. A caller that passes raw discharge to a config fitted
+with memory is applying the fitted parameters to a different physical
+quantity than they were fitted to, and NOTHING here or in `SalinityConfig`
+can detect it: a smoothed float and a raw one are indistinguishable once
+they arrive as `cfs`. `discharge_memory_days` stays 0.0 (its default, "read
+today's discharge only") on every fishery this codebase ships today, so no
+shipped caller is exposed to this yet --
 but the next one that reads a fitted, memory-configured `SalinityConfig`
 and calls this module with a same-day discharge reading will be, silently.
 """

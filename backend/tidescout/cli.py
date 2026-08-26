@@ -492,7 +492,11 @@ def salinity_calibrate(
         f"{data.n_no_discharge_history} day(s) excluded from the composite discharge "
         "series for insufficient preceding history (see "
         "pipeline.salinity_fit.smooth_discharge) -- a DIFFERENT reason from a river "
-        "gauge going dark, so tracked separately."
+        "gauge going dark, so tracked separately. That day-level loss also drops "
+        f"{data.n_obs_no_discharge_history} salinity observation(s) and "
+        f"{data.n_swing_no_discharge_history} tidal-swing observation(s) that would "
+        "otherwise have paired against one of those days -- a smaller observation "
+        "count above is not visibility on its own; this line is."
     )
     if data.discharge_by_day and data.observation_days:
         from tidescout.pipeline.salinity_fit import (
@@ -513,6 +517,15 @@ def salinity_calibrate(
                 f"{tau:g}", "n/a" if math.isnan(rmse) else f"{rmse:.4f}", str(n)
             )
         console.print(profile_table)
+        if all(n == 0 for n in counts):
+            console.print(
+                f"[yellow]the grid's largest tau ({max(MEMORY_GRID_DAYS):g} days) "
+                "outran the record[/yellow] -- its window needs more unbroken "
+                "preceding discharge history than this collection has, so every "
+                "candidate above restricted to an EMPTY population: 0 rows, "
+                "rmse n/a. The table above is not evidence of a poor fit; there "
+                "was no common population to fit at all."
+            )
         console.print(
             "[dim]Every tau above is scored on the SAME row population -- the days "
             "the largest tau in this grid retains -- so a larger tau cannot win by "
