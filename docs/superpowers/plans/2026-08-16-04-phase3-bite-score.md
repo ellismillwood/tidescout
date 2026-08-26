@@ -1518,7 +1518,18 @@ Expected: FAIL — `ModuleNotFoundError: tidescout.pipeline.payload`.
 
 - [ ] **Step 3: Implement**
 
-`build_payload` calls `conditions.assemble_day`, resolves the regime blend with `flow.blend_regimes`, maps each hour to a phase with `phase.library_phase`, loads and blends the flow states, computes `activation.structure_fields`, evaluates salinity per feature from the distance field, then scores all 24 hours × 3 species and all features. Convert NaN to `None` at the JSON boundary.
+`build_payload` calls **`dayloader.load_day`** — NOT `conditions.assemble_day` directly. `load_day`
+is the only caller of `assemble_day` in the codebase: it wraps every source fetch in its own
+`attempt()` helper that catches `SourceUnavailable`, records the source name in `missing`, and keeps
+going. Calling `assemble_day` yourself means re-implementing that reject-and-report machinery, and
+`test_payload_records_missing_inputs_at_the_top_level` is asserting on exactly the list it produces.
+
+**Import the MODULE, not the name:** `from tidescout.sources import dayloader`, then call
+`dayloader.load_day(...)`. The fixtures below monkeypatch `dayloader.load_day`, and a
+`from ... import load_day` binds the function into `payload`'s namespace at import time, so the
+patch would not take and the tests would silently hit the network.
+
+Then it resolves the regime blend with `flow.blend_regimes`, maps each hour to a phase with `phase.library_phase`, loads and blends the flow states, computes `activation.structure_fields`, evaluates salinity per feature from the distance field, then scores all 24 hours × 3 species and all features. Convert NaN to `None` at the JSON boundary.
 
 **The fixtures, verified against the real engine on 2026-08-26 before this task ran.** Add to
 `backend/tests/conftest.py`. `build_payload` is called as `build_payload(**synthetic_day)`, so the
@@ -1602,10 +1613,6 @@ def synthetic_day_freshet(monkeypatch):
     extrapolated salinity and a clamped regime blend."""
     return _payload_kwargs(monkeypatch, 22_996.0, "freshet")
 ```
-
-If `build_payload` ends up importing `load_day` by value (`from ... import load_day`) rather than by
-module, patch the name where `payload` binds it instead — the fixture must intercept the real call
-path, and a monkeypatch that silently fails to bind would let these tests hit the network.
 
 - [ ] **Step 4: Add the CLI and run a real day**
 
