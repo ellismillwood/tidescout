@@ -684,7 +684,7 @@ Each factor takes the hour's conditions and returns a sub-score plus the sentenc
 of its response, not a calibrated value -- the curves are tuned by hindcasting
 and every number in them will move."""
 
-import pytest
+import math
 
 from tidescout.config import load_species
 from tidescout.engine.conditions import HourlyConditions
@@ -1115,6 +1115,11 @@ salinity reads `confidence=1.0, constrained_share=0.74` -- two facts, neither hi
 never alters a weight**; that was the owner's explicit call on 2026-08-26.
 
 - [ ] **Step 1: Write the failing tests**
+
+**This appends to the file Task 4 created.** It uses `pytest.approx`, which Task 4's version does
+NOT import — Task 4 deliberately omits it, because an unused `import pytest` is ruff F401 and would
+fail `make check` there. Add `import pytest` to the file's EXISTING top import block (its own group,
+after `import math` and a blank line). Do not add an import mid-file: that is ruff E402.
 
 ```python
 # backend/tests/test_score.py (append)
