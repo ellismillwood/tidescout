@@ -224,7 +224,20 @@ def test_a_sharper_front_at_high_flow_drops_salinity_faster_with_distance():
     constant-width control at that SAME discharge. With `L` and `x`
     identical between the two, any extra drop-off is attributable to the
     width term alone, checked at both a low and a high discharge so the
-    isolation is not an artefact of picking one flow."""
+    isolation is not an artefact of picking one flow.
+
+    NOTE the extra drop comes from opposite mechanisms at the two flows,
+    and only the high one is literally "sharper" -- this test's name
+    describes that case, not both. At 60,000 cfs the scaled width (2.046
+    km) is genuinely narrower than the 5.0 km control and the front really
+    is sharper. At 2,000 cfs -- BELOW `q0_cfs` -- the scaled width is
+    WIDER (6.285 km), and the x window (2-14 km, against L = 22.626 km)
+    sits entirely on the sigmoid's landward tail: there the narrower
+    control saturates toward `ocean_ppt` and goes nearly flat, while the
+    wider real curve is still transitioning, so the wider front is the one
+    that drops more. Both directions are the width term doing the work,
+    which is what is asserted; neither is `L` moving, since `L` is pinned
+    per-discharge above."""
     x = np.array([2.0, 6.0, 10.0, 14.0])
     phase = 0.25
 
