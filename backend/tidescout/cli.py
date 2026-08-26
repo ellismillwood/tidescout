@@ -157,6 +157,111 @@ def conditions(
 
 
 @app.command()
+def score(
+    slug: str,
+    date_str: str,
+    species_name: str = typer.Option(
+        None, "--species", help="redfish|speckled_trout|southern_flounder (default: all three)"
+    ),
+    model: str = typer.Option("best", "--model", help="best|gfs|ecmwf|icon|hrrr|nbm"),
+) -> None:
+    """Score a full day: 24 hours x species, plus a top-ranked feature list.
+
+    One `build_payload` call scores every species regardless of `--species` --
+    the whole point of the payload is that scrubbing (or, here, switching
+    species) never triggers a re-score -- `--species` only narrows what this
+    command PRINTS.
+    """
+    from datetime import date as date_cls
+
+    from tidescout.pipeline.payload import build_payload
+    from tidescout.sources.cache import default_cache
+    from tidescout.sources.weather import WEATHER_MODELS
+
+    if model not in WEATHER_MODELS:
+        raise typer.BadParameter(f"model must be one of {sorted(WEATHER_MODELS)}")
+    try:
+        day = date_cls.fromisoformat(date_str)
+    except ValueError as exc:
+        raise typer.BadParameter(f"date must be YYYY-MM-DD, got {date_str!r}") from exc
+
+    payload = build_payload(slug, day, model, default_cache())
+    all_species = sorted(payload["species"])
+    if species_name is not None and species_name not in payload["species"]:
+        raise typer.BadParameter(f"species must be one of {all_species}, got {species_name!r}")
+    names = [species_name] if species_name else all_species
+
+    for name in names:
+        rows = payload["species"][name]["hours"]
+        table = Table(
+            title=f"{payload['slug']} — {payload['day']} — {name} ({payload['model_label']})"
+        )
+        for col in ("hour", "score", "conf", "constr", "top factors"):
+            table.add_column(col, justify="right" if col in ("score", "conf", "constr") else "left")
+        for h in rows:
+            # The two highest-VALUE subs (0-1, post-curve) are what pushed
+            # this hour up or down the most -- "why is 3 PM an 82" (spec
+            # section 8) always has a visible answer, per-hour, not just in
+            # aggregate.
+            scored = [s for s in h["subs"] if s["value"] is not None]
+            top = sorted(scored, key=lambda s: -s["value"])[:2]
+            bars = ", ".join(f"{s['factor']} {s['value']:.2f}" for s in top)
+            mark = "*" if h["provisional"] else ""
+            table.add_row(
+                h["time"][11:16], f"{h['score']}{mark}", f"{h['confidence']:.2f}",
+                f"{h['constrained_share']:.2f}", bars,
+            )
+        console.print(table)
+        if any(h["provisional"] for h in rows):
+            console.print(
+                "[dim]* one or more factors this hour are provisional -- scored at full "
+                "weight but unconstrained by an observation; see that hour's `subs` for "
+                "which.[/dim]"
+            )
+
+        feats = payload["species"][name]["features"]
+        if not feats:
+            console.print(
+                "[dim]no per-feature flow state resolved for this day -- see "
+                "`missing` below (a real Cache with tide-station network access "
+                "is needed for the map half; the fishery-wide score above does "
+                "not need it).[/dim]"
+            )
+        else:
+            ranked = sorted(
+                feats.items(),
+                key=lambda kv: max(row["activation"] for row in kv[1]["hours"]),
+                reverse=True,
+            )[:10]
+            ftable = Table(title=f"{name} — top-ranked features")
+            for col in ("feature", "type", "peak activation", "at hour"):
+                ftable.add_column(col)
+            for key, data in ranked:
+                best = max(data["hours"], key=lambda r: r["activation"])
+                ftable.add_row(key, data["type"], str(best["activation"]), best["time"][11:16])
+            console.print(ftable)
+
+    if payload["missing"]:
+        console.print(f"[yellow]missing sources: {', '.join(payload['missing'])}[/yellow]")
+    if payload["salinity"]["extrapolated"]:
+        console.print(
+            "[yellow]salinity: discharge is outside the calibrated range -- treat "
+            "the salinity factor as a guess, not a measurement[/yellow]"
+        )
+    if not payload["salinity"]["fitted"]:
+        console.print(
+            "[yellow]salinity: this fishery's model has never been calibrated against "
+            "an observation (fitted=False) -- every salinity number above is "
+            "theoretical[/yellow]"
+        )
+    if payload["flow"]["clamped"]:
+        console.print(
+            "[yellow]flow: today's discharge pinned the regime blend to a single "
+            "simulated state rather than interpolating between two[/yellow]"
+        )
+
+
+@app.command()
 def features(slug: str, rebuild: bool = typer.Option(False, "--rebuild")) -> None:
     """Build (if needed) and summarize the ambush-feature inventory."""
     from shapely.geometry import shape
