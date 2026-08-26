@@ -1518,7 +1518,94 @@ Expected: FAIL — `ModuleNotFoundError: tidescout.pipeline.payload`.
 
 - [ ] **Step 3: Implement**
 
-`build_payload` calls `conditions.assemble_day`, resolves the regime blend with `flow.blend_regimes`, maps each hour to a phase with `phase.library_phase`, loads and blends the flow states, computes `activation.structure_fields`, evaluates salinity per feature from the distance field, then scores all 24 hours × 3 species and all features. Convert NaN to `None` at the JSON boundary. Add fixtures `synthetic_day` and `synthetic_day_freshet` to `backend/tests/conftest.py`.
+`build_payload` calls `conditions.assemble_day`, resolves the regime blend with `flow.blend_regimes`, maps each hour to a phase with `phase.library_phase`, loads and blends the flow states, computes `activation.structure_fields`, evaluates salinity per feature from the distance field, then scores all 24 hours × 3 species and all features. Convert NaN to `None` at the JSON boundary.
+
+**The fixtures, verified against the real engine on 2026-08-26 before this task ran.** Add to
+`backend/tests/conftest.py`. `build_payload` is called as `build_payload(**synthetic_day)`, so the
+fixture yields its KWARGS and monkeypatches the day loader — the payload's own assembly is what is
+under test, not the network.
+
+```python
+# backend/tests/conftest.py (append)
+from datetime import date, datetime, timedelta
+from zoneinfo import ZoneInfo
+
+import pytest
+
+TZ = ZoneInfo("America/New_York")
+_MID = datetime(2026, 8, 16, tzinfo=TZ)
+_EVENTS = [(0, 0.2, "L"), (6.2, 4.8, "H"), (12.42, 0.3, "L"),
+           (18.6, 4.9, "H"), (24.84, 0.2, "L")]
+
+
+def _day_conditions(cfs: float, bucket: str):
+    """A full 24-hour day with EVERY factor live.
+
+    Verified 2026-08-26 against the real `score_factors`/`combine`: nothing is
+    excluded on any hour, and the score varies 68..84 across the day. A fixture
+    on which the score never moves would pass most payload assertions while
+    testing nothing.
+    """
+    from tidescout.engine.conditions import DayConditions, HourlyConditions
+    from tidescout.engine.tides import TideEvent, stage_at
+    from tidescout.sources.astronomy import MoonInfo, SolunarPeriod, SunTimes
+    from tidescout.sources.usgs import DischargeSummary, WaterSummary
+
+    events = [TideEvent(time=_MID + timedelta(hours=o), height_ft=h, kind=k)
+              for o, h, k in _EVENTS]
+    hours = []
+    for i in range(24):
+        t = _MID + timedelta(hours=i)
+        st = stage_at(events, t)
+        hours.append(HourlyConditions(
+            time=t, air_temp_f=82.0, wind_speed_kn=8.0, wind_dir_deg=180.0,
+            pressure_mb=1014.0, pressure_trend_mb_3h=-0.8, cloud_cover_pct=30.0,
+            tide_height_ft=2.5,
+            tide_phase=(st.phase if st else None),
+            tide_frac=(round(st.frac, 3) if st else None),
+            current_speed_kn=1.2))
+    return DayConditions(
+        fishery_slug="winyah-bay", day=date(2026, 8, 16),
+        model_label="gfs_seamless", hours=hours,
+        sun=SunTimes(dawn=_MID + timedelta(hours=6), sunrise=_MID + timedelta(hours=6.5),
+                     sunset=_MID + timedelta(hours=20), dusk=_MID + timedelta(hours=20.5)),
+        moon=MoonInfo(phase_frac=0.5, rise=_MID + timedelta(hours=19),
+                      set=_MID + timedelta(hours=7), transits=[_MID + timedelta(hours=13)]),
+        solunar=[SolunarPeriod(kind="major", start=_MID + timedelta(hours=12.5),
+                               end=_MID + timedelta(hours=14.5))],
+        water=WaterSummary(temp_f=84.0, temp_trend_f_3d=0.4,
+                           salinity_ppt=None, source="synthetic"),
+        discharge=DischargeSummary(
+            cfs_now=cfs, cfs_lagged=cfs * 0.95, bucket=bucket, sites=["02135200"],
+            contributing=["02135200"], stale=[], trend=1.05, limb="steady"),
+        missing=[])
+
+
+def _payload_kwargs(monkeypatch, cfs: float, bucket: str):
+    from tidescout.sources import dayloader
+
+    monkeypatch.setattr(dayloader, "load_day", lambda *a, **k: _day_conditions(cfs, bucket))
+    return dict(slug="winyah-bay", day=date(2026, 8, 16),
+                model_label="gfs_seamless", cache=None)
+
+
+@pytest.fixture
+def synthetic_day(monkeypatch):
+    """Median flow: 4,200 cfs, inside `calibration_range_cfs` (1232-22996)."""
+    return _payload_kwargs(monkeypatch, 4_200.0, "med")
+
+
+@pytest.fixture
+def synthetic_day_freshet(monkeypatch):
+    """22,996 cfs -- the TOP of the calibrated range and 3.7x the highest flow
+    ever simulated, so this is the fixture that must surface both an
+    extrapolated salinity and a clamped regime blend."""
+    return _payload_kwargs(monkeypatch, 22_996.0, "freshet")
+```
+
+If `build_payload` ends up importing `load_day` by value (`from ... import load_day`) rather than by
+module, patch the name where `payload` binds it instead — the fixture must intercept the real call
+path, and a monkeypatch that silently fails to bind would let these tests hit the network.
 
 - [ ] **Step 4: Add the CLI and run a real day**
 
@@ -1528,11 +1615,30 @@ tidescout score winyah-bay 2026-08-16 --species redfish
 
 Expected: 24 rows with scores, factor bars and reasons, plus a top-ranked feature list.
 
-- [ ] **Step 5: Hindcast a day you remember**
+- [ ] **Step 5: Prepare the hindcast log — the OUTCOMES are Ellis's, not the implementer's**
 
-Run `tidescout score winyah-bay <a date you fished> --species <what you caught>` for **at least three days you remember well** — ideally one excellent, one poor, one middling. Record predicted score against what actually happened in `docs/superpowers/plans/2026-08-16-hindcast-log.md`.
+**This step is split, because half of it cannot be done by whoever implements this task.** The
+ground truth here is what actually happened on days Ellis fished. No agent has that, and inventing
+plausible outcomes to fill the table would be the single most damaging thing that could happen to
+this project — every curve would then be tuned against fiction, and the tuning would look rigorous.
 
-**Do not tune anything on the first pass.** Collect all three first, then adjust curves — tuning against a single day fits noise, and the curves are the most over-fittable surface in the project.
+The implementer does the half that is mechanical:
+
+1. Pick three dates spanning the discharge range (one near median flow, one high, one low), run
+   `tidescout score winyah-bay <date> --species <each>`, and record the PREDICTED scores.
+2. Create `docs/superpowers/plans/2026-08-16-hindcast-log.md` with one row per date and species:
+   date, discharge, predicted score, the two or three top factors driving it, `confidence`,
+   `constrained_share` — and an **empty** `actual` column plus an empty `notes` column.
+3. State in the log's header that no row is usable for tuning until Ellis fills the `actual` column,
+   and that `constrained_share` below 1.0 means the salinity factor in that row rests on an
+   uncalibrated model.
+
+Then STOP. Do not tune any curve, and do not fill the `actual` column.
+
+**Ellis's homework, recorded here so it is not lost:** pick days he remembers well — ideally one
+excellent, one poor, one middling — and fill in what actually happened. Only then is tuning
+meaningful, and even then: collect all three before adjusting anything. Tuning against a single day
+fits noise, and these curves are the most over-fittable surface in the project.
 
 - [ ] **Step 6: Commit**
 
