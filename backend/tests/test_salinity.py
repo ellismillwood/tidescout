@@ -2444,7 +2444,11 @@ def test_a_constant_series_smooths_to_itself():
         return date(2026, 5, 1) + timedelta(days=n - 1)
 
     raw = {day(d): 5000.0 for d in range(1, 61)}
-    out, _ = smooth_discharge(raw, 7.0)
+    out, dropped = smooth_discharge(raw, 7.0)
+    # tau=7, window=28, so a day needs 29 days of history (itself + 28 prior)
+    # -- only days 29-60 of the 60-day record qualify.
+    assert len(out) == 32
+    assert dropped == 28
     assert all(v == pytest.approx(5000.0) for v in out.values())
 
 
@@ -2498,5 +2502,9 @@ def test_a_gap_in_the_discharge_record_drops_the_days_it_covers():
 
     raw = {day(d): 5000.0 for d in range(1, 61) if d != 45}
     out, dropped = smooth_discharge(raw, 7.0)
+    # 59 days present (60 minus day 45). A day survives when n >= 29 (full
+    # 29-day window) and its lookback clears the day-45 hole, i.e. n <= 44
+    # -- days 29-44 survive, 16 of them; the other 43 are dropped.
+    assert len(out) == 16
+    assert dropped == 43
     assert day(46) not in out
-    assert dropped > 0
