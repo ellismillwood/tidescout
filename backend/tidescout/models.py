@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class RiverGauge(BaseModel):
@@ -475,3 +475,31 @@ class Fishery(BaseModel):
                 "renormalising silently would hide an authoring mistake"
             )
         return shares
+
+
+class Curve(BaseModel):
+    """A piecewise-linear response curve, authored as breakpoints.
+
+    Deliberately not a parameterised shape ("bell(centre, width)"): the point of
+    keeping these in YAML is that Ellis can read what the model believes about
+    wind or water temperature and edit it directly, and a list of (x, y) pairs
+    is legible in a way a formula is not. It is also exhaustively testable --
+    every claim about a curve reduces to an assertion about a number.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    x: list[float]
+    y: list[float]
+
+    @model_validator(mode="after")
+    def _check(self):
+        if len(self.x) != len(self.y):
+            raise ValueError("curve x and y must be the same length")
+        if len(self.x) < 2:
+            raise ValueError("a curve needs at least two points to interpolate")
+        if any(b <= a for a, b in zip(self.x, self.x[1:], strict=False)):
+            raise ValueError("curve x values must be in strictly ascending order")
+        if any(v < 0.0 or v > 1.0 for v in self.y):
+            raise ValueError("curve y values must be between 0 and 1")
+        return self
