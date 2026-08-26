@@ -117,8 +117,11 @@ southern_flounder:
       x: [0.0, 0.08, 0.20, 0.45, 0.80, 1.50]
       y: [0.15, 0.60, 1.00, 0.80, 0.45, 0.15]
     stage:              # spec section 8: "flounder bias to ebb" -- peaks on the falling half
+      # x runs a full tidal cycle, so x=0.0 and x=1.0 are the same physical
+      # instant (low water) and y must match at both ends -- 0.50, closed,
+      # not the 0.60 an earlier draft left at the wrap (2026-08-26 review).
       x: [0.00, 0.30, 0.55, 0.75, 0.90, 1.00]
-      y: [0.50, 0.60, 0.85, 1.00, 0.90, 0.60]
+      y: [0.50, 0.60, 0.85, 1.00, 0.90, 0.50]
     light:
       x: [0.0, 1.0, 2.0, 4.0, 8.0]
       y: [1.00, 0.90, 0.75, 0.60, 0.50]
