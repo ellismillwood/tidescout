@@ -487,6 +487,40 @@ def salinity_calibrate(
         "means) score at the fixed daily-mean FIT_PHASE, which is correct for a "
         "quantity that already averages the tide out."
     )
+    console.print(
+        f"discharge memory window: {data.memory_days:g} day(s); "
+        f"{data.n_no_discharge_history} day(s) excluded from the composite discharge "
+        "series for insufficient preceding history (see "
+        "pipeline.salinity_fit.smooth_discharge) -- a DIFFERENT reason from a river "
+        "gauge going dark, so tracked separately."
+    )
+    if data.discharge_by_day and data.observation_days:
+        from tidescout.pipeline.salinity_fit import (
+            MEMORY_GRID_DAYS,
+            profile_memory,
+            profile_memory_row_counts,
+        )
+
+        profile = profile_memory(data, fishery.salinity, MEMORY_GRID_DAYS)
+        counts = profile_memory_row_counts(data, MEMORY_GRID_DAYS)
+        profile_table = Table(
+            title="discharge-memory tau scan -- DIAGNOSTIC ONLY, nothing here is adopted"
+        )
+        for col in ("tau (days)", "rmse (ppt)", "rows scored"):
+            profile_table.add_column(col)
+        for (tau, rmse), n in zip(profile, counts, strict=True):
+            profile_table.add_row(
+                f"{tau:g}", "n/a" if math.isnan(rmse) else f"{rmse:.4f}", str(n)
+            )
+        console.print(profile_table)
+        console.print(
+            "[dim]Every tau above is scored on the SAME row population -- the days "
+            "the largest tau in this grid retains -- so a larger tau cannot win by "
+            "discarding the hardest observations rather than fitting better. This is "
+            "a scan, not a calibration: discharge_memory_days stays whatever the "
+            f"fishery YAML sets ({fishery.salinity.discharge_memory_days:g} day(s) "
+            "here), and nothing above is written back to it.[/dim]"
+        )
     from tidescout.pipeline.estuary import ON_AXIS_MAX_KM
 
     console.print(

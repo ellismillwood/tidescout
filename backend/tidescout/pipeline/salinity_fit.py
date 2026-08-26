@@ -943,6 +943,14 @@ def smooth_discharge(
     return out, dropped
 
 
+# Candidate discharge-memory timescales `profile_memory` scores, in days. At
+# least the set the task-3 brief names. This is a SCAN, not a search: nothing
+# reads this module's return value and writes it back to a fishery YAML --
+# the caller (today, `salinity calibrate`'s CLI output) decides whether
+# anything on the curve is worth adopting.
+MEMORY_GRID_DAYS: tuple[float, ...] = (0.0, 3.0, 5.0, 7.0, 10.0, 14.0, 21.0, 30.0)
+
+
 def composite_discharge_by_day(
     fishery: Fishery, daily: dict[str, list[tuple[date, float]]]
 ) -> dict[date, float]:
@@ -964,6 +972,31 @@ def composite_discharge_by_day(
     }
 
 
+def _dated_daily_mean_pairs(
+    salinity_daily: dict[str, list[tuple[date, float]]],
+    discharge_by_day: dict[date, float],
+    distance_km: dict[str, float],
+) -> list[tuple[date, Observation]]:
+    """`pair_daily_means`'s exact filter-and-pair logic, with each row's
+    calendar day kept alongside it.
+
+    `Observation` itself carries no date (see its own comment) -- deliberate,
+    since most callers never need one. `collect_observations` does: it tracks
+    each row's day (`CalibrationInput.observation_days`) so `profile_memory`
+    can later re-derive the SAME rows at a DIFFERENT tau. This is the one
+    place that pairing happens, so `pair_daily_means` below is now a thin
+    wrapper over it rather than a second, drift-prone copy of the same
+    filter.
+    """
+    return [
+        (day, (distance_km[site], discharge_by_day[day], ppt))
+        for site, rows in sorted(salinity_daily.items())
+        if site in distance_km
+        for day, ppt in rows
+        if day in discharge_by_day
+    ]
+
+
 def pair_daily_means(
     salinity_daily: dict[str, list[tuple[date, float]]],
     discharge_by_day: dict[date, float],
@@ -971,11 +1004,8 @@ def pair_daily_means(
 ) -> list[Observation]:
     """(distance, that day's composite discharge, that day's mean salinity)."""
     return [
-        (distance_km[site], discharge_by_day[day], ppt)
-        for site, rows in sorted(salinity_daily.items())
-        if site in distance_km
-        for day, ppt in rows
-        if day in discharge_by_day
+        obs
+        for _, obs in _dated_daily_mean_pairs(salinity_daily, discharge_by_day, distance_km)
     ]
 
 
@@ -1158,6 +1188,35 @@ class CalibrationInput:
     # so overstates this by roughly 7x on the real Winyah run (12,725 vs.
     # 1,860, measured 2026-08-24).
     n_wqp_phase_resolved: int = 0
+    # How many days were dropped from the composite discharge series
+    # entirely -- not any one observation, the SERIES -- for insufficient
+    # preceding history at `memory_days` (see `smooth_discharge`'s own
+    # `dropped` return). Reject-and-report: a day silently missing from the
+    # series would otherwise look identical to a day where a river gauge
+    # itself was dark (`composite_discharge_by_day`), which is a different
+    # failure with a different remedy.
+    n_no_discharge_history: int = 0
+    # `fishery.salinity.discharge_memory_days` this input's discharge was
+    # smoothed at -- carried through so a caller (the CLI, `profile_memory`)
+    # can report the window actually used rather than assume it.
+    memory_days: float = 0.0
+    # The RAW composite discharge series -- i.e. BEFORE `smooth_discharge`
+    # -- keyed by day. `observations`/`swings` above already carry the
+    # discharge smoothed at `memory_days`; this is kept separately so
+    # `profile_memory` can re-smooth at OTHER candidate tau values without
+    # a second network/store round trip. Default empty for the same reason
+    # `observation_sources` defaults empty: several existing tests hand-build
+    # a `CalibrationInput` with no need of it, and an empty dict correctly
+    # makes `profile_memory`'s row count zero rather than raising.
+    discharge_by_day: dict[date, float] = field(default_factory=dict)
+    # Same length and order as `observations` -- the calendar day EACH row
+    # was drawn from (a WQP grab's own day, or the day a USGS/NERRS daily
+    # mean was computed over). This is what lets `profile_memory` re-pair a
+    # row's (distance, ppt) with a DIFFERENT tau's smoothed discharge for
+    # that SAME day, rather than needing to re-run the network/store
+    # pairing from scratch for every candidate tau. Default empty for the
+    # same reason `discharge_by_day` is.
+    observation_days: list[date] = field(default_factory=list)
 
 
 def daily_means_and_swings(
@@ -1466,8 +1525,21 @@ def collect_observations(
     if earliest:
         start = min(start, min(earliest))
 
-    salinity_daily, by_day, usgs_sensors, usgs_dist = _usgs_inputs(
+    salinity_daily, raw_by_day, usgs_sensors, usgs_dist = _usgs_inputs(
         slug, fishery, cache, days, start, end, max_snap_m
+    )
+    # Every use of `by_day` below this point reads the MEMORY-SMOOTHED
+    # series, not the raw one `_usgs_inputs` returned -- `raw_by_day` is kept
+    # only so `profile_memory` can later re-smooth it at OTHER candidate tau
+    # values (see `CalibrationInput.discharge_by_day`). `n_no_discharge_history`
+    # counts days the series lost to insufficient preceding history, a
+    # DIFFERENT reason from a river gauge going dark
+    # (`composite_discharge_by_day`), so it is tracked separately rather than
+    # folded into an existing counter. `tau_days=0.0` (today's fishery YAMLs)
+    # returns `raw_by_day` unchanged with nothing dropped, so this is a no-op
+    # everywhere memory is not configured.
+    by_day, n_no_discharge_history = smooth_discharge(
+        raw_by_day, fishery.salinity.discharge_memory_days
     )
     store_dist = _store_distances(slug, fishery, [w.station for w in store_sensors])
     store_coords = _store_coords([w.station for w in store_sensors])
@@ -1620,16 +1692,24 @@ def collect_observations(
     n_off_axis = sum(1 for r in records if "axis" in r.note.lower())
     n_colocated = sum(1 for r in records if "co-located" in r.note.lower())
 
-    observations = pair_daily_means(salinity_daily, by_day, usable)
+    # `_dated_daily_mean_pairs`, not `pair_daily_means`, so each row's
+    # calendar day is kept alongside it in `obs_days` -- `profile_memory`
+    # needs that to re-pair a row against a DIFFERENT candidate tau's
+    # smoothed discharge later (see `CalibrationInput.observation_days`).
+    usgs_pairs = _dated_daily_mean_pairs(salinity_daily, by_day, usable)
+    observations = [obs for _, obs in usgs_pairs]
+    obs_days = [d for d, _ in usgs_pairs]
     sources = ["usgs"] * len(observations)
     # FIT_PHASE here is CORRECT, not a fallback: a daily mean IS a tidal
     # average, and 0.25 is exactly the phase at which the model's tidal
     # term vanishes. Only instantaneous samples need a real phase.
     obs_phases = [FIT_PHASE] * len(observations)
-    store_obs = pair_daily_means(
+    store_pairs = _dated_daily_mean_pairs(
         {s: sorted(store_means[s].items()) for s in store_usable}, by_day, store_usable
     )
+    store_obs = [obs for _, obs in store_pairs]
     observations += store_obs
+    obs_days += [d for d, _ in store_pairs]
     sources += ["nerrs"] * len(store_obs)
     obs_phases += [FIT_PHASE] * len(store_obs)
 
@@ -1671,6 +1751,7 @@ def collect_observations(
                 n_no_phase += 1
                 continue
             observations.append((dist, by_day[day], ppt))
+            obs_days.append(day)
             sources.append("wqp")
             obs_phases.append(ph)
             n_wqp_phase_resolved += 1
@@ -1698,4 +1779,115 @@ def collect_observations(
         n_wqp_no_discharge_day=n_wqp_no_discharge_day,
         observation_phases=obs_phases, n_no_phase=n_no_phase,
         n_wqp_phase_resolved=n_wqp_phase_resolved,
+        n_no_discharge_history=n_no_discharge_history,
+        memory_days=fishery.salinity.discharge_memory_days,
+        discharge_by_day=raw_by_day, observation_days=obs_days,
     )
+
+
+# -- Profiling the discharge-memory timescale (Task 3 of this plan) ---------
+#
+# tau is fitted by a PROFILED SCAN, not by adding it to `fit_intrusion`'s
+# least-squares vector: it changes the model's INPUT (which discharge a row
+# is paired with), not the model's SHAPE, so re-smoothing inside every
+# residual evaluation would be both slow and a mischaracterisation of what
+# tau is. This section re-smooths ONCE per candidate on a grid instead, fits
+# the spatial parameters fresh at each, and reports the whole (tau, rmse)
+# curve -- which is the evidence the task asks for; a single fitted number
+# would not give it. THIS IS A DIAGNOSTIC SCAN, not a calibration: nothing
+# here writes `discharge_memory_days` anywhere, and adopting a value off the
+# curve is a decision for a human, made in a later task.
+
+
+def _memory_rows_by_tau(
+    data: CalibrationInput, taus: Sequence[float]
+) -> dict[float, list[Observation]]:
+    """(distance, tau-smoothed discharge, ppt) rows for every candidate `tau`
+    in `taus`, ALL restricted to the SAME calendar days: the ones the LARGEST
+    tau in `taus` retains.
+
+    A larger tau drops more early days for insufficient history (see
+    `smooth_discharge`). Scoring each candidate on whatever ITS OWN window
+    happens to retain would let a tau win the scan by discarding the hardest
+    observations rather than by fitting the retained ones better --
+    `profile_memory_row_counts` exists precisely so a test can prove that
+    does NOT happen. Restricting every candidate to the largest tau's
+    surviving days fixes the population once; every smaller tau in `taus` is
+    then GUARANTEED to also retain every one of those days (a smaller tau's
+    window is a strict prefix of a larger one's, and `smooth_discharge` only
+    drops a day when some day in ITS window is missing from the raw series),
+    so this restriction never turns a survivor into a `KeyError`.
+
+    Needs `data.discharge_by_day` (the RAW, unsmoothed composite series) and
+    `data.observation_days` (each `data.observations` row's own calendar
+    day) -- both populated by `collect_observations`, and both empty on a
+    `CalibrationInput` built without dating information (several existing
+    tests hand-build one for reasons that have nothing to do with memory).
+    Empty inputs correctly make every candidate's row list empty rather than
+    raising -- there is nothing to profile without dated data.
+    """
+    if not taus or not data.discharge_by_day or not data.observation_days:
+        return {tau: [] for tau in taus}
+    largest = max(taus)
+    retained_at_largest, _ = smooth_discharge(data.discharge_by_day, largest)
+    by_tau: dict[float, list[Observation]] = {}
+    for tau in taus:
+        smoothed, _ = smooth_discharge(data.discharge_by_day, tau)
+        by_tau[tau] = [
+            (dist, smoothed[day], ppt)
+            for (dist, _cfs, ppt), day in zip(
+                data.observations, data.observation_days, strict=True
+            )
+            if day in retained_at_largest
+        ]
+    return by_tau
+
+
+def profile_memory_row_counts(data: CalibrationInput, taus: Sequence[float]) -> list[int]:
+    """The row count each candidate `tau` in `taus` is actually scored on.
+
+    Exists so a test can PROVE every candidate sees the same population --
+    `len(set(profile_memory_row_counts(...))) == 1` -- rather than trust by
+    inspection that `profile_memory` performs the restriction its own
+    docstring describes. See `_memory_rows_by_tau`, which both this and
+    `profile_memory` share, for how that restriction is computed.
+    """
+    rows_by_tau = _memory_rows_by_tau(data, taus)
+    return [len(rows_by_tau[tau]) for tau in taus]
+
+
+def profile_memory(
+    data: CalibrationInput,
+    cfg: SalinityConfig,
+    taus: Sequence[float] = MEMORY_GRID_DAYS,
+) -> list[tuple[float, float]]:
+    """(tau, rmse) for every candidate discharge-memory timescale in `taus`.
+
+    Fits `l0_km`/`k`/`front_width_km` fresh at each tau via `fit_intrusion`
+    (no swings -- see `_memory_rows_by_tau`, which only tracks dates for the
+    level `observations`, not `swings`), on the SAME row population at every
+    tau -- the days the LARGEST tau in `taus` retains. `rmse` is
+    `fit_intrusion`'s own `rmse_ppt`, the LEVEL residual only, matching what
+    `_warnings` itself reads as the fit quality signal.
+
+    A candidate whose restricted population is too thin to fit at all
+    (fewer than 3 rows, or every row sharing one discharge --
+    `fit_intrusion`'s own guards) reports `nan` rather than raising, so one
+    unfittable tau does not blank the whole curve.
+
+    DIAGNOSTIC ONLY. This does not write `cfg.discharge_memory_days`, does
+    not touch `fitted`, and picks nothing: the caller (today, `salinity
+    calibrate`'s CLI output) prints the curve and a human decides, in a
+    later task, whether anything on it is worth adopting.
+    """
+    rows_by_tau = _memory_rows_by_tau(data, taus)
+    out: list[tuple[float, float]] = []
+    for tau in taus:
+        rows = rows_by_tau[tau]
+        try:
+            _, diag = fit_intrusion(rows, cfg)
+            rmse = diag["rmse_ppt"]
+        except ValueError:
+            rmse = float("nan")
+        out.append((tau, rmse))
+    return out

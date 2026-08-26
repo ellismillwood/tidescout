@@ -1738,6 +1738,26 @@ def test_calibrate_reports_off_axis_count_and_stem_fallback(monkeypatch):
     assert "co-located" in out.lower()
 
 
+def test_calibration_reports_the_memory_window_and_its_exclusions(monkeypatch):
+    """A dropped observation must be visible, not inferred from a smaller n."""
+    from typer.testing import CliRunner
+
+    from tidescout.cli import app
+
+    monkeypatch.setattr(
+        salinity_fit, "collect_observations",
+        lambda *a, **k: salinity_fit.CalibrationInput(
+            [(19.03, 4000.0, 6.0), (16.68, 9000.0, 3.0), (19.03, 9000.0, 2.0)],
+            [], [], 90, (date(2016, 1, 1), date(2026, 8, 22)), 90,
+            n_no_discharge_history=17, memory_days=7.0,
+        ),
+    )
+    result = CliRunner().invoke(app, ["salinity", "calibrate", "winyah-bay"])
+    out = re.sub(r"\s+", " ", re.sub(r"\x1b\[[0-9;]*m", "", result.output))
+    assert "17" in out
+    assert "history" in out.lower()
+
+
 def test_wqp_stations_enter_as_individual_grab_samples_not_daily_means(monkeypatch):
     """WQP samples are single grabs -- a one-sample day fails the 40-reading
     gate in `daily_means_and_swings`, correctly. They must enter the fit
@@ -2508,3 +2528,153 @@ def test_a_gap_in_the_discharge_record_drops_the_days_it_covers():
     assert len(out) == 16
     assert dropped == 43
     assert day(46) not in out
+
+
+def test_a_longer_memory_drops_more_days_for_insufficient_history():
+    from datetime import date, timedelta
+
+    from tidescout.pipeline.salinity_fit import smooth_discharge
+
+    # Day index d maps to a sequential calendar day starting May 1, 2026 (not
+    # day-of-month d, which overflows past May's 31 days for d > 31).
+    def day(n: int) -> date:
+        return date(2026, 5, 1) + timedelta(days=n - 1)
+
+    raw = {day(d): 5000.0 for d in range(1, 61)}
+    # Both taus must leave SURVIVORS -- tau=21 gives a 84-day window against a
+    # 60-day record, so it drops everything and the assertion would then hold
+    # at saturation rather than because memory length drives exclusions.
+    # tau=3 -> window 12 -> 12 dropped; tau=10 -> window 40 -> 40 dropped.
+    _, few = smooth_discharge(raw, 3.0)
+    _, many = smooth_discharge(raw, 10.0)
+    assert many > few
+    assert few == 12 and many == 40
+
+
+# -- Task 3 of this plan: wiring memory into the fit, and profiling tau -----
+
+
+def _synthetic_calibration_input() -> "salinity_fit.CalibrationInput":
+    """A `CalibrationInput` with a DATED discharge span long enough for a
+    30-day memory window (needs 121 days of unbroken preceding history: a
+    day survives tau=30's 120-day window only from day index 121 onward).
+
+    Deliberately mixes two groups of observation days:
+
+    * day(50)/day(60) -- old enough to survive tau=0 and tau=7's (much
+      shorter) windows, but NOT tau=30's 120-day one.
+    * day(125)..day(145) -- old enough to survive every tau in the [0, 7, 30]
+      grid, tau=30 included.
+
+    A scan that let each tau keep whatever ITS OWN window retained would
+    therefore score tau in {0, 7} on 7 rows and tau=30 on only 5 -- three
+    DIFFERENT populations. Restricting every candidate to the days tau=30
+    retains (the correct behaviour) scores all three on the same 5. This
+    mix is what makes `test_memory_scan_scores_every_tau_on_the_same_rows`
+    able to fail on the defect it names; a helper whose observations all
+    already fell inside every candidate's own window (as an earlier draft
+    of this fixture did) could not distinguish the two implementations at
+    all -- both would report equal counts, RIGHT AND WRONG ALIKE, and the
+    test would pass by accident, not by proof.
+    """
+    from datetime import timedelta
+
+    def day(n: int) -> date:
+        return date(2026, 1, 1) + timedelta(days=n - 1)
+
+    discharge_by_day = {day(n): 3000.0 + 25.0 * n for n in range(1, 151)}
+    # The discharge value paired with each in `observations` below is a
+    # placeholder -- `_memory_rows_by_tau` replaces it with each candidate
+    # tau's own smoothed value at that day, never reading this one.
+    obs_days = [day(n) for n in (50, 60, 125, 130, 135, 140, 145)]
+    observations = [
+        (10.0 + 0.5 * i, discharge_by_day[d], 5.0 + 0.1 * i)
+        for i, d in enumerate(obs_days)
+    ]
+    return salinity_fit.CalibrationInput(
+        observations, [], [], 150, (day(1), day(150)), 0,
+        discharge_by_day=discharge_by_day, observation_days=obs_days,
+    )
+
+
+def test_memory_scan_scores_every_tau_on_the_same_rows():
+    """Larger tau drops more early days for insufficient history. Scoring each
+    tau on whatever it happens to retain would let a tau win by discarding
+    the hardest observations rather than by fitting better."""
+    from tidescout.pipeline import salinity_fit
+
+    counts = salinity_fit.profile_memory_row_counts(_synthetic_calibration_input(), [0, 7, 30])
+    assert len(set(counts)) == 1, f"populations differ across tau: {counts}"
+
+
+def test_the_fit_path_routes_its_discharge_through_smooth_discharge(monkeypatch):
+    """If `collect_observations` inlines its own smoothing, or ignores
+    `discharge_memory_days`, every fitted parameter silently describes a
+    different quantity than a prediction caller supplies -- and nothing
+    errors, because both are floats.
+
+    This watches the fit path itself. Calling `smooth_discharge` twice and
+    comparing the two results would NOT catch it: that only proves a pure
+    function is deterministic, which is true of any implementation including
+    an inlined duplicate.
+    """
+    from datetime import datetime, timedelta
+
+    from tidescout.config import load_fishery
+
+    fishery = load_fishery("winyah-bay")
+    monkeypatch.setattr(fishery.salinity, "discharge_memory_days", 7.0)
+
+    class _Store:
+        def salinity_series(self, station):
+            base = datetime(2026, 5, 1, 4, 0, tzinfo=UTC)
+            return [(base + timedelta(minutes=15 * i), 10.0 + (i % 8)) for i in range(96)]
+
+    monkeypatch.setattr(salinity_fit, "_open_store", lambda slug: _Store())
+    monkeypatch.setattr(
+        salinity_fit, "_store_distances",
+        lambda slug, fishery, sites: {s: (19.03, 5.0) for s in sites},
+    )
+    # A discharge record long enough that a 7-day memory (28-day window) has
+    # full history for the observation days above.
+    by_day = {date(2026, 3, 1) + timedelta(days=i): 4000.0 + 10.0 * i for i in range(70)}
+    monkeypatch.setattr(
+        salinity_fit, "_usgs_inputs", lambda *a, **k: ({}, by_day, [], {}),
+    )
+    from tidescout.sources import noaa
+
+    monkeypatch.setattr(noaa, "tide_events_range", lambda *a, **k: [])
+
+    real = salinity_fit.smooth_discharge
+    seen_taus: list[float] = []
+
+    def spy(by_day, tau_days):
+        seen_taus.append(tau_days)
+        return real(by_day, tau_days)
+
+    monkeypatch.setattr(salinity_fit, "smooth_discharge", spy)
+    salinity_fit.collect_observations("winyah-bay", fishery, cache=None, days=90)
+
+    assert seen_taus, (
+        "collect_observations never called smooth_discharge -- the fit path is "
+        "reading raw discharge, or has inlined its own smoothing"
+    )
+    assert seen_taus == [7.0], f"expected the CONFIGURED tau, saw {seen_taus}"
+
+
+def test_smoothing_at_the_configured_tau_is_not_a_no_op():
+    """Guards the test above: if tau were misread as 0 everywhere, the spy
+    would still fire and still see the configured value, while the discharge
+    reaching the fit was unchanged."""
+    from datetime import date, timedelta
+
+    from tidescout.pipeline.salinity_fit import smooth_discharge
+
+    def day(n: int) -> date:
+        return date(2026, 5, 1) + timedelta(days=n - 1)
+
+    raw = {day(d): 1000.0 + 100.0 * d for d in range(1, 61)}
+    out, _ = smooth_discharge(raw, 7.0)
+    target = day(55)
+    assert out[target] != pytest.approx(raw[target])
+    assert out[target] < raw[target], "a backward-weighted mean of a rising series must lag it"
