@@ -2,9 +2,14 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from tidescout.config import load_fishery
+from tidescout.config import load_fishery, load_species
 from tidescout.models import Fishery
 from tidescout.paths import FISHERIES_DIR
+
+FACTORS = {
+    "flow", "stage", "light", "solunar", "pressure", "wind", "water_temp",
+    "salinity", "season",
+}
 
 
 def test_load_winyah_bay():
@@ -80,6 +85,8 @@ def test_real_fishery_document_has_no_unknown_top_level_keys():
     for path in FISHERIES_DIR.glob("*.yaml"):
         if path.name.endswith((".known-spots.yaml", ".tiles.yaml")):
             continue  # parsed by different models, never reach Fishery
+        if path.name == "species_weights.yaml":
+            continue  # per-species SpeciesProfile map, not a Fishery document
         raw = yaml.safe_load(path.read_text())
         Fishery.model_validate(raw)  # raises ValidationError on any extra key
 
@@ -135,3 +142,48 @@ def test_north_inlet_stations_are_marked_off_axis_and_bay_stations_are_not():
         assert by_station[station].off_axis is True, f"{station} is on North Inlet"
     for station in ("WYSS1", "NIWWBWQ", "NIWTAWQ"):
         assert by_station[station].off_axis is False, f"{station} is on the bay"
+
+
+# -- Species profiles: weights and response curves ----------------------------
+
+
+def test_all_three_species_load():
+    species = load_species()
+    assert set(species) == {"redfish", "speckled_trout", "southern_flounder"}
+
+
+def test_every_species_covers_every_factor():
+    """A factor with a weight but no curve silently scores NaN and gets
+    excluded, which looks like a dark sensor rather than a config gap."""
+    for name, profile in load_species().items():
+        assert set(profile.weights) == FACTORS, f"{name} weights"
+        assert FACTORS - {"season"} <= set(profile.curves) | {"salinity"}, f"{name} curves"
+
+
+def test_every_month_has_a_season_modifier():
+    for name, profile in load_species().items():
+        assert sorted(profile.months) == list(range(1, 13)), name
+
+
+def test_species_differ_from_one_another():
+    """Three identical profiles would mean the species lens does nothing."""
+    species = load_species()
+    trout = species["speckled_trout"].salinity
+    red = species["redfish"].salinity
+    assert trout.y != red.y, "trout should be far less salinity-tolerant than redfish"
+
+
+def test_trout_salinity_curve_penalises_near_fresh_water():
+    """Spec section 7: trout ~10-30 ppt, avoid near-fresh."""
+    from tidescout.engine.curves import evaluate
+
+    trout = load_species()["speckled_trout"].salinity
+    assert evaluate(trout, 2.0) < 0.3
+    assert evaluate(trout, 20.0) > 0.85
+
+
+def test_redfish_tolerate_the_whole_range():
+    from tidescout.engine.curves import evaluate
+
+    red = load_species()["redfish"].salinity
+    assert all(evaluate(red, s) > 0.4 for s in (2.0, 12.0, 30.0))

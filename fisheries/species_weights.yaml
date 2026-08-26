@@ -1,0 +1,135 @@
+# EVERY NUMBER HERE IS A STARTING POINT, NOT A MEASUREMENT. These curves encode
+# conventional SC inshore wisdom and are meant to be tuned against hindcasts of
+# days Ellis remembers (Task 7). Edit freely -- nothing in Python hard-codes a
+# response shape, so changing a number here changes the answer immediately.
+#
+# Curves are piecewise-linear breakpoints: `x` is the real-world quantity, `y`
+# the 0-1 sub-score. Values outside the authored x range CLAMP to the end y.
+#
+# Units: flow m/s | stage tide_frac (0 = low water, 0.5 = high) | light hours
+# from the nearest of sunrise/sunset | solunar minutes from the nearest
+# major/minor | pressure mb change over 3 h | wind knots | water_temp degF |
+# salinity ppt.
+#
+# Weights are RELATIVE, not normalised -- the combiner renormalises whatever
+# survives after missing factors are dropped.
+
+redfish:
+  weights:
+    flow: 1.0
+    stage: 0.9
+    light: 0.7
+    solunar: 0.3        # spec section 8: "small default weight, zeroable"
+    pressure: 0.6
+    wind: 0.7
+    water_temp: 0.8
+    salinity: 0.5       # broadly euryhaline -- salinity moves them, rarely stops them
+    season: 0.8
+  curves:
+    flow:
+      x: [0.0, 0.10, 0.25, 0.50, 0.90, 1.50]
+      y: [0.10, 0.45, 0.85, 1.00, 0.85, 0.45]
+    stage:              # peaks late flood: bait pushed onto flooded flats
+      x: [0.00, 0.20, 0.40, 0.55, 0.75, 1.00]
+      y: [0.45, 0.80, 1.00, 0.90, 0.65, 0.45]
+    light:
+      x: [0.0, 1.0, 2.0, 4.0, 8.0]
+      y: [1.00, 0.85, 0.65, 0.45, 0.35]
+    solunar:
+      x: [0.0, 30.0, 60.0, 120.0, 360.0]
+      y: [1.00, 0.85, 0.72, 0.58, 0.50]
+    pressure:
+      x: [-4.0, -2.0, -0.5, 0.5, 2.0, 4.0]
+      y: [0.90, 1.00, 0.82, 0.68, 0.42, 0.25]
+    wind:
+      x: [0.0, 5.0, 12.0, 18.0, 25.0, 35.0]
+      y: [0.75, 1.00, 0.90, 0.60, 0.25, 0.05]
+    water_temp:
+      x: [45.0, 55.0, 65.0, 78.0, 88.0, 95.0]
+      y: [0.30, 0.60, 0.95, 1.00, 0.70, 0.30]
+  salinity:             # tolerant across the whole estuary
+    x: [0.0, 2.0, 5.0, 15.0, 30.0, 36.0]
+    y: [0.45, 0.60, 0.80, 1.00, 0.90, 0.70]
+  months:               # fall bull-red run at the jetties
+    {1: 0.55, 2: 0.55, 3: 0.70, 4: 0.85, 5: 0.95, 6: 0.90,
+     7: 0.85, 8: 0.90, 9: 1.00, 10: 1.00, 11: 0.90, 12: 0.65}
+
+speckled_trout:
+  weights:
+    flow: 1.0
+    stage: 0.8
+    light: 0.9          # markedly more dawn/dusk-driven than redfish
+    solunar: 0.3
+    pressure: 0.7
+    wind: 0.7
+    water_temp: 1.0     # cold snaps flip them to winter-hole behaviour
+    salinity: 0.9       # spec section 7: ~10-30 ppt, avoid near-fresh
+    season: 0.8
+  curves:
+    flow:
+      x: [0.0, 0.10, 0.25, 0.50, 0.90, 1.50]
+      y: [0.12, 0.50, 0.95, 1.00, 0.70, 0.30]
+    stage:
+      x: [0.00, 0.25, 0.50, 0.70, 1.00]
+      y: [0.55, 0.95, 1.00, 0.85, 0.55]
+    light:
+      x: [0.0, 1.0, 2.0, 4.0, 8.0]
+      y: [1.00, 0.80, 0.55, 0.35, 0.25]
+    solunar:
+      x: [0.0, 30.0, 60.0, 120.0, 360.0]
+      y: [1.00, 0.85, 0.72, 0.58, 0.50]
+    pressure:
+      x: [-4.0, -2.0, -0.5, 0.5, 2.0, 4.0]
+      y: [0.85, 1.00, 0.80, 0.62, 0.35, 0.20]
+    wind:
+      x: [0.0, 5.0, 12.0, 18.0, 25.0, 35.0]
+      y: [0.80, 1.00, 0.85, 0.50, 0.20, 0.05]
+    water_temp:
+      x: [40.0, 50.0, 60.0, 75.0, 85.0, 92.0]
+      y: [0.15, 0.50, 0.90, 1.00, 0.60, 0.20]
+  salinity:             # the sharpest lens of the three -- near-fresh is close to a stop
+    x: [0.0, 2.0, 6.0, 10.0, 20.0, 30.0, 36.0]
+    y: [0.05, 0.10, 0.45, 0.85, 1.00, 0.90, 0.60]
+  months:               # spring and fall aggregations
+    {1: 0.50, 2: 0.55, 3: 0.75, 4: 0.95, 5: 1.00, 6: 0.85,
+     7: 0.75, 8: 0.75, 9: 0.95, 10: 1.00, 11: 0.90, 12: 0.60}
+
+southern_flounder:
+  weights:
+    flow: 0.9           # ambush predator: wants moving water, not fast water
+    stage: 1.0          # the strongest stage bias of the three
+    light: 0.5
+    solunar: 0.3
+    pressure: 0.5
+    wind: 0.6
+    water_temp: 1.0     # falling through the low 60s triggers the run
+    salinity: 0.6
+    season: 1.0
+  curves:
+    flow:
+      x: [0.0, 0.08, 0.20, 0.45, 0.80, 1.50]
+      y: [0.15, 0.60, 1.00, 0.80, 0.45, 0.15]
+    stage:              # spec section 8: "flounder bias to ebb" -- peaks on the falling half
+      x: [0.00, 0.30, 0.55, 0.75, 0.90, 1.00]
+      y: [0.50, 0.60, 0.85, 1.00, 0.90, 0.60]
+    light:
+      x: [0.0, 1.0, 2.0, 4.0, 8.0]
+      y: [1.00, 0.90, 0.75, 0.60, 0.50]
+    solunar:
+      x: [0.0, 30.0, 60.0, 120.0, 360.0]
+      y: [1.00, 0.88, 0.78, 0.65, 0.58]
+    pressure:
+      x: [-4.0, -2.0, -0.5, 0.5, 2.0, 4.0]
+      y: [0.85, 0.95, 0.85, 0.75, 0.55, 0.40]
+    wind:
+      x: [0.0, 5.0, 12.0, 18.0, 25.0, 35.0]
+      y: [0.85, 1.00, 0.88, 0.55, 0.22, 0.05]
+    water_temp:
+      x: [50.0, 58.0, 65.0, 78.0, 86.0, 92.0]
+      y: [0.20, 0.70, 1.00, 0.90, 0.50, 0.15]
+  salinity:
+    x: [0.0, 3.0, 8.0, 18.0, 32.0, 36.0]
+    y: [0.20, 0.40, 0.80, 1.00, 0.90, 0.75]
+  months:               # the fall run out of the estuary
+    {1: 0.35, 2: 0.35, 3: 0.55, 4: 0.75, 5: 0.90, 6: 0.90,
+     7: 0.85, 8: 0.90, 9: 1.00, 10: 1.00, 11: 0.70, 12: 0.40}

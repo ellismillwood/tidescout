@@ -503,3 +503,25 @@ class Curve(BaseModel):
         if any(v < 0.0 or v > 1.0 for v in self.y):
             raise ValueError("curve y values must be between 0 and 1")
         return self
+
+
+class SpeciesProfile(BaseModel):
+    """One species' lens on the same factor pipeline.
+
+    Weights are relative, not normalised -- the combiner renormalises whatever
+    survives after missing factors are dropped, so authoring them as "flow
+    matters about twice as much as wind" is the intended style.
+
+    `salinity` is a separate field, not a member of `curves`, because it is
+    evaluated against a modelled/observed ppt reading rather than an
+    `HourlyConditions` attribute -- Task 4 reads it on its own path. `season`
+    has no curve at all: months are discrete, so its response lives entirely
+    in `months`.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    weights: dict[str, float]
+    curves: dict[str, Curve]
+    salinity: Curve
+    months: dict[int, float]
