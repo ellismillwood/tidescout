@@ -8,9 +8,15 @@ three discharge values spanning 2,774-6,292 cfs, while the observed record runs
 
     x_eff = x + E * cos(2*pi*phase)                -- tidal shift, UNCLIPPED
     L(Q)  = L0 * (Q / Q0)^-k                        -- salt front's position
-    S(x, Q, phase) = S_ocean * 0.5 * (1 - tanh((x_eff - L(Q)) / W))
+    W(Q)  = W0 * (Q / Q0)^-k                        -- salt front's SHARPNESS
+    S(x, Q, phase) = S_ocean * 0.5 * (1 - tanh((x_eff - L(Q)) / W(Q)))
 
-W = `front_width_km`, the front's SHARPNESS, independent of L's POSITION.
+W0 = `front_width_km`, the front's width AT THE REFERENCE DISCHARGE Q0. L and
+W read the SAME exponent (`_discharge_scale`) so the front's shape stays
+coherent across discharge -- see that function's docstring for why: a
+constant W could not be sharp at high flow and broad at low flow at once,
+which real-data residuals at fixed distance showed trending -1.33 -> -3.72
+ppt (x=16.68 km) and +1.33 -> -2.03 ppt (x=19.03 km) across flow quintiles.
 
 A first version of this model used a clipped exponential --
 S = S_ocean * exp(-max(0, x_eff) / L) -- and a real-data review caught two
@@ -39,16 +45,19 @@ CALIBRATION RANGE, at any phase: 0 exact ties between the range's endpoints
 at every phase tested, re-verified against the real field.
 
 That scoping is deliberate, not decorative. Below the calibration range,
-float64 itself reintroduces a plateau: tanh(z) rounds to exactly +-1 once
-|z| exceeds ~19.06, i.e. once |x_eff - L| is at least ~19.06 * front_width_km
-(~95 km with the defaults below). `intrusion_length_km`'s 1 cfs floor pushes
-L to ~278 km at near-zero discharge, so at cfs <= ~5 -- 38x below the
-observed 1,232 cfs minimum -- the whole field reads exactly ocean_ppt
-regardless of the exact (sub-floor) discharge. That is the right physical
-limit (marine everywhere at zero river flow), and every discharge that low
-is already flagged `extrapolated=True`, but it IS a bit-exact tie -- the
-same failure mode defect 1 was about, just relocated to where this model
-never claimed to be trustworthy.
+float64 itself can still reintroduce a plateau: tanh(z) rounds to exactly
++-1 once |z| exceeds ~19.06. Before this task W was fixed at
+`front_width_km`, so `intrusion_length_km`'s 1 cfs floor alone (L -> ~278 km
+at near-zero discharge) pushed |x_eff - L| past that threshold on its own,
+and the whole field read exactly ocean_ppt regardless of the exact
+(sub-floor) discharge -- a bit-exact tie, the same failure mode defect 1 was
+about, just relocated to where this model never claimed to be trustworthy.
+Now W scales by the SAME factor as L (`_discharge_scale`), so the two grow
+together at the floor (W -> ~77 km alongside L -> ~278 km, with the defaults
+below) and that specific tie is gone: verified at cfs=1 across x in
+[0, 40] km, the field now reads 33.80-33.98 ppt -- close to, but never
+bit-identical to, ocean_ppt. Every discharge this low is still flagged
+`extrapolated=True` regardless of which form is in play.
 
 L (WHERE the front sits) is independent of W (HOW SHARP it is), so
 satisfying the head's near-fresh condition no longer has to fight the
@@ -241,6 +250,37 @@ def _effective_cfs(cfs: float) -> float:
     return max(float(cfs), 1.0)
 
 
+def _discharge_scale(cfs: float, cfg: SalinityConfig) -> float:
+    """`(Q_eff / q0)^-k` -- the one place this scaling is computed.
+
+    BOTH the intrusion length and the front width read it. They used to be
+    independent: `L` scaled with discharge while `front_width_km` was a
+    constant, and that mismatch was the model's largest systematic error.
+    Measured 2026-08-25 at FIXED distance, so it cannot be confounded with
+    position: the mean residual ran -1.33 -> -3.72 ppt across flow quintiles
+    at x=16.68 km and +1.33 -> -2.03 at x=19.03, because `L` collapses
+    37.14 -> 1.13 km across the observed 257x discharge span while the width
+    did not move at all.
+
+    Keeping it in one function is not tidiness. If a later change gave these
+    two different exponents or different floors, the front's shape would stop
+    meaning anything and NO output would look wrong -- the profile would still
+    be smooth, monotonic and plausible.
+    """
+    return (_effective_cfs(cfs) / cfg.q0_cfs) ** (-cfg.k)
+
+
+def front_width_at(cfs: float, cfg: SalinityConfig) -> float:
+    """The salt front's width at this discharge.
+
+    `cfg.front_width_km` is the width AT THE REFERENCE DISCHARGE `q0_cfs`, not
+    everywhere -- at q0 the scaling is exactly 1.0 and this returns the
+    authored value. A sharper front at high flow is the physical content: the
+    same tidal excursion then sweeps a steeper gradient.
+    """
+    return cfg.front_width_km * _discharge_scale(cfs, cfg)
+
+
 def intrusion_length_km(cfs: float, cfg: SalinityConfig) -> float:
     """Distance scale that sets the salt front's position, shrinking as
     discharge rises.
@@ -255,7 +295,7 @@ def intrusion_length_km(cfs: float, cfg: SalinityConfig) -> float:
     `salinity_at`'s tanh outside the calibration range (see the module
     docstring); it is not sized to keep L "reasonable" in any absolute sense.
     """
-    return cfg.l0_km * (_effective_cfs(cfs) / cfg.q0_cfs) ** (-cfg.k)
+    return cfg.l0_km * _discharge_scale(cfs, cfg)
 
 
 def salinity_at(distance_km, cfs: float, phase: float | np.ndarray, cfg: SalinityConfig):
@@ -284,7 +324,8 @@ def salinity_at(distance_km, cfs: float, phase: float | np.ndarray, cfg: Salinit
     x = np.asarray(distance_km, dtype="float64")
     x_eff = x + cfg.excursion_km * np.cos(2.0 * np.pi * phase)
     length = intrusion_length_km(cfs, cfg)
-    return cfg.ocean_ppt * 0.5 * (1.0 - np.tanh((x_eff - length) / cfg.front_width_km))
+    width = front_width_at(cfs, cfg)
+    return cfg.ocean_ppt * 0.5 * (1.0 - np.tanh((x_eff - length) / width))
 
 
 def salinity_field(

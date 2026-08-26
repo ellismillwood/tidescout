@@ -305,17 +305,24 @@ class SalinityConfig(BaseModel):
     # u_tidal * T / pi with u ~ 0.5 m/s and T = 12.42 h gives ~7 km.
     excursion_km: float = Field(default=7.0, gt=0)
     # Half-width of the logistic transition, in km -- the salt front's
-    # SHARPNESS, independent of l0_km's POSITION. Added because a single
-    # length scale is over-constrained: forcing near-fresh (1 ppt) at the
-    # real domain's 31.57 km head (36.19 km since the 2026-08-23 re-seeding)
-    # with a plain exponential forced l0_km down
-    # to 8.95 km, which alone cost North Jetty (2.58 km) 8.5 of its 34 ppt.
-    # Splitting position from sharpness fixes that -- under the same head
-    # constraint here, North Jetty loses 0.01 ppt. 5.0 km is a starting
-    # guess, sized so neither the mouth nor the head saturates to
-    # bit-identical output across the full calibration range (verified
-    # against the real 587,325-cell distance field; see Task 3's report).
-    # Fitted in Task 5 alongside the rest.
+    # SHARPNESS. Added because a single length scale is over-constrained:
+    # forcing near-fresh (1 ppt) at the real domain's 31.57 km head
+    # (36.19 km since the 2026-08-23 re-seeding) with a plain exponential
+    # forced l0_km down to 8.95 km, which alone cost North Jetty (2.58 km)
+    # 8.5 of its 34 ppt. Splitting position from sharpness fixes that --
+    # under the same head constraint here, North Jetty loses 0.01 ppt.
+    # 5.0 km is a starting guess, sized so neither the mouth nor the head
+    # saturates to bit-identical output across the full calibration range
+    # (verified against the real 587,325-cell distance field; see Task 3's
+    # report). Fitted in Task 5 alongside the rest.
+    #
+    # NOT independent of l0_km's discharge response, though it IS a
+    # separate knob from l0_km's POSITION (that decoupling is what fixes
+    # the over-constrained problem above). Since 2026-08-25 this is the
+    # front's width AT q0_cfs specifically -- away from that reference it
+    # scales as (Q/q0)^-k, the SAME exponent l0_km's L(Q) uses (see
+    # `engine.salinity._discharge_scale`), because a constant width could
+    # not be sharp at high flow and broad at low flow at once.
     front_width_km: float = Field(default=5.0, gt=0)
     # Discharge span the fit was made over, (lo, hi) with lo < hi. Outside
     # it, results are flagged rather than silently trusted.

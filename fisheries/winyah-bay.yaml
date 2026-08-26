@@ -441,11 +441,26 @@ salinity:
   # salinity AND the head near fresh, and on this fishery's real 31.57 km
   # domain those two pull in opposite directions hard enough that satisfying
   # the head cost North Jetty 8.5 of its 34 ppt. front_width_km decouples the
-  # front's sharpness from its position (l0_km). 5.0 km is sized, not
-  # guessed: swept 3-8 km against the real 587,325-cell distance field and
-  # picked the value where neither the mouth nor the head saturates to
-  # bit-identical output across the full calibration range below, while
-  # still keeping both ends plausibly near their limit. Pending Task 5's fit.
+  # front's sharpness from its position (l0_km).
+  #
+  # Redefined 2026-08-25: this is now the front's width AT q0_cfs, not
+  # everywhere. Away from that reference it scales as (Q/q0)^-k -- the SAME
+  # exponent l0_km's L(Q) uses (`_discharge_scale` in engine/salinity.py),
+  # because a constant width could not be sharp at high flow and broad at
+  # low flow at once: L(Q) itself ranges 37.14->1.13 km across the observed
+  # 257x discharge span while this value did not move, and the mean residual
+  # measured at FIXED distance (so it can't be confounded with position)
+  # trended -1.33->-3.72 ppt at x=16.68 km and +1.33->-2.03 ppt at x=19.03 km
+  # across flow quintiles as a result. Scaling the width the same way cuts
+  # that trend spread from 2.96 to 0.55 ppt.
+  #
+  # 5.0 km itself is UNCHANGED and still sized the old way, not refitted:
+  # swept 3-8 km against the real 587,325-cell distance field and picked the
+  # value where neither the mouth nor the head saturates to bit-identical
+  # output across the full calibration range below, while still keeping both
+  # ends plausibly near their limit. It remains a theoretical starting point,
+  # not a measurement -- fitted stays False -- pending Task 5's fit under
+  # this new form.
   front_width_km: 5.0
   # Same min/max as discharge_buckets above (365-day USGS daily means, n=365):
   # min 1232 / max 22996 cfs. Outside this span, salinity_field flags

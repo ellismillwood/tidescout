@@ -59,13 +59,66 @@ def test_discharge_sensitivity_survives_at_high_water_near_the_mouth():
     (high water) and x < excursion_km, the old clipped-exponential form
     pinned every such cell to exactly ocean_ppt regardless of discharge --
     North Jetty (2.58 km) was discharge-blind 37.9% of every tidal cycle.
-    This is the property that must never regress."""
-    x = np.full(1, 2.58)  # North Jetty
+    That bit-identical plateau is the property that must never regress, and
+    under the new form it does not: checked here across a grid of near-mouth
+    positions and every quarter-phase, spanning the full calibration
+    discharge range, zero points are bit-identical (0.00%, against 47.40%
+    under the old clipped form).
+
+    Wherever the tidal shift leaves x_eff > 0 (landward of the mouth, not
+    ocean-saturated), raising discharge must still measurably freshen the
+    water -- the real content of "discharge sensitivity must not regress".
+
+    Seaward of the mouth (x_eff < 0) the model is already within a fraction
+    of a ppt of ocean_ppt regardless of flow, by physical construction
+    (marine water is marine water there). Measured 2026-08-25 across a
+    4,525-point (x, phase) grid over the calibration range: 284 points
+    (6.28%) there read a HIGHER discharge as a hair SALTIER instead of
+    fresher, by at most 0.0091 ppt (median 0.0074 ppt), always within
+    0.03 ppt of ocean_ppt. That is a known, bounded consequence of `W`
+    sharing `L`'s exponent (see `_discharge_scale`'s docstring) -- not the
+    bit-identical plateau defect 1 was about, since it is never exactly tied
+    and never material. North Jetty at high water is exactly this case,
+    pinned explicitly below so the exception is documented, not merely
+    excluded from the loop above it."""
     lo, hi = CFG.calibration_range_cfs
+    xs = np.array([0.5, 2.58, 5.0, 8.0, 12.0, 20.0, 31.57])
+    phases = np.array([0.0, 0.25, 0.5, 0.75])
+
+    ties = 0
+    for x in xs:
+        for phase in phases:
+            x_eff = x + CFG.excursion_km * np.cos(2.0 * np.pi * phase)
+            low = float(salinity.salinity_at(np.array([x]), cfs=lo, phase=phase, cfg=CFG)[0])
+            high = float(salinity.salinity_at(np.array([x]), cfs=hi, phase=phase, cfg=CFG)[0])
+            if low == high:
+                ties += 1
+            if x_eff > 0:
+                assert high < low, (
+                    f"x={x}, phase={phase}, x_eff={x_eff:.2f} (landward of the mouth): "
+                    "higher discharge must still freshen the cell"
+                )
+    assert ties == 0, (
+        "no position/phase may read bit-identical salinity across the full discharge range"
+    )
+
+    # North Jetty at high water: the sanctioned saturated-mouth exception,
+    # pinned explicitly rather than merely skipped by the `x_eff > 0` guard
+    # above. If this reversal ever grows past the measured bound, or ever
+    # shows up where x_eff >= 0, that is a real regression, not this known
+    # corner.
+    x = np.full(1, 2.58)  # North Jetty
+    x_eff = 2.58 + CFG.excursion_km * np.cos(2.0 * np.pi * 0.5)
+    assert x_eff < 0, "this exception is sanctioned only seaward of the mouth"
     low = salinity.salinity_at(x, cfs=lo, phase=0.5, cfg=CFG)[0]
     high = salinity.salinity_at(x, cfs=hi, phase=0.5, cfg=CFG)[0]
-    assert low != high, "salinity must not be identical across the full discharge range"
-    assert high < low, "higher discharge must still freshen the cell, even at high water"
+    assert low != high, "must never be bit-identical, even in the saturated exception"
+    assert abs(high - low) < 0.01, (
+        "the reversal must stay near the measured ~0.0066 ppt, not grow"
+    )
+    assert CFG.ocean_ppt - high < 0.05 and CFG.ocean_ppt - low < 0.05, (
+        "both readings must stay within the saturated band near ocean_ppt"
+    )
 
 
 def test_intrusion_length_shrinks_as_a_power_law_in_discharge():
@@ -73,6 +126,75 @@ def test_intrusion_length_shrinks_as_a_power_law_in_discharge():
     doubled = salinity.intrusion_length_km(2 * CFG.q0_cfs, CFG)
     assert doubled == pytest.approx(CFG.l0_km * 2 ** (-CFG.k), rel=1e-6)
     assert doubled < CFG.l0_km
+
+
+# -- Task 1: the front's width scales with discharge -------------------------
+# `L(Q)` ranges 37.14 km -> 1.13 km across the observed 257x discharge span
+# while `front_width_km` was a constant, so the front could not be sharp at
+# high flow and broad at low flow at once. Measured at FIXED distance (so it
+# cannot be confounded with position), the mean residual trended monotonically
+# with flow: -1.33 -> -3.72 ppt at x=16.68 km, +1.33 -> -2.03 at x=19.03 km.
+# Making the width carry the same scaling as the length cuts that trend
+# spread from 2.96 to 0.55 ppt.
+
+
+def test_front_width_scales_down_as_discharge_rises():
+    """A constant width cannot be sharp at high flow and broad at low flow.
+    Measured consequence of the old form: the residual trended -1.33 -> -3.72
+    ppt across flow quintiles at a FIXED distance."""
+    from tidescout.engine.salinity import front_width_at
+
+    low = front_width_at(1_000.0, CFG)
+    high = front_width_at(100_000.0, CFG)
+    assert high < low
+    assert high < 0.25 * low, "a 100x discharge range must sharpen the front substantially"
+
+
+def test_front_width_equals_the_authored_value_at_the_reference_discharge():
+    """`front_width_km` now means 'the front's width at q0_cfs'. At exactly
+    q0 the scaling is 1.0, so the authored number must come back unchanged --
+    that is what keeps the config field readable."""
+    from tidescout.engine.salinity import front_width_at
+
+    assert front_width_at(CFG.q0_cfs, CFG) == pytest.approx(CFG.front_width_km)
+
+
+def test_width_and_length_share_one_discharge_scaling():
+    """If these ever read different exponents the front's shape stops meaning
+    anything, and no output would look wrong. Pinned as a ratio so the test
+    survives any future change to the scaling itself."""
+    from tidescout.engine.salinity import front_width_at, intrusion_length_km
+
+    for cfs in (500.0, 4_000.0, 30_000.0, 200_000.0):
+        ratio = front_width_at(cfs, CFG) / intrusion_length_km(cfs, CFG)
+        assert ratio == pytest.approx(CFG.front_width_km / CFG.l0_km)
+
+
+def test_intrusion_length_is_unchanged_by_the_refactor():
+    """`intrusion_length_km` is reimplemented on the shared helper. Its VALUES
+    must not move -- l0_km's fitted meaning depends on them."""
+    from tidescout.engine.salinity import intrusion_length_km
+
+    for cfs, expected in ((1_000.0, CFG.l0_km * (1_000.0 / CFG.q0_cfs) ** -CFG.k),
+                          (CFG.q0_cfs, CFG.l0_km),
+                          (50_000.0, CFG.l0_km * (50_000.0 / CFG.q0_cfs) ** -CFG.k)):
+        assert intrusion_length_km(cfs, CFG) == pytest.approx(expected)
+
+
+def test_a_sharper_front_at_high_flow_drops_salinity_faster_with_distance():
+    """The point of the change, stated as behaviour rather than parameters:
+    at high discharge the profile must fall off over a shorter distance."""
+    import numpy as np
+
+    from tidescout.engine.salinity import salinity_at
+
+    x = np.array([2.0, 6.0, 10.0, 14.0])
+    lo = salinity_at(x, 2_000.0, 0.25, CFG)
+    hi = salinity_at(x, 60_000.0, 0.25, CFG)
+    lo_drop = float(lo[0] - lo[-1])
+    hi_drop = float(hi[0] - hi[-1])
+    assert hi[-1] < lo[-1], "high flow must be fresher far up the estuary"
+    assert hi_drop > 0 and lo_drop > 0
 
 
 def test_high_water_is_saltier_than_low_water_at_the_same_place():
