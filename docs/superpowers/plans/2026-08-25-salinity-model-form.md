@@ -578,9 +578,15 @@ git commit -m "feat: fit the discharge memory timescale by a profiled scan"
 ## Task 4: The gate — measure both changes against their pre-registered predictions
 
 **Files:**
-- Create: `.superpowers/sdd/2026-08-25-salinity-model-form/gate-report.md`
+- Create: `docs/superpowers/plans/2026-08-25-salinity-model-form-gate-report.md`
 
 **This task measures and reports. It changes no config and decides nothing.**
+
+**The targets below are PRE-REGISTRATIONS, not goals.** They were written before the work, from a
+diagnostic run on a different population. Missing one is a valid and useful result. Do not tune,
+re-fit, re-bin, or re-scope anything to move a number toward its target — if you find yourself
+adjusting a measurement until it agrees, stop and report the disagreement instead. A gate that
+reports a miss honestly is doing its job; a gate that hits every target is evidence of nothing.
 
 - [ ] **Step 1: Run the pipeline end to end**
 
@@ -589,45 +595,102 @@ cd /Users/ellismillwood/Documents/tidescout
 $HOME/.venvs/tidescout/bin/tidescout salinity calibrate winyah-bay | tee /tmp/calibrate-form.txt
 ```
 
-- [ ] **Step 2: Report against the predictions, which were registered BEFORE the work**
+- [ ] **Step 2: Reconcile the populations BEFORE comparing any number**
 
-| prediction | target | actual |
-|---|---|---|
-| rmse | 4.0875 → ~3.42 | ? |
-| **discharge-trend spread** | **2.96 → ~0.27 ppt** | ? |
-| fitted τ | ~7 days, worse at 3 and 14 | ? |
-| `fitted` | stays False | ? |
+The pre-registered figures came from a diagnostic on **11,688** observations that map to a
+calendar day. The shipped scan reports **12,204** rows, and the headline fit a different count
+again. These are not the same denominator, and comparing across them without saying so would make
+the whole gate meaningless.
 
-**The trend spread is the primary criterion, not rmse.** The trend is what these changes remove; rmse is a side effect. If rmse falls but the trend does not flatten, the change did not do what it claims and the report must say so.
+Open the report with a short table: each figure you are about to quote, the population it was
+computed on, and whether it is comparable to its pre-registered counterpart. Where it is not,
+say so and, where you can, recompute the OLD number on the NEW population rather than the reverse.
 
-Report the τ profile as a curve. If τ lands on a bound, or the profile is flat, memory is not identifiable on this data — say that plainly rather than reporting the best grid point as though it were determined.
+- [ ] **Step 3: Define the trend spread ONCE, then compute both sides with it**
 
-- [ ] **Step 3: Re-measure stratification, and say whether the spec's prediction held**
+**The spec never defines how "discharge-trend spread" is calculated, and it is the gate's primary
+criterion.** Do not guess at the original recipe and do not quote `2.96` as though it were
+reproducible. Instead:
 
-The spec predicted the surface/bottom signal would be **LARGER and cleaner** after these changes, because removing two competing structures makes the depth split easier to see. Re-measure it: WYSS1 and NIWWBWQ share a piling at 19.03 km, so their residual difference is depth alone. Before this work it was **+3.622 ppt, sd 2.085**, explaining 24.0% of the variance there.
+1. Write the measurement as a small function, in the report or a scratch script — for each of the
+   two fixed-distance NERRS stations (x = 16.68 km and x = 19.03 km), bin that station's rows into
+   flow quintiles by the discharge the model actually reads, take the mean residual per quintile,
+   and let that station's trend be `mean(highest quintile) - mean(lowest quintile)`. Report the
+   spread as the mean of the two stations' absolute trends, and print the full 2x5 table of
+   quintile means so a reader can recompute anything else they want.
+2. Run that SAME function twice: once against the current shipped model, and once against the
+   baseline form (constant width, same-day discharge — i.e. `discharge_memory_days = 0.0` and the
+   width scaling disabled). **Both numbers must come out of the same code path on the same rows.**
+3. Compare those two to each other. Quote the pre-registered `2.96 → ~0.27` alongside, clearly
+   labelled as computed by a different method on a different population.
 
-If it shrank instead, the ordering argument in the spec was wrong and the next plan should know that.
+If your baseline recomputation lands far from 2.96, that is a finding about the pre-registration,
+not an error to hide — report both numbers and say which one the conclusion rests on.
 
-- [ ] **Step 4: State what is binding now, and STOP**
+- [ ] **Step 4: Report against the predictions**
 
-Say whether `fitted` can become True (it cannot — ~1,140x resolution) and what the largest remaining structure is. Do NOT edit the `salinity:` block, and do NOT begin a two-layer model.
+| prediction | target | actual | comparable? |
+|---|---|---|---|
+| rmse | 4.0875 → ~3.42 | ? | ? |
+| **discharge-trend spread** | **2.96 → ~0.27 ppt** | ? | ? |
+| fitted tau | ~7 days, worse at 3 and 14 | ? | ? |
+| `fitted` | stays False | ? | — |
 
-- [ ] **Step 5: Commit any code needed to surface a number**
+**The trend spread is the primary criterion, not rmse.** The trend is what these changes remove;
+rmse is a side effect. If rmse falls but the trend does not flatten, the change did not do what it
+claims and the report must say so in those words.
+
+Report the tau profile as a curve. If tau lands on a grid bound, or the profile is flat within the
+scatter of the rmse it is built from, memory is not identifiable on this data — say that plainly
+rather than reporting the best grid point as though it were determined. State the margin between
+the best and second-best tau and whether it is meaningful.
+
+- [ ] **Step 5: Re-measure stratification, and say whether the spec's prediction held**
+
+The spec predicted the surface/bottom signal would be **LARGER and cleaner** after these changes,
+because removing two competing structures makes the depth split easier to see. WYSS1 and NIWWBWQ
+share a piling at 19.03 km, so their residual difference is depth alone.
+
+Method, stated so the before/after are comparable: pair the two stations on shared calendar days,
+take `mean(bottom residual - surface residual)` over those paired days, with its sd and the share
+of that station-pair's residual variance the split explains. Before this work: **+3.622 ppt, sd
+2.085, 24.0% of variance**. Report the paired-day count alongside — if it moved, say so, because
+the memory window drops early days and that changes which days pair.
+
+If it shrank instead of growing, the ordering argument in the spec was wrong and the next plan
+should know that.
+
+- [ ] **Step 6: State what is binding now, and STOP**
+
+Say whether `fitted` can become True (it cannot — the residual is still ~1,140x the observation
+resolution) and what the largest remaining structure is. Do NOT edit the `salinity:` block, and do
+NOT begin a two-layer model.
+
+- [ ] **Step 7: Commit**
+
+Write the report to `docs/superpowers/plans/2026-08-25-salinity-model-form-gate-report.md`,
+matching the convention of `2026-08-24-salinity-anchoring-gate-report.md` and
+`2026-08-24-tidal-phase-gate-report.md`. Note that `.superpowers/sdd/` is GITIGNORED — a report
+written there is not committable and will be lost.
 
 ```bash
-git add -A && git commit -m "docs: gate report on the model-form changes"
+cd /Users/ellismillwood/Documents/tidescout && make check
+git add docs/superpowers/plans/2026-08-25-salinity-model-form-gate-report.md
+# plus any file you had to touch to surface a number, named explicitly -- never `git add -A`
+git commit -m "docs: gate report on the model-form changes"
 ```
-
----
 
 ## Completion Checklist
 
-- [ ] `make check` green; test count > 681
+- [ ] `make check` green; test count only ever goes UP (681 at plan start)
 - [ ] `front_width_at` and `intrusion_length_km` provably share one discharge scaling
 - [ ] `front_width_at(q0_cfs, cfg)` returns the authored `front_width_km` exactly
 - [ ] Every pre-existing shape test re-examined with a stated judgement, not adjusted until green
 - [ ] `discharge_memory_days = 0.0` reproduces today's behaviour exactly
 - [ ] Days without full history are dropped AND counted, never smoothed over a stub
 - [ ] Every τ in the profile scored on the same row set
-- [ ] Fit-time and prediction-time smoothing proven identical by a test that cannot pass trivially
+- [ ] The FIT path is proven to route through `smooth_discharge` at the configured tau by a spy
+      that fails when the call is removed or the tau hardcoded. The PREDICTION half is NOT
+      test-covered -- there is no production caller of `salinity_field` yet -- and rests on the
+      module note in `engine/salinity.py`. The report must say so rather than claim parity.
 - [ ] Gate report written against the pre-registered predictions; `fisheries/winyah-bay.yaml`'s values unchanged
