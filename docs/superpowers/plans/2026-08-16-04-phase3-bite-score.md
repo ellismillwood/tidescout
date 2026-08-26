@@ -207,6 +207,36 @@ The scoring engine needs to know which flow state an hour corresponds to. The li
 - Consumes: `engine.tides.TideEvent`
 - Produces: `library_phase(events: list[TideEvent], t: datetime) -> float | None`
 
+**READ THIS BEFORE WRITING THE FUNCTION — a near-twin already exists.** `engine/tides.py:phase_at`
+(added by PR #6 on 2026-08-24, EIGHT DAYS after this plan was authored) has the identical signature,
+the identical return type, the identical "phase 0 is LOW water" convention and the identical
+None-rather-than-guess policy. It is not the same function, and neither may be deleted — but do not
+write this one as though the other did not exist.
+
+They differ in what they interpolate between, and therefore in what they RETURN:
+
+* `phase_at` interpolates between BRACKETING EVENTS, so high water is pinned at exactly 0.5.
+  `salinity_at` needs that: it evaluates `cos(2*pi*phase)`, and a high water that is not exactly
+  0.5 puts the tidal excursion's extreme somewhere other than high water.
+* `library_phase` interpolates LOW TO LOW, so high water floats with the real diurnal inequality.
+  The flow library needs THAT: its 26 snapshots are spaced uniformly in TIME through a simulated
+  cycle, so choosing one is a question about elapsed time, not about tidal state.
+
+Measured 2026-08-26 on a cycle with a 6.5 h flood and a 5.9 h ebb, they disagree by up to **0.024
+of a cycle, about 18 minutes** — enough to select the wrong library snapshot, with nothing raising:
+
+| hours after low | `phase_at` | `library_phase` |
+|---|---|---|
+| 0.00 | 0.0000 | 0.0000 |
+| 3.25 | 0.2500 | 0.2621 |
+| 6.50 | 0.5000 | 0.5242 |
+| 9.45 | 0.7500 | 0.7621 |
+
+Cross-reference `phase_at` in this module's docstring and say which consumer each serves. Two
+functions returning "tidal phase in [0, 1)" that quietly disagree are the hazard `_discharge_scale`
+was introduced to prevent on the salinity side. Here the answer is NOT one shared helper — the two
+consumers genuinely need different numbers — so the divergence gets TESTED rather than merged away.
+
 - [ ] **Step 1: Write the failing tests**
 
 ```python
@@ -221,6 +251,40 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from tidescout.engine.phase import library_phase
+
+
+def test_library_phase_deliberately_disagrees_with_the_salinity_models_phase_at():
+    """Both return "tidal phase in [0, 1)" with phase 0 at low water, and they
+    are NOT interchangeable -- see this task's note. Pinned so anyone
+    "unifying" them has to come here and read why. Measured 2026-08-26.
+    """
+    from datetime import datetime, timedelta
+    from zoneinfo import ZoneInfo
+
+    from tidescout.engine.tides import TideEvent, phase_at
+
+    t0 = datetime(2026, 5, 1, 0, 0, tzinfo=ZoneInfo("America/New_York"))
+    events = [
+        TideEvent(time=t0, kind="L", height_ft=0.0),
+        TideEvent(time=t0 + timedelta(hours=6.5), kind="H", height_ft=5.0),
+        TideEvent(time=t0 + timedelta(hours=12.4), kind="L", height_ft=0.2),
+    ]
+
+    for hours, want_event, want_library in (
+        (0.00, 0.0000, 0.0000),
+        (3.25, 0.2500, 0.2621),
+        (6.50, 0.5000, 0.5242),
+        (9.45, 0.7500, 0.7621),
+    ):
+        t = t0 + timedelta(hours=hours)
+        assert phase_at(events, t) == pytest.approx(want_event, abs=1e-4)
+        assert library_phase(events, t) == pytest.approx(want_library, abs=1e-4)
+
+    # The load-bearing assertion: they must actually DIFFER away from low
+    # water. Without it, this test would still pass if someone made
+    # library_phase delegate straight to phase_at.
+    mid = t0 + timedelta(hours=6.5)
+    assert abs(library_phase(events, mid) - phase_at(events, mid)) > 0.02
 from tidescout.engine.tides import TideEvent
 
 TZ = ZoneInfo("America/New_York")
@@ -626,6 +690,19 @@ def _hour(**kw):
 
 def _by_factor(subs):
     return {s.factor: s for s in subs}
+
+
+def _sal(ppt: float, *, fitted: bool = False, extrapolated: bool = False):
+    """A salinity reading for tests.
+
+    `fitted=False` is the DEFAULT because it is Winyah Bay's actual state --
+    a helper defaulting to True would quietly exercise a configuration this
+    project does not have.
+    """
+    from tidescout.engine.score import SalinityProvenance, SalinityReading
+
+    return SalinityReading(ppt, SalinityProvenance.MODELLED,
+                           fitted=fitted, extrapolated=extrapolated)
 
 
 def test_slack_water_craters_the_flow_factor():
@@ -1219,19 +1296,6 @@ The map half. The same factor pipeline, but a feature's flow comes from its own 
 # backend/tests/test_score.py (append)
 from tidescout.engine.activation import FeatureMetrics
 from tidescout.engine.score import score_feature
-
-
-def _sal(ppt: float, *, fitted: bool = False, extrapolated: bool = False):
-    """A salinity reading for tests.
-
-    `fitted=False` is the DEFAULT because it is Winyah Bay's actual state --
-    a helper defaulting to True would quietly exercise a configuration this
-    project does not have.
-    """
-    from tidescout.engine.score import SalinityProvenance, SalinityReading
-
-    return SalinityReading(ppt, SalinityProvenance.MODELLED,
-                           fitted=fitted, extrapolated=extrapolated)
 
 
 def _metrics(**kw):
