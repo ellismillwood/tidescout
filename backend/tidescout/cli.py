@@ -196,20 +196,33 @@ def score(
         table = Table(
             title=f"{payload['slug']} — {payload['day']} — {name} ({payload['model_label']})"
         )
-        for col in ("hour", "score", "conf", "constr", "top factors"):
+        for col in ("hour", "score", "conf", "constr", "limiting factors", "why"):
             table.add_column(col, justify="right" if col in ("score", "conf", "constr") else "left")
         for h in rows:
-            # The two highest-VALUE subs (0-1, post-curve) are what pushed
-            # this hour up or down the most -- "why is 3 PM an 82" (spec
-            # section 8) always has a visible answer, per-hour, not just in
-            # aggregate.
+            # The two LOWEST-value subs (0-1, post-curve) are what actually
+            # dragged this hour down -- `combine` is a WEIGHTED GEOMETRIC
+            # MEAN (engine/score.py's own module docstring: a near-zero
+            # factor tanks the hour rather than averaging away), so it is
+            # the smallest values, not the largest, that move the score.
+            # Showing the highest-value subs instead (an earlier version of
+            # this command did) shows exactly the factors that did NOT
+            # explain the hour: measured on a real run, hour 15:00 scored 62
+            # with `flow` reading 0.24 ("flow 0.04 m/s — slack") while the
+            # old table printed "wind 0.94, pressure 0.92" -- two factors
+            # that had nothing to do with why the score was low (2026-08-26
+            # review, Important 6). `why` carries the actual `reason` text
+            # `score_factors` wrote, not just the bare number -- spec
+            # section 8's "why is 3 PM an 82 always has a visible answer" and
+            # Step 4's "factor bars AND reasons" both need the words, not
+            # just the value.
             scored = [s for s in h["subs"] if s["value"] is not None]
-            top = sorted(scored, key=lambda s: -s["value"])[:2]
-            bars = ", ".join(f"{s['factor']} {s['value']:.2f}" for s in top)
+            worst = sorted(scored, key=lambda s: s["value"])[:2]
+            bars = ", ".join(f"{s['factor']} {s['value']:.2f}" for s in worst)
+            why = " | ".join(s["reason"] for s in worst)
             mark = "*" if h["provisional"] else ""
             table.add_row(
                 h["time"][11:16], f"{h['score']}{mark}", f"{h['confidence']:.2f}",
-                f"{h['constrained_share']:.2f}", bars,
+                f"{h['constrained_share']:.2f}", bars, why,
             )
         console.print(table)
         if any(h["provisional"] for h in rows):

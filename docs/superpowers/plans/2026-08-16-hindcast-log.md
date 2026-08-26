@@ -9,98 +9,124 @@ Filling `actual` with plausible-looking guesses would mean every future
 weight is tuned against fiction while the tuning looks rigorous -- do not
 do this, ever, to this file.
 
-**Read `constrained_share` before trusting a row.** `constrained_share < 1.0`
-on a row means the salinity factor THAT hour rests on `engine.salinity`'s
-uncalibrated model (`fitted: false` in `fisheries/winyah-bay.yaml` --
-Winyah's live, permanent state; see that file's "CALIBRATION ATTEMPTED AND
-DECLINED" block) rather than an observation. All nine rows below happen to
-read `constrained_share = 1.00` for the FISHERY-WIDE score, because the
-live USGS gauge (021108125) is currently reporting a real salinity value
-(0.0 ppt -- a genuinely near-fresh tidal reach) and `build_payload` prefers
-a real sensor reading over the model whenever one exists (see
-`pipeline/payload.py::_bay_salinity_reading`). This is a **coincidence of
-when this log was generated**, not a property of the model: on any day that
-gauge is stale or dark, the fishery-wide row would read
-`constrained_share < 1.0` too, exactly as `test_an_uncalibrated_salinity_
-reaches_the_payload_as_provisional` (`backend/tests/test_payload.py`)
-verifies happens on Winyah's actual, ordinary path. The per-FEATURE numbers
-behind the "top-ranked features" the CLI prints are unaffected by that
-coincidence either way: `score_feature` always uses the spatial model at
-the feature's own along-estuary distance, never the bay-wide sensor value
-(see `engine/score.py`'s module docstring), so every map marker's activation
-in this log rests on the unfitted model regardless of what the gauge says
-today.
+**This log was regenerated 2026-08-26** after a code review found the first
+version unusable in two ways, both fixed before these rows were produced:
+the three dates were in the FUTURE (Ellis cannot report `actual` for a day
+that has not happened), and the header's discharge claim was wrong. Both
+are explained below rather than just fixed silently, because the same
+mistake is easy to make again the next time this log is regenerated.
 
-**Discharge does not vary by date in this build.** `sources.usgs.
-discharge_summary` reads the LIVE USGS gauge (`datetime.now(UTC)`,
-no `day` parameter) -- `dayloader.load_day` calls it the same way
-regardless of which date is requested. All three dates below were
-generated in the same session and so share one discharge reading
-(3,354.6 cfs, `med` bucket) even though they were chosen to span
-different real TIDAL ranges (spring / mean / neap, from the moon's
-illuminated fraction -- see `pipeline/payload.py::_range_bucket_for_day`).
-**"Three dates spanning the discharge range," as asked for in the task
-brief, is not actually obtainable from this pipeline today** -- there is no
-historical discharge lookup, only a live one. That is a real, current
-limitation worth a follow-up task (a USGS daily-values query keyed on
-`day`, alongside the existing live `iv` one), not something this log should
-paper over. What DOES vary correctly below is the tidal-range regime blend
-(`spring_low`/`spring_med` vs `mean_low`/`mean_med` vs `neap_low`/`neap_med`)
-and the real CO-OPS tide predictions for each date.
+## Read `constrained_share` before trusting a row
 
-**Collect all three before tuning anything.** Even once `actual` is filled
-in, a single day's agreement or disagreement fits noise -- these curves
-(`fisheries/species_weights.yaml`) are the most over-fittable surface in the
-project. Wait for all three rows' `actual` before touching any weight or
-curve breakpoint, and even then, treat one round of three days as a first
-look, not a calibration.
+`constrained_share < 1.0` on a row means the salinity factor THAT hour
+rests on `engine.salinity`'s uncalibrated model (`fitted: false` in
+`fisheries/winyah-bay.yaml` -- Winyah's live, permanent state) rather than
+an observation. All nine rows below read `constrained_share = 1.00`,
+because the live USGS gauge (021108125) is currently reporting a real
+salinity value (0.0 ppt -- a genuinely near-fresh tidal reach) and
+`build_payload` prefers a real sensor reading over the model whenever one
+exists. **A stale/dark salinity gauge is NOT what would flip this** --
+`usgs.water_summary` never returns `salinity_ppt=None`; a gauge that stops
+reporting SALINITY specifically falls back to a monthly climatology GUESS
+while `source` stays labelled by whichever sensor (if any) still reports
+TEMPERATURE, and `payload._bay_salinity_reading` treats that fallback as
+MEASURED too unless `source` itself reads `"climatology"`. The actual
+trigger is narrower: `water` failing entirely (the whole USGS water fetch
+errors out) or EVERY configured sensor's TEMPERATURE series going dark at
+once (so `source` itself falls to `"climatology"`). `test_an_uncalibrated_
+salinity_reaches_the_payload_as_provisional` (`backend/tests/test_
+payload.py`) exercises that path directly with a synthetic day, since none
+of these nine rows do. The per-FEATURE numbers behind "top-ranked features"
+are unaffected either way: `score_feature` always uses the spatial model at
+the feature's own along-estuary distance, never the bay-wide sensor value,
+so every map marker's activation rests on the unfitted model regardless of
+what the gauge says.
+
+## Discharge now varies correctly by date; salinity and water temperature still do not
+
+**Fixed 2026-08-26 (this regeneration):** `sources.usgs.discharge_summary`
+used to read only the LIVE gauge (`datetime.now(UTC)`, no `day` parameter)
+-- `dayloader.load_day` called it the same way regardless of which date was
+requested, so the first version of this log had all three rows sharing one
+discharge reading despite naming different dates. `discharge_summary` now
+takes an optional `day`; a date strictly before today reads THAT day's own
+USGS daily mean (`fetch_daily`, the NWIS `dv` service already used by
+`pipeline.salinity_fit` for calibration) instead of the live instantaneous
+feed, and `dayloader.load_day` passes the requested date through. The three
+discharge readings below (2,317.94 / 4,037.80 / 8,853.80 cfs) are each that
+date's own real historical composite, genuinely spanning low/med/high.
+
+**Still NOT fixed, found while regenerating this log:** `usgs.water_summary`
+(water temperature AND the bay-wide salinity fallback used above) has the
+SAME wiring gap `discharge_summary` had -- it takes no `day` and always
+reads the live 7-day window. Every "water 88F" reason string and every
+`representative_ppt: 0.0` below is TODAY's live reading, identically,
+regardless of which of the three dates the row names -- confirmed by all
+three rows reading the exact same water temperature. This was out of scope
+for the review that prompted this regeneration (which named `discharge_
+summary` specifically), so it was not fixed here, but it is the same class
+of bug and should be closed the same way (`fetch_daily` against `PARAM_TEMP_C`
+and `PARAM_SALINITY`, keyed by `day`) before this log is regenerated again.
 
 ## How these were produced
 
 ```
-tidescout score winyah-bay 2026-08-28   # spring tide
-tidescout score winyah-bay 2026-09-01   # mean tide
-tidescout score winyah-bay 2026-09-04   # neap tide
+tidescout score winyah-bay 2026-07-21   # low discharge, neap tide
+tidescout score winyah-bay 2026-08-05   # med discharge, neap tide
+tidescout score winyah-bay 2026-07-28   # high discharge, spring tide
 ```
 
-Each command scores all three species from one `build_payload` call (the
-whole point of the payload is that switching species never re-scores); the
-table below pulls the day's score range, its single highest hour, and the
-two-to-three factors that hour's own `subs` names as driving it -- read
-straight from the JSON, not eyeballed off the printed table.
+All three are real past dates (today is 2026-08-26). Each command scores
+all three species from one `build_payload` call; the table below pulls the
+day's score range, its single highest hour, and the TWO OR THREE LOWEST-
+VALUE sub-scores that hour -- under `combine`'s weighted geometric mean, a
+low value (not a high one) is what actually constrains the score, and the
+CLI itself was corrected to show the same thing this same review round
+(`tidescout score`, `cli.py`'s `score` command -- an earlier version showed
+the highest-value subs, which are precisely the ones that did NOT move a
+geometric mean).
 
 ## Predictions
 
-| date | tide regime | discharge (cfs) | species | score range (day) | peak hour | peak score | top factors at peak | confidence | constrained_share | actual | notes |
-|---|---|---|---|---|---|---|---|---|---|---|---|
-| 2026-08-28 | spring (`spring_low`/`spring_med` blend) | 3,354.6 (`med`) | redfish | 56-75 | 20:00 | 75 | wind 1.00, light 0.98, stage 0.94 | 1.00 | 1.00 | | |
-| 2026-08-28 | spring | 3,354.6 (`med`) | speckled_trout | 39-53 | 20:00 | 53 | wind 1.00, light 0.97, stage 0.97 | 1.00 | 1.00 | | |
-| 2026-08-28 | spring | 3,354.6 (`med`) | southern_flounder | 60-69 | 02:00 | 69 | wind 0.99, stage 0.93, season 0.90 | 1.00 | 1.00 | | |
-| 2026-09-01 | mean (`mean_low`/`mean_med` blend) | 3,354.6 (`med`) | redfish | 61-72 | 11:00 | 72 | season 1.00, stage 0.99, solunar 0.96 | 1.00 | 1.00 | | |
-| 2026-09-01 | mean | 3,354.6 (`med`) | speckled_trout | 44-50 | 06:00 | 50 | wind 0.95, season 0.95, light 0.83 | 1.00 | 1.00 | | |
-| 2026-09-01 | mean | 3,354.6 (`med`) | southern_flounder | 57-70 | 04:00 | 70 | season 1.00, stage 0.96, wind 0.95 | 1.00 | 1.00 | | |
-| 2026-09-04 | neap (`neap_low`/`neap_med` blend) | 3,354.6 (`med`) | redfish | 60-72 | 14:00 | 72 | season 1.00, stage 1.00, pressure 0.99 | 1.00 | 1.00 | | |
-| 2026-09-04 | neap | 3,354.6 (`med`) | speckled_trout | 41-52 | 07:00 | 52 | light 0.98, season 0.95, wind 0.91 | 1.00 | 1.00 | | |
-| 2026-09-04 | neap | 3,354.6 (`med`) | southern_flounder | 56-70 | 07:00 | 70 | season 1.00, light 0.99, stage 0.94 | 1.00 | 1.00 | | |
+| date | tide regime | discharge (cfs) | bucket | species | score range (day) | peak hour | peak score | limiting factors at peak (value — reason) | confidence | constrained_share | actual | notes |
+|---|---|---|---|---|---|---|---|---|---|---|---|---|
+| 2026-07-21 | neap | 2,317.94 | low (clamped to `neap_low`) | redfish | 57-70 | 03:00 | 70 | salinity 0.45 — "salinity 0.0 ppt — near-fresh"; flow 0.46 — "flow 0.10 m/s — moving" | 1.00 | 1.00 | | |
+| 2026-07-21 | neap | 2,317.94 | low | speckled_trout | 39-47 | 03:00 | 47 | salinity 0.05 — "salinity 0.0 ppt — near-fresh"; water_temp 0.45 — "water 88F" | 1.00 | 1.00 | | |
+| 2026-07-21 | neap | 2,317.94 | low | southern_flounder | 52-65 | 07:00 | 65 | salinity 0.20 — "salinity 0.0 ppt — near-fresh"; water_temp 0.41 — "water 88F" | 1.00 | 1.00 | | |
+| 2026-08-05 | neap | 4,037.80 | med (`neap_low`/`neap_med` blend) | redfish | 56-69 | 13:00 | 69 | light 0.43 — "4.9 h from twilight, 70% cloud widened it from 6.5 h"; flow 0.45 — "flow 0.10 m/s — slack" | 1.00 | 1.00 | | |
+| 2026-08-05 | neap | 4,037.80 | med | speckled_trout | 38-49 | 19:00 | 49 | salinity 0.05 — "salinity 0.0 ppt — near-fresh"; water_temp 0.45 — "water 88F" | 1.00 | 1.00 | | |
+| 2026-08-05 | neap | 4,037.80 | med | southern_flounder | 52-67 | 19:00 | 67 | salinity 0.20 — "salinity 0.0 ppt — near-fresh"; water_temp 0.41 — "water 88F" | 1.00 | 1.00 | | |
+| 2026-07-28 | spring | 8,853.80 | high (`spring_high`/`spring_freshet` blend) | redfish | 61-77 | 20:00 | 77 | salinity 0.45 — "salinity 0.0 ppt — near-fresh"; flow 0.57 — "flow 0.14 m/s — moving" | 1.00 | 1.00 | | |
+| 2026-07-28 | spring | 8,853.80 | high | speckled_trout | 42-52 | 20:00 | 52 | salinity 0.05 — "salinity 0.0 ppt — near-fresh"; water_temp 0.45 — "water 88F" | 1.00 | 1.00 | | |
+| 2026-07-28 | spring | 8,853.80 | high | southern_flounder | 56-66 | 13:00 | 66 | salinity 0.20 — "salinity 0.0 ppt — near-fresh"; water_temp 0.41 — "water 88F" | 1.00 | 1.00 | | |
 
-`flow.clamped` was `False` on all three days (a genuine two-regime discharge
-blend each time, not a pinned edge); `salinity.extrapolated` was `False` on
-all three (3,354.6 cfs sits well inside the 1,232-22,996 cfs calibrated
-span). Neither disclosure flag is exercised by these particular three days
--- `backend/tests/test_payload.py::test_payload_flags_a_clamped_discharge_
-blend` and `::test_payload_flags_an_extrapolated_salinity` cover that path
-with a synthetic freshet day instead, since (per the discharge caveat above)
-no date reachable today can produce a real one.
+`flow.clamped` was `True` on 2026-07-21 (2,317.94 cfs sits genuinely below
+`neap_low`'s own simulated flow, 2,774 cfs -- a real single-regime pin, not
+just the boundary-inclusive-as-suspect case `payload.py` also flags) and
+`False` on the other two (genuine two-regime blends: `neap_low`/`neap_med`
+and `spring_high`/`spring_freshet`). `salinity.extrapolated` was `False` on
+all three -- none of these real discharges reach 22,996 cfs, the top of the
+1,232-22,996 cfs calibrated span. Neither `test_payload_flags_a_clamped_
+discharge_blend` nor `test_payload_flags_an_extrapolated_salinity`
+(`backend/tests/test_payload.py`) depends on these dates; both use a
+synthetic freshet day instead.
+
+`salinity` reads identically "near-fresh, 0.0 ppt" on every row for the
+reason given above (the live gauge, not a historical one) -- read it as
+"today's live salinity applied uniformly," not as each date's own
+condition, until `water_summary` gets the same `day` fix `discharge_
+summary` got here.
 
 ## Ellis's homework
 
 Pick three days you remember well -- ideally one excellent, one poor, one
 middling -- and fill in `actual` (what you caught, how the bite felt,
-whether it matched the hour the model called out as best) and `notes` (tide
-stage, wind, anything the model didn't have -- e.g. water clarity, bait
+whether it matched the hour the model called out as best) and `notes`
+(tide stage, wind, anything the model didn't have -- water clarity, bait
 present). They do not need to be these exact three dates; these three exist
-to prove the pipeline runs end to end and to show the tidal-range regime
-blend responding correctly to a real spring/mean/neap spread. Once you have
-three real days with `actual` filled in, that is the point to start looking
-at whether any curve in `fisheries/species_weights.yaml` should move -- and
-even then, three days is a first look, not a fit.
+to prove the pipeline runs end to end against real, genuinely different
+discharge, and to show the tidal-range regime blend responding correctly to
+a real neap/spring spread. Once you have three real days with `actual`
+filled in, that is the point to start looking at whether any curve in
+`fisheries/species_weights.yaml` should move -- and even then, three days
+is a first look, not a fit.

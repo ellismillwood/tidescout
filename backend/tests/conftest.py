@@ -82,7 +82,112 @@ def synthetic_day(monkeypatch):
 
 @pytest.fixture
 def synthetic_day_freshet(monkeypatch):
-    """22,996 cfs -- the TOP of the calibrated range and 3.7x the highest flow
-    ever simulated, so this is the fixture that must surface both an
-    extrapolated salinity and a clamped regime blend."""
+    """22,996 cfs -- the TOP of the calibrated range, so this is the fixture
+    that must surface both an extrapolated salinity and a clamped regime
+    blend.
+
+    NOT "3.7x the highest flow ever simulated" (this docstring's original
+    claim, corrected 2026-08-26 review): all twelve regimes, including
+    `freshet` at every tidal-range bucket, are now rasterised on disk at
+    EXACTLY 22,996 cfs (`fisheries/winyah-bay.yaml`'s `freshet_cfs`) --
+    `flow.blend_regimes` reads that as an exact, in-range match, not an
+    extrapolation, by its own boundary-inclusive convention. `payload.py`'s
+    `clamped`/`_is_extrapolated` deliberately read the exact edge of an
+    unfitted, theoretical range as suspect anyway (see their docstrings) --
+    the two flags below are true because of that payload-level choice, not
+    because this discharge is beyond what was ever simulated.
+    """
     return _payload_kwargs(monkeypatch, 22_996.0, "freshet")
+
+
+def _no_weather_day_conditions(cfs: float, bucket: str):
+    """The SAME day `_day_conditions` builds, with every weather-sourced
+    field `None` -- `weather` going dark (a single dead upstream source) is
+    the ordinary, routine failure `dayloader.load_day`'s `attempt()` wrapper
+    exists for, not a hypothetical.
+
+    `_day_conditions` deliberately keeps every factor live (see its own
+    docstring) precisely so the fixture's SHAPE is well-tested elsewhere;
+    that also means it is the only fixture in this file, and NONE of it
+    exercises a genuine NaN sub-score value. `score_factors`'s `_missing`
+    helper sets `SubScore.value = float("nan")` for `pressure` and `wind`
+    when their inputs are `None` -- this is the fixture that actually
+    produces one, so `_json_safe` has something real to sanitise. 2026-08-26
+    review, Important 1: deleting both branches of `_json_safe` left all
+    eight ORIGINAL payload tests green, because none of their fixtures ever
+    gave it a NaN to catch.
+    """
+    from tidescout.engine.conditions import DayConditions, HourlyConditions
+    from tidescout.engine.tides import TideEvent, stage_at
+    from tidescout.sources.astronomy import MoonInfo, SolunarPeriod, SunTimes
+    from tidescout.sources.usgs import DischargeSummary, WaterSummary
+
+    events = [TideEvent(time=_MID + timedelta(hours=o), height_ft=h, kind=k)
+              for o, h, k in _EVENTS]
+    hours = []
+    for i in range(24):
+        t = _MID + timedelta(hours=i)
+        st = stage_at(events, t)
+        hours.append(HourlyConditions(
+            time=t,
+            # air_temp_f/wind_*/pressure_*/cloud_cover_pct all left at their
+            # None default -- weather is the dead source this fixture models.
+            tide_height_ft=2.5,
+            tide_phase=(st.phase if st else None),
+            tide_frac=(round(st.frac, 3) if st else None),
+            current_speed_kn=1.2))
+    return DayConditions(
+        fishery_slug="winyah-bay", day=date(2026, 8, 16), model_label="gfs_seamless",
+        hours=hours,
+        sun=SunTimes(dawn=_MID + timedelta(hours=6), sunrise=_MID + timedelta(hours=6.5),
+                     sunset=_MID + timedelta(hours=20), dusk=_MID + timedelta(hours=20.5)),
+        moon=MoonInfo(phase_frac=0.5, rise=_MID + timedelta(hours=19),
+                      set=_MID + timedelta(hours=7), transits=[_MID + timedelta(hours=13)]),
+        solunar=[SolunarPeriod(kind="major", start=_MID + timedelta(hours=12.5),
+                               end=_MID + timedelta(hours=14.5))],
+        water=WaterSummary(temp_f=84.0, temp_trend_f_3d=0.4,
+                           salinity_ppt=None, source="synthetic"),
+        discharge=DischargeSummary(
+            cfs_now=cfs, cfs_lagged=cfs * 0.95, bucket=bucket, sites=["02135200"],
+            contributing=["02135200"], stale=[], trend=1.05, limb="steady"),
+        missing=["weather"])
+
+
+@pytest.fixture
+def synthetic_day_no_weather(monkeypatch):
+    """Median flow, `weather` dead -- see `_no_weather_day_conditions`."""
+    from tidescout.sources import dayloader
+
+    monkeypatch.setattr(
+        dayloader, "load_day", lambda *a, **k: _no_weather_day_conditions(4_200.0, "med")
+    )
+    return dict(slug="winyah-bay", day=date(2026, 8, 16), model_label="gfs_seamless", cache=None)
+
+
+@pytest.fixture
+def synthetic_day_with_flow(monkeypatch, cache):
+    """The SAME day `synthetic_day` builds, but with `noaa.tide_events`
+    monkeypatched to return the fixture's own `_EVENTS` (as real `TideEvent`s)
+    and a real (empty, tmp_path-backed) `Cache` instead of `None`.
+
+    Every other fixture in this file passes `cache=None`, which
+    `payload._flow_events` treats as "skip the second tide-events fetch
+    entirely" (see that function's docstring) -- correct for keeping this
+    suite hermetic and fast, but it also means `library_phase` never
+    resolves under any of them, so `_blended_state`, `flowlib.load_state`,
+    `activation.structure_fields` and `activation.sample_features` never
+    ran under ANY existing test (2026-08-26 review, Important 2). This
+    fixture activates that path against winyah-bay's REAL rasterised flow
+    library and REAL along-estuary distance field, without any network
+    call (`tide_events` itself is stubbed, so the real `Cache` is never
+    actually queried) -- slow (~70s), the one test in this file meant to
+    prove the feature path runs at all.
+    """
+    from tidescout.engine.tides import TideEvent
+    from tidescout.sources import dayloader, noaa
+
+    events = [TideEvent(time=_MID + timedelta(hours=o), height_ft=h, kind=k)
+              for o, h, k in _EVENTS]
+    monkeypatch.setattr(noaa, "tide_events", lambda *a, **k: events)
+    monkeypatch.setattr(dayloader, "load_day", lambda *a, **k: _day_conditions(4_200.0, "med"))
+    return dict(slug="winyah-bay", day=date(2026, 8, 16), model_label="gfs_seamless", cache=cache)

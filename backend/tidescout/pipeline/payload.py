@@ -27,15 +27,36 @@ derived per-hour `tide_phase`/`tide_frac`, via `engine.tides.stage_at`) --
 and `library_phase` needs the real events, not an approximation. Fetching
 them again here, keyed the same way `load_day` already did, is a cache hit
 in production (`Cache.get_or_fetch`'s whole point) and costs nothing extra
-over a real run. `cache=None` (every test in this file) skips the fetch
-outright rather than crashing on a `None` cache or reaching the network --
-tests exercise the REAL flow library and REAL salinity distance field for
-`winyah-bay` (both are static, on-disk, and need no network), but degrade
-gracefully to "no flow-library state this run" for the map-feature half,
-which is not something any test in `test_payload.py` inspects. The hourly
-FISHERY-WIDE score is unaffected either way: `score_factors`'s own flow
-factor already falls back to the CO-OPS current station when no flow-library
-speed is supplied.
+over a real run. `cache=None` skips the fetch outright rather than crashing
+on a `None` cache or reaching the network, degrading gracefully to "no
+flow-library state this run" for the map-feature half; the hourly
+FISHERY-WIDE score is unaffected either way (`score_factors`'s own flow
+factor already falls back to the CO-OPS current station).
+
+Most tests in `test_payload.py` pass `cache=None` and so exercise the REAL
+salinity distance field for `winyah-bay` (static, on-disk, no network) but
+NOT the real flow library -- `test_the_feature_path_runs_against_the_real_
+flow_library` (on the `synthetic_day_with_flow` fixture, `noaa.tide_events`
+stubbed rather than `cache` set to `None`) is the one that does, and is the
+only one slow enough (~70s) to notice. 2026-08-26 review, Important 2: an
+earlier version of this docstring claimed the flow library was exercised by
+every test in the file; `flowlib.load_state`, `activation.structure_fields`
+and `activation.sample_features` were called zero times until that fixture
+was added.
+
+SALINITY: A SERIES, NOT A LAST-WRITE. The bay-wide (non-feature) salinity
+reading is computed once per hour (`_bay_salinity_reading`) because the
+tidal shift term in `engine.salinity.salinity_at` genuinely moves it across
+the day -- on the modelled path it is not a constant. An earlier version of
+this module kept only the LAST hour's reading, silently overwriting the
+other 23 and publishing it unlabelled as `salinity.representative_ppt`
+(2026-08-26 review, Important 7: measured 13.7 -> 35.3 ppt across a real
+modelled day, reported as 23.5 with no hour attached, and hidden entirely on
+Winyah today only because the live gauge pins `constrained_share` to 1.0 for
+every hour -- see `_bay_salinity_reading`'s own docstring). `payload["salinity"]`
+now carries the FULL per-hour `series` plus a `representative_ppt`/
+`representative_hour` pair deliberately chosen as the day's MIDPOINT hour,
+not whichever hour the loop happened to finish on.
 """
 
 import json
@@ -65,13 +86,16 @@ from tidescout.pipeline.features import load_features
 from tidescout.pipeline.schedule import cell_schedule
 from tidescout.sources import dayloader, noaa
 
-# Radius a fish will move to intercept bait -- the SAME radius `sample_features`
-# already uses for the ambush/seam/eddy/convergence disc. Salinity is sampled
-# over the identical disc so a feature's "own" reading (score_feature's whole
-# premise -- see engine/score.py's module docstring) means the same footprint
-# for every factor, not a structural signal on one radius and a chemical one
-# on another.
-_DEFAULT_AMBUSH_RADIUS_M = 150.0
+# No module-level radius constant: `fishery.structure.ambush_radius_m` is
+# THE per-fishery-tunable value `activation.structure_fields` itself reads
+# (via `StructureThresholds`), and a second, hardcoded 150.0 here would
+# silently diverge from it the moment a fishery's config moved away from the
+# class default -- the exact class of bug `score_feature`'s own `thresholds`
+# parameter (required, never defaulted) exists to prevent one level up
+# (2026-08-26 review, Minor). Salinity is sampled over the SAME radius
+# structure uses so a feature's "own" reading means one footprint for every
+# factor, not a structural signal on one radius and a chemical one on
+# another -- see `_feature_distance_km`'s call site in `build_payload`.
 
 
 def _range_bucket_for_day(moon) -> str:
@@ -272,6 +296,12 @@ def _sub_to_dict(s: SubScore) -> dict:
     }
 
 
+def _sub_to_trimmed_dict(s: SubScore) -> dict:
+    """factor/value/reason only -- see the per-feature-hour call site's
+    comment for why this is trimmed rather than the full `_sub_to_dict`."""
+    return {"factor": s.factor, "value": s.value, "reason": s.reason}
+
+
 def _hour_to_dict(hour_time: datetime, combined) -> dict:
     return {
         "time": hour_time.isoformat(),
@@ -404,7 +434,7 @@ def build_payload(slug: str, day: date, model_label: str, cache) -> dict:
         spec = flowlib.grid_spec(slug, fishery)
         feats = load_features(slug)["features"]
         feature_distance_km = _feature_distance_km(
-            feats, spec, distance_field, _DEFAULT_AMBUSH_RADIUS_M
+            feats, spec, distance_field, fishery.structure.ambush_radius_m
         )
         dominant_regime = max(mix, key=lambda nw: nw[1])[0]
         schedule = cell_schedule(slug, dominant_regime)
@@ -429,7 +459,9 @@ def build_payload(slug: str, day: date, model_label: str, cache) -> dict:
     }
 
     bay_cfs = discharge.cfs_now if discharge else None
-    bay_representative_reading = None
+    # Every hour's bay-wide salinity reading, not just the last one -- see
+    # "SALINITY: A SERIES, NOT A SILENT LAST-WRITE" above.
+    bay_salinity_series: list[dict] = []
     species_hours: dict[str, list] = {name: [] for name in species}
     species_features: dict[str, dict] = {name: {} for name in species}
 
@@ -451,7 +483,11 @@ def build_payload(slug: str, day: date, model_label: str, cache) -> dict:
         if distance_field is not None:
             bay_reading = _bay_salinity_reading(day_conditions, fishery, distance_field, sal_phase)
         if bay_reading is not None:
-            bay_representative_reading = bay_reading
+            bay_salinity_series.append({
+                "time": hour.time.isoformat(),
+                "ppt": bay_reading.ppt,
+                "provenance": bay_reading.provenance.value,
+            })
 
         for name, profile in species.items():
             subs = score_factors(
@@ -468,7 +504,7 @@ def build_payload(slug: str, day: date, model_label: str, cache) -> dict:
                 state["u"], state["v"], state["depth"], spec, fishery.structure
             )
             metrics_list: list[FeatureMetrics] = sample_features(
-                feats, spec, fields, schedule, _DEFAULT_AMBUSH_RADIUS_M
+                feats, spec, fields, schedule, fishery.structure.ambush_radius_m
             )
             feature_readings = _feature_salinity_readings(
                 feature_distance_km, bay_cfs, sal_phase, fishery
@@ -492,6 +528,22 @@ def build_payload(slug: str, day: date, model_label: str, cache) -> dict:
                             "constrained_share": activation.constrained_share,
                             "excluded": activation.excluded,
                             "provisional": activation.provisional,
+                            # Trimmed (factor/value/reason only, no
+                            # weight/missing/provisional-per-sub -- those
+                            # ride on `provisional`/`excluded` above instead)
+                            # rather than omitted: spec section 8/9 covers
+                            # BOTH the hourly and the per-feature score, and
+                            # the marker popover's "what + why active"
+                            # cannot be built from `reason` alone -- see the
+                            # module docstring and 2026-08-26 review,
+                            # Important 5. The full `SubScore` (weight,
+                            # missing, per-sub provisional) is already on
+                            # every FISHERY-WIDE hour instead; duplicating
+                            # all of it across 529 features x 24 hours x 3
+                            # species too would roughly double an already
+                            # 13.4 MB payload for fields this trimmed form
+                            # already covers.
+                            "subs": [_sub_to_trimmed_dict(s) for s in activation.subs],
                         }
                     )
 
@@ -501,6 +553,16 @@ def build_payload(slug: str, day: date, model_label: str, cache) -> dict:
     }
 
     effective_cfs = max(float(bay_cfs), 1.0) if bay_cfs is not None else None
+    # A DELIBERATE choice of hour, not whichever one a loop happened to
+    # finish on -- see the module docstring's "SALINITY: A SERIES, NOT A
+    # LAST-WRITE". The midpoint is not claimed to be more REPRESENTATIVE of
+    # the day's fishing than any other hour; it is just a fixed, reproducible
+    # index so `representative_ppt` never silently means "hour 23" again.
+    # The full `series` is the honest answer for anything that cares about
+    # the day's actual range.
+    mid_reading = (
+        bay_salinity_series[len(bay_salinity_series) // 2] if bay_salinity_series else None
+    )
     payload["salinity"] = {
         "cfs": effective_cfs,
         "fitted": fishery.salinity.fitted,
@@ -509,12 +571,10 @@ def build_payload(slug: str, day: date, model_label: str, cache) -> dict:
             if effective_cfs is not None
             else False
         ),
-        "representative_ppt": (
-            bay_representative_reading.ppt if bay_representative_reading else None
-        ),
-        "provenance": (
-            bay_representative_reading.provenance.value if bay_representative_reading else None
-        ),
+        "series": bay_salinity_series,
+        "representative_ppt": mid_reading["ppt"] if mid_reading else None,
+        "representative_hour": mid_reading["time"] if mid_reading else None,
+        "provenance": mid_reading["provenance"] if mid_reading else None,
     }
 
     return _json_safe(payload)

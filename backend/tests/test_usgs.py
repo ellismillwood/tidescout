@@ -159,6 +159,75 @@ def test_discharge_excludes_stale_sites(monkeypatch, fishery, cache):
     assert "02110500" in s.stale
 
 
+def test_discharge_summary_reads_the_days_own_daily_mean_for_a_past_date(
+    monkeypatch, fishery, cache
+):
+    """The wiring gap Task 7's review closed: before this, `day` was accepted
+    but ignored -- `discharge_summary` always read the LIVE gauge regardless
+    of which date was being scored, so every hindcast date got today's
+    discharge. A `day` strictly before today must now read THAT day's own
+    USGS daily mean (`fetch_daily`, NWIS `dv`) instead.
+
+    `fetch_daily` is monkeypatched, not mocked over HTTP: this test pins the
+    SELECTION logic (which day's composite becomes `cfs_now`/`cfs_lagged`),
+    not the response parsing `test_fetch_daily_parses_and_sorts` below
+    already covers.
+    """
+    target = date(2020, 1, 15)
+    daily = {
+        "02131000": [
+            (target - timedelta(days=2), 1000.0),
+            (target - timedelta(days=1), 1100.0),
+            (target, 1200.0),
+        ],
+        "02110500": [
+            (target - timedelta(days=2), 200.0),
+            (target - timedelta(days=1), 220.0),
+            (target, 240.0),
+        ],
+        "02136000": [
+            (target - timedelta(days=2), 100.0),
+            (target - timedelta(days=1), 110.0),
+            (target, 120.0),
+        ],
+    }
+
+    def fake_fetch_daily(sites, param, start, end, cache):
+        assert param == usgs.PARAM_DISCHARGE
+        return {s: daily[s] for s in sites if s in daily}
+
+    monkeypatch.setattr(usgs, "fetch_daily", fake_fetch_daily)
+    summary = usgs.discharge_summary(fishery, cache, day=target)
+
+    # cfs_now: the composite AT `target` (1200 + 240 + 120), not at "now".
+    assert summary.cfs_now == pytest.approx(1560.0)
+    # cfs_lagged: the composite 1-2 days BEFORE `target`, averaged -- the
+    # same 24-48h-before-"now" shape the live path uses, expressed in days.
+    assert summary.cfs_lagged == pytest.approx((1300.0 + 1430.0) / 2)
+    assert summary.bucket == "low"  # basis (cfs_lagged) 1365 < 2774 threshold
+    assert summary.contributing == ["02131000", "02110500", "02136000"]
+    assert summary.stale == []
+
+
+def test_discharge_summary_ignores_day_for_today_and_the_future(monkeypatch, fishery, cache):
+    """`day` == today or in the future must still take the ORIGINAL live
+    path -- a future date has no daily mean to read (USGS has not measured
+    it yet), and `day` == today must not change existing callers'
+    behaviour."""
+    calls = []
+    monkeypatch.setattr(usgs, "_live_discharge_summary", lambda f, c: calls.append("live") or None)
+    monkeypatch.setattr(
+        usgs,
+        "_historical_discharge_summary",
+        lambda f, c, d: calls.append("historical") or None,
+    )
+    today = datetime.now(UTC).date()
+    usgs.discharge_summary(fishery, cache, day=None)
+    usgs.discharge_summary(fishery, cache, day=today)
+    usgs.discharge_summary(fishery, cache, day=today + timedelta(days=3))
+    assert calls == ["live", "live", "live"]
+
+
 @respx.mock
 def test_fetch_daily_parses_and_sorts(cache):
     payload = {"value": {"timeSeries": [{

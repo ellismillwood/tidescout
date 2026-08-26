@@ -75,7 +75,13 @@ def load_day(fishery: Fishery, day: date, model_key: str, cache: Cache) -> DayCo
     moon = attempt("moon", lambda: astronomy.moon_info(fishery, day), None)
     solunar = attempt("solunar", lambda: astronomy.solunar_periods(fishery, day), [])
     water = attempt("water", lambda: usgs.water_summary(fishery, cache, day.month), None)
-    discharge = attempt("discharge", lambda: usgs.discharge_summary(fishery, cache), None)
+    # `day` closes the wiring gap this function used to have: every date
+    # assembled here got whatever the LIVE gauge read at call time, never
+    # the date's own historical discharge. `usgs.discharge_summary` treats
+    # a past `day` as a request for that day's USGS daily mean and anything
+    # else (None, today, a future date) as the original live reading -- see
+    # its own docstring for the full split.
+    discharge = attempt("discharge", lambda: usgs.discharge_summary(fishery, cache, day), None)
 
     return assemble_day(
         fishery=fishery, day=day, model_label=label, weather_48h=weather_48h,

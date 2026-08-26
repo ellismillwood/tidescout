@@ -181,7 +181,48 @@ def fetch_daily(
     return out
 
 
-def discharge_summary(fishery: Fishery, cache: Cache) -> DischargeSummary:
+def _bucket_for(basis: float | None, fishery: Fishery) -> str:
+    """low/med/high from a single discharge number -- the ONE place both the
+    live and historical paths below decide this, so they cannot drift apart
+    on what counts as which bucket."""
+    if basis is None:
+        return "med"
+    if basis < fishery.discharge_buckets.low_below_cfs:
+        return "low"
+    if basis > fishery.discharge_buckets.high_above_cfs:
+        return "high"
+    return "med"
+
+
+def discharge_summary(fishery: Fishery, cache: Cache, day: date | None = None) -> DischargeSummary:
+    """Composite river discharge -- LIVE by default, a past date's own daily
+    mean when `day` names one.
+
+    `day=None`, `day` == today, or `day` in the future all take the ORIGINAL
+    live path (`_live_discharge_summary`): the instantaneous-values (`iv`)
+    feed, read as of `datetime.now(UTC)` regardless of what `day` asked for.
+    That is unchanged from every version of this function before this
+    parameter existed, and a future date has no daily mean to read yet
+    anyway -- USGS has not measured it -- so falling back to a live "now"
+    reading is more honest than fabricating one.
+
+    A `day` STRICTLY BEFORE today takes `_historical_discharge_summary`
+    instead: `fetch_daily`'s NWIS `dv` (daily-mean) service, the SAME one
+    `pipeline.salinity_fit._usgs_inputs` already uses for calibration, keyed
+    by `day` itself rather than "now". Before this, `dayloader.load_day`
+    called the live path unconditionally regardless of which date it was
+    assembling -- every date's `DayConditions.discharge` reflected whatever
+    the gauge read at CALL TIME, not the date being scored. That is a wiring
+    gap in `load_day`, not a missing capability in this module: the daily
+    endpoint this closes it with (`fetch_daily`) already existed and was
+    already relied on elsewhere.
+    """
+    if day is not None and day < datetime.now(UTC).date():
+        return _historical_discharge_summary(fishery, cache, day)
+    return _live_discharge_summary(fishery, cache)
+
+
+def _live_discharge_summary(fishery: Fishery, cache: Cache) -> DischargeSummary:
     sites = [r.usgs_site for r in fishery.rivers if r.usgs_site]
     weights = {r.usgs_site: r.weight for r in fishery.rivers if r.usgs_site}
     series = fetch_series(sites, [PARAM_DISCHARGE], 4, cache)
@@ -211,14 +252,59 @@ def discharge_summary(fishery: Fishery, cache: Cache) -> DischargeSummary:
     cfs_now = total_now if got_now else None
     cfs_lagged = total_lagged if got_lagged else None
     basis = cfs_lagged if cfs_lagged is not None else cfs_now
-    if basis is None:
-        bucket = "med"
-    elif basis < fishery.discharge_buckets.low_below_cfs:
-        bucket = "low"
-    elif basis > fishery.discharge_buckets.high_above_cfs:
-        bucket = "high"
-    else:
-        bucket = "med"
+    bucket = _bucket_for(basis, fishery)
+    summary = DischargeSummary(cfs_now, cfs_lagged, bucket, sites, contributing, stale)
+    summary.trend = (
+        cfs_now / cfs_lagged if cfs_now is not None and cfs_lagged not in (None, 0.0) else None
+    )
+    summary.limb = classify_limb(summary)
+    return summary
+
+
+def _composite_daily_discharge(fishery: Fishery, daily: dict[str, list[tuple[date, float]]]):
+    """Weighted composite discharge per calendar day, over days EVERY
+    weighted gauge reports.
+
+    The SAME logic as `pipeline.salinity_fit.composite_discharge_by_day`
+    (weight = "include this gauge", not `inflow_share`; days any gauge is
+    dark are dropped rather than summed short), duplicated here rather than
+    imported: `sources/usgs.py` sits BELOW `pipeline/` in this codebase's
+    layering (`salinity_fit.py` already imports `usgs.fetch_daily`), so
+    importing the other direction would be a cycle. Two independent readers
+    of the same NWIS `dv` response computing this identically is a smaller
+    risk than a sources module depending on a pipeline one.
+    """
+    weights = {r.usgs_site: r.weight for r in fishery.rivers if r.usgs_site}
+    if not weights or any(s not in daily for s in weights):
+        return {}
+    by_site = {s: dict(daily[s]) for s in weights}
+    days = set.intersection(*(set(by_site[s]) for s in weights))
+    return {d: sum(by_site[s][d] * w for s, w in weights.items()) for d in sorted(days)}
+
+
+def _historical_discharge_summary(fishery: Fishery, cache: Cache, day: date) -> DischargeSummary:
+    """`day`'s own USGS daily mean (NWIS `dv`, statCd 00003) rather than
+    whatever the live gauge reads right now -- see `discharge_summary`'s
+    docstring for when this path is taken.
+
+    `cfs_lagged` reads the composite 1-2 CALENDAR days before `day`, mirroring
+    the live path's 24-48h-before-now window but expressed in days since a
+    historical query has no "now" to be hours behind -- the salt front lags
+    discharge by days regardless of which path supplied the number, so a
+    caller reading `trend`/`limb` gets the same shape of answer either way.
+    """
+    sites = [r.usgs_site for r in fishery.rivers if r.usgs_site]
+    start = day - timedelta(days=3)
+    daily = fetch_daily(sites, PARAM_DISCHARGE, str(start), str(day), cache)
+    composite = _composite_daily_discharge(fishery, daily)
+    cfs_now = composite.get(day)
+    lag_days = [d for d in composite if timedelta(days=1) <= (day - d) <= timedelta(days=2)]
+    cfs_lagged = fmean(composite[d] for d in lag_days) if lag_days else None
+    reporting = {site for site in sites if site in daily and day in dict(daily[site])}
+    contributing = [s for s in sites if s in reporting]
+    stale = [s for s in sites if s not in reporting]
+    basis = cfs_lagged if cfs_lagged is not None else cfs_now
+    bucket = _bucket_for(basis, fishery)
     summary = DischargeSummary(cfs_now, cfs_lagged, bucket, sites, contributing, stale)
     summary.trend = (
         cfs_now / cfs_lagged if cfs_now is not None and cfs_lagged not in (None, 0.0) else None
