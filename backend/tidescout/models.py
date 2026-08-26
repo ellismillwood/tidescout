@@ -525,3 +525,23 @@ class SpeciesProfile(BaseModel):
     curves: dict[str, Curve]
     salinity: Curve
     months: dict[int, float]
+
+    @model_validator(mode="after")
+    def _weights_are_non_negative(self):
+        """A negative weight is not a low weight -- it is an incoherent one.
+
+        `combine` takes a weighted geometric mean, so a negative weight makes
+        a factor's contribution move the score the WRONG WAY, and nothing
+        raises: the log-sum absorbs it and returns a plausible-looking number.
+        `Curve.y` is already validated into [0, 1] for the same reason. This
+        file's header tells the reader to edit these numbers freely, so the
+        typo it invites has to fail loudly rather than silently invert a
+        factor.
+
+        Zero is allowed: spec section 8 calls solunar "zeroable", and a zero
+        weight correctly drops a factor out of the mean.
+        """
+        bad = {k: v for k, v in self.weights.items() if v < 0.0}
+        if bad:
+            raise ValueError(f"species weights must be >= 0, got {bad}")
+        return self

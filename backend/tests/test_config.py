@@ -160,6 +160,25 @@ def test_every_species_covers_every_factor():
         assert FACTORS - {"season"} <= set(profile.curves) | {"salinity"}, f"{name} curves"
 
 
+def test_a_negative_weight_is_rejected_rather_than_inverting_a_factor():
+    """`combine` takes a weighted geometric MEAN, so a negative weight makes a
+    factor push the score the wrong way and nothing raises -- the log-sum
+    absorbs it and returns a plausible number. This file's header invites
+    hand-editing, so the typo it invites must fail loudly.
+
+    Zero stays legal: spec section 8 calls solunar "zeroable".
+    """
+    from tidescout.models import Curve, SpeciesProfile
+
+    good = dict(
+        curves={}, salinity=Curve(x=[0.0, 1.0], y=[0.0, 1.0]),
+        months=dict.fromkeys(range(1, 13), 1.0),
+    )
+    SpeciesProfile(weights={"flow": 0.0}, **good)          # zero is fine
+    with pytest.raises(ValidationError, match="must be >= 0"):
+        SpeciesProfile(weights={"flow": -0.5}, **good)
+
+
 def test_every_month_has_a_season_modifier():
     for name, profile in load_species().items():
         assert sorted(profile.months) == list(range(1, 13)), name
