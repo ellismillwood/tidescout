@@ -7,8 +7,9 @@ import math
 import pytest
 
 from tidescout.config import load_species
+from tidescout.engine.activation import FeatureMetrics
 from tidescout.engine.conditions import HourlyConditions
-from tidescout.engine.score import FACTORS, SubScore, combine, score_factors
+from tidescout.engine.score import FACTORS, SubScore, combine, score_factors, score_feature
 
 
 def _hour(**kw):
@@ -446,3 +447,109 @@ def test_zero_is_floored_rather_than_producing_negative_infinity():
     s = combine(_subs(a=0.0, b=1.0, c=1.0))
     assert math.isfinite(s.score)
     assert s.score < 20
+
+
+def _metrics(**kw):
+    base = dict(
+        key="dropoff-abc123", type="dropoff", speed=0.5, ambush=0.4, strain=2e-3,
+        okubo_w=-1e-5, convergence=1e-4, wet_fraction=1.0, flood_phase=float("nan"),
+        n_cells=42,
+        # Required on FeatureMetrics and NOT optional -- omitting it is a
+        # TypeError, not a default. Added to the dataclass after this plan was
+        # written. 0.0 is the neutral value (no wet disc cell classifies as an
+        # eddy) and nothing in this task's scoring reads it: the structure
+        # sub-score is built from ambush, okubo_w and convergence.
+        eddy_share=0.0,
+    )
+    return FeatureMetrics(**{**base, **kw})
+
+
+def test_the_same_feature_scores_lower_in_fresh_water_for_trout():
+    """Spec section 7: 'the same eddy scores near zero up-bay after a freshet
+    and lights up 5 miles down-bay'."""
+    trout = load_species()["speckled_trout"]
+    salty = score_feature(_metrics(), _hour(), None, trout, salinity=_sal(22.0))
+    fresh = score_feature(_metrics(), _hour(), None, trout, salinity=_sal(1.0))
+    assert fresh.activation < salty.activation / 2
+
+
+def test_a_strong_ambush_pocket_outscores_featureless_water():
+    red = load_species()["redfish"]
+    strong = score_feature(_metrics(ambush=0.9), _hour(), None, red, salinity=_sal(18.0))
+    weak = score_feature(_metrics(ambush=0.0), _hour(), None, red, salinity=_sal(18.0))
+    assert strong.activation > weak.activation
+
+
+def test_a_feature_outside_the_domain_scores_zero_with_an_explanation():
+    """n_cells == 0 means the feature has no library cells; it must not be
+    silently scored on NaN metrics."""
+    red = load_species()["redfish"]
+    out = score_feature(_metrics(n_cells=0), _hour(), None, red, salinity=_sal(18.0))
+    assert out.activation == 0
+    assert "outside" in out.reason.lower() or "no cells" in out.reason.lower()
+
+
+def test_activation_carries_the_feature_key_unchanged():
+    """The frontend keys markers off this; Phase 1 Task 8 made it stable."""
+    red = load_species()["redfish"]
+    got = score_feature(_metrics(key="bar-9f2c1a7b4e05"), _hour(), None, red,
+                        salinity=_sal(18.0))
+    assert got.key == "bar-9f2c1a7b4e05"
+
+
+def test_a_dry_flat_scores_zero_however_good_the_conditions():
+    """You cannot fish a flat that has no water on it."""
+    red = load_species()["redfish"]
+    dry = score_feature(_metrics(type="flat", wet_fraction=0.0, speed=0.0),
+                        _hour(), None, red, salinity=_sal(18.0))
+    assert dry.activation < 10
+
+
+def test_a_features_flow_comes_from_its_own_metrics_not_a_bay_wide_default():
+    """Spec section 7's actual mechanism, restated for flow rather than
+    salinity: `score_feature` has no `flow_speed` parameter in its signature
+    at all, so the only way the flow factor can vary between two features is
+    if it is read from `FeatureMetrics.speed`. `_hour()` carries no
+    `current_speed_kn`, so a bay-wide fallback would leave flow MISSING for
+    both calls and this test would catch that too -- not just a wrong value,
+    but the wrong SOURCE entirely.
+    """
+    red = load_species()["redfish"]
+    slack = score_feature(_metrics(speed=0.01), _hour(), None, red, salinity=_sal(18.0))
+    ripping = score_feature(_metrics(speed=1.2), _hour(), None, red, salinity=_sal(18.0))
+    slack_flow = _by_factor(slack.subs)["flow"]
+    ripping_flow = _by_factor(ripping.subs)["flow"]
+    assert slack_flow.missing is False and ripping_flow.missing is False
+    assert "slack" in slack_flow.reason
+    assert "ripping" in ripping_flow.reason
+    assert slack_flow.value < ripping_flow.value
+    assert slack.activation < ripping.activation
+
+
+def test_an_uncalibrated_salinity_still_flags_a_feature_as_provisional():
+    """The owner's 2026-08-26 include-and-flag ruling has to hold at the
+    feature boundary, not just the hourly one: the map cannot quietly show an
+    unconstrained per-feature number as a confident one. Winyah's salinity
+    model is `fitted=False` -- the default `_sal()` produces -- so this is
+    the path that actually runs in production."""
+    red = load_species()["redfish"]
+    got = score_feature(_metrics(), _hour(), None, red, salinity=_sal(18.0))
+    salinity_sub = _by_factor(got.subs)["salinity"]
+    assert salinity_sub.missing is False
+    assert salinity_sub.provisional is True
+    assert "UNCALIBRATED" in salinity_sub.reason
+    assert "provisional" in got.reason.lower()
+
+
+def test_a_feature_with_no_finite_structure_sample_is_missing_not_zero():
+    """`sample_features` can leave ambush/okubo_w/convergence all NaN even
+    with `n_cells > 0` -- an entirely dry disc, for instance. That must read
+    as missing data, never as a silently-computed zero."""
+    red = load_species()["redfish"]
+    got = score_feature(
+        _metrics(ambush=float("nan"), okubo_w=float("nan"), convergence=float("nan")),
+        _hour(), None, red, salinity=_sal(18.0),
+    )
+    structure_sub = _by_factor(got.subs)["structure"]
+    assert structure_sub.missing is True
+    assert math.isnan(structure_sub.value)

@@ -18,8 +18,9 @@ from dataclasses import dataclass
 from datetime import datetime
 from enum import StrEnum
 
+from tidescout.engine.activation import FeatureMetrics
 from tidescout.engine.curves import evaluate
-from tidescout.models import SpeciesProfile
+from tidescout.models import SpeciesProfile, StructureThresholds
 
 FACTORS = (
     "flow", "stage", "light", "solunar", "pressure", "wind",
@@ -318,4 +319,201 @@ def combine(subs: list[SubScore]) -> HourScore:
             sum(x.weight for x in present if not x.provisional) / live_weight
         ),
         provisional=[x.factor for x in present if x.provisional],
+    )
+
+
+# --- Per-feature activation --------------------------------------------------
+#
+# The map half of the same pipeline. `score_factors` already takes its flow
+# speed and salinity as parameters instead of reaching for one bay-wide
+# number, so scoring a single feature is the SAME nine-factor pipeline fed
+# that feature's own `FeatureMetrics.speed` and its own location's
+# `SalinityReading` -- not a separate code path. `structure` is the one
+# factor `score_factors` cannot produce by itself, because it depends on the
+# Phase 1 derived-structure fields (`ambush`, `okubo_w`, `convergence`) that
+# exist only per-feature, never per-hour.
+
+# `structure`'s weight is a fixed constant, not `profile.weights["structure"]`:
+# `test_the_factor_list_and_the_authored_yaml_cannot_drift_apart` asserts
+# `set(FACTORS) == set(profile.weights)` for every species, so adding a
+# "structure" key to species_weights.yaml would need a matching FACTORS
+# entry, which would make `score_factors` emit TEN sub-scores and break
+# `test_all_nine_factors_are_always_present`. Whether a patch of water is
+# shaped like an ambush pocket or a seam is also not a species preference
+# the way flow or salinity tolerance are, so a shared constant is the honest
+# choice here, not a shortcut around YAML plumbing.
+#
+# Weighted lower than every authored factor, including solunar's 0.3 --
+# spec section 8's other deliberately small weight. Solunar still names a
+# claimed physical mechanism anglers cite; `structure` is a supplementary
+# geometric signal this map view adds on top, so it is weighted lower still,
+# specifically so it cannot dilute the up-bay/down-bay salinity swing spec
+# section 7 asks for -- see
+# test_the_same_feature_scores_lower_in_fresh_water_for_trout, which is
+# measured against this exact constant, not merely inspected.
+STRUCTURE_WEIGHT = 0.2
+
+
+def _structure_subscore(metrics: FeatureMetrics, t: StructureThresholds) -> SubScore:
+    """How much this feature's geometry looks like a fishing spot.
+
+    Three independent structural signatures, each scaled against the SAME
+    thresholds `structure.classify_structure` and `FeatureMetrics.eddy_share`
+    already use to call a cell "quiet" or not (`StructureThresholds.quiet_w`,
+    `.convergence_min`): a signal five times past the dead band saturates at
+    1.0, and a reading sitting exactly AT the dead band -- as this task's own
+    `_metrics()` test fixture does, deliberately, per its own comment --
+    reads a modest 0.2, not zero and not saturated.
+
+    Combined with MAX, not a mean: any ONE strong signature -- an ambush
+    pocket, OR a seam, OR an eddy, OR a convergence front -- is what makes a
+    spot worth fishing, and averaging three quiet numbers against one loud
+    one would dilute the loud one exactly the way an arithmetic mean would
+    at the `combine()` level (see that function's docstring for the same
+    argument one level up). A feature does not need all four to be worth
+    marking.
+
+    `ambush` is a raw speed CONTRAST in m/s -- "how much faster the nearby
+    water is than this cell" -- not already scaled to [0, 1]; see
+    `structure.ambush_contrast`. This bay's flow library tops out under
+    1.5 m/s (every species flow curve in species_weights.yaml is authored to
+    that range), so clamping the contrast itself to [0, 1] m/s is a
+    reasonable saturation point for "the ambush pocket is dramatic" without
+    inventing a new tuned breakpoint nothing has measured.
+
+    `okubo_w`'s SIGN, not just its magnitude, decides which signature it is:
+    W > 0 is a seam (strain-dominated), W < 0 is an eddy core
+    (rotation-dominated) -- see `structure.okubo_weiss`. Both are treated as
+    equally strong structure signals at the same magnitude; only the label
+    in the reason differs.
+
+    Missing is possible and distinct from a quiet reading: `sample_features`
+    can leave any of the three NaN even when `n_cells > 0`, if no sampled
+    cell has a finite value for that particular field (an entirely dry disc,
+    for instance). Only when ALL THREE are NaN is there truly nothing to
+    score; if even one is finite it is used, and the reason says which.
+    """
+    signals: dict[str, float] = {}
+    if math.isfinite(metrics.ambush):
+        signals["ambush pocket"] = min(max(metrics.ambush, 0.0), 1.0)
+    if math.isfinite(metrics.okubo_w):
+        if metrics.okubo_w >= 0:
+            signals["current seam"] = min(metrics.okubo_w / (5 * t.quiet_w), 1.0)
+        else:
+            signals["eddy"] = min(-metrics.okubo_w / (5 * t.quiet_w), 1.0)
+    if math.isfinite(metrics.convergence):
+        signals["convergence front"] = min(
+            max(metrics.convergence, 0.0) / (5 * t.convergence_min), 1.0
+        )
+
+    if not signals:
+        return SubScore(
+            "structure", float("nan"), STRUCTURE_WEIGHT,
+            "structure: no data (ambush, okubo_w and convergence all NaN)", True,
+        )
+
+    name, value = max(signals.items(), key=lambda kv: kv[1])
+    return SubScore(
+        "structure", value, STRUCTURE_WEIGHT,
+        f"structure {value:.2f} — strongest signal: {name}", False,
+    )
+
+
+@dataclass
+class FeatureActivation:
+    """One feature's bite-worthiness at one hour -- the map's per-marker
+    number, next to `HourScore`'s single fishery-wide one.
+    """
+
+    key: str
+    type: str
+    activation: int
+    subs: list[SubScore]
+    reason: str
+
+
+def score_feature(
+    metrics: FeatureMetrics,
+    hour,
+    day,
+    profile: SpeciesProfile,
+    salinity: SalinityReading | None,
+    thresholds: StructureThresholds | None = None,
+) -> FeatureActivation:
+    """Score one feature at one hour: the map half of the pipeline.
+
+    Reuses `score_factors` for the nine shared factors, feeding it THIS
+    feature's own flow (`metrics.speed`) and THIS feature's own salinity
+    reading -- not the bay-representative values `score_factors` falls back
+    to when it is scoring the fishery-wide `HourScore` instead. That
+    substitution is the whole of spec section 7's requirement: the identical
+    eddy, scored at two locations with two different `SalinityReading`s,
+    must come out differently -- see
+    test_the_same_feature_scores_lower_in_fresh_water_for_trout. A tenth,
+    feature-only `structure` sub-score is appended from the Phase 1
+    derived-structure fields, then `combine` runs UNCHANGED over all ten --
+    the geometric mean, the missing-factor renormalisation and the
+    provisional/confidence split all apply exactly as they do for the hourly
+    score, because they are the same honesty requirements about the same
+    kind of number, just addressed at a point instead of a whole fishery.
+
+    `n_cells == 0` means the feature's sampling disc found no library cells
+    at all -- outside the model domain -- and every metric on it is NaN by
+    construction (`activation.sample_features`). Scoring that would be
+    scoring noise with a straight face, so it short-circuits before
+    `score_factors` ever runs, returning an explanatory reason and no subs
+    to inspect rather than a number computed on NaN.
+
+    `flat`-type features are gated on `wet_fraction` AFTER combining: you
+    cannot fish a flat with no water on it, however good the tide, wind and
+    salinity look elsewhere on the same disc -- see
+    test_a_dry_flat_scores_zero_however_good_the_conditions. Other feature
+    types are not gated this way -- a hole or a channel edge holds water at
+    low tide by definition, so multiplying by wet_fraction there would
+    penalise them for a quantity that says nothing about their fishability.
+
+    The owner's 2026-08-26 ruling (progress.md) is to include an
+    uncalibrated salinity at full weight, flagged, rather than exclude or
+    discount it -- and that has to hold at the feature boundary too, or the
+    map would quietly present an unconstrained per-feature number as a
+    confident one. Nothing here strips `SubScore.provisional`: `salinity` is
+    forwarded to `score_factors` untouched, so its provisional flag and its
+    "UNCALIBRATED" reason text ride along inside `subs` exactly as `combine`
+    received them, and `reason` restates the provisional list explicitly
+    rather than leaving it for a caller to notice only by reading `subs`.
+    """
+    if metrics.n_cells == 0:
+        return FeatureActivation(
+            key=metrics.key, type=metrics.type, activation=0, subs=[],
+            reason=(
+                f"{metrics.key} is outside the model domain — no library cells "
+                "fall within the feature's sampling disc"
+            ),
+        )
+
+    t = thresholds or StructureThresholds()
+    subs = score_factors(hour, day, profile, salinity=salinity, flow_speed=metrics.speed)
+    subs.append(_structure_subscore(metrics, t))
+    combined = combine(subs)
+
+    activation = combined.score
+    if metrics.type == "flat" and math.isfinite(metrics.wet_fraction):
+        wet = min(max(metrics.wet_fraction, 0.0), 1.0)
+        activation = int(round(activation * wet))
+
+    reason = (
+        f"{metrics.type} {metrics.key}: activation {activation}/100, "
+        f"confidence {combined.confidence:.2f}"
+    )
+    if combined.provisional:
+        reason += (
+            f" -- provisional (scored at full weight, unconstrained): "
+            f"{', '.join(combined.provisional)}"
+        )
+    if metrics.type == "flat":
+        reason += f", wet {metrics.wet_fraction:.2f} of the disc"
+
+    return FeatureActivation(
+        key=metrics.key, type=metrics.type, activation=activation,
+        subs=combined.subs, reason=reason,
     )
