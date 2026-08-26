@@ -2745,21 +2745,79 @@ def test_profile_memory_scores_each_tau_on_the_rows_own_resolved_phase(monkeypat
     assert all(np.isfinite(rmse) for _, rmse in profile), profile
 
 
+def test_profile_memory_reports_nan_not_a_crash_for_a_tau_with_non_finite_rows():
+    """`profile_memory`'s thin-data guard must filter for finiteness the
+    SAME way `fit_intrusion`'s own `_finite_rows` does, evaluated BEFORE
+    checking `len(rows) < 3` -- not after. `smooth_discharge` PROPAGATES a
+    NaN gauge reading through `np.dot` rather than dropping it (only a
+    MISSING day is dropped, via the `any(h is None ...)` check), so a tau
+    whose retained population includes a corrupted discharge value has a
+    raw row count that can stay >= 3 while its FINITE row count drops below
+    it. Before this fix that raw-count-only guard let such a tau reach
+    `fit_intrusion`, which raises `ValueError: need at least 3 finite
+    observations...` once its own `_finite_rows` drops the same rows -- and
+    now that the blanket `except ValueError` around that call is correctly
+    narrowed (review's earlier finding), that exception PROPAGATES instead
+    of being swallowed as `nan`, which would abort `salinity calibrate`
+    mid-table for a fixture just like this one. Not reachable on today's
+    shipped data (`discharge_memory_days` stays 0.0, and `n_dropped: 0` on
+    the real Winyah collection), but reachable in principle."""
+    from datetime import timedelta
+
+    data = _synthetic_calibration_input()
+
+    def day(n: int) -> date:
+        return date(2026, 1, 1) + timedelta(days=n - 1)
+
+    # `_synthetic_calibration_input`'s 5 largest-tau survivors are
+    # day(125)/day(130)/day(135)/day(140)/day(145) (see its own docstring).
+    # Corrupting the LAST 3 of those to NaN leaves 5 raw rows at every tau
+    # (a day with a NaN discharge value is not DROPPED by `smooth_discharge`,
+    # only a genuinely MISSING one is) but only 2 FINITE ones -- below
+    # fit_intrusion's 3-row minimum, while the raw count (5) is not.
+    corrupted = dict(data.discharge_by_day)
+    for n in (135, 140, 145):
+        corrupted[day(n)] = float("nan")
+    data = salinity_fit.CalibrationInput(
+        data.observations, [], [], data.days, data.day_span, 0,
+        discharge_by_day=corrupted, observation_days=data.observation_days,
+        observation_phases=data.observation_phases,
+    )
+
+    profile = salinity_fit.profile_memory(data, CFG, [0, 7, 30])
+
+    assert [tau for tau, _ in profile] == [0, 7, 30]
+    assert all(np.isnan(rmse) for _, rmse in profile), (
+        f"expected every tau to report nan (2 finite rows, below the "
+        f"3-row minimum) rather than raise or silently fit on NaN -- "
+        f"got {profile}"
+    )
+
+
 def test_calibrate_cli_prints_the_tau_scan_table_when_data_is_dated(monkeypatch):
-    """The scan's CLI block -- the `MEMORY_GRID_DAYS` import, the
-    `strict=True` zip over profile/counts, the `nan` -> `"n/a"` rendering --
-    is gated on `data.discharge_by_day` and `data.observation_days` both
-    being populated. Every OTHER CLI test in this file hand-builds a
-    `CalibrationInput` without those two fields, so that whole block never
-    executed under test before this one -- review's Minor 6."""
+    """The scan's CLI block -- gated on `data.discharge_by_day` and
+    `data.observation_days` both being populated (every OTHER CLI test in
+    this file hand-builds a `CalibrationInput` without those two fields, so
+    this block never executed under test before this one) -- contains a
+    `strict=True` zip over `profile`/`counts` and renders each row's rmse
+    with `f"{rmse:.4f}"`.
+
+    Asserted against the SAME `profile_memory`/`profile_memory_row_counts`
+    outputs the CLI itself computes internally, not a rerun-and-compare of
+    those functions alone: this proves the CLI's OWN rendering loop (the
+    zip, the formatting) is faithful to what they returned, one row per
+    grid candidate -- a real gap review caught (Minor 6 residual): a
+    truncated zip (e.g. `counts[:-1]`, silently dropping the last row) or a
+    removed `n/a`-on-nan branch both left this test's PREDECESSOR green,
+    because it checked only that the table existed, never that every row in
+    it did."""
     from typer.testing import CliRunner
 
     from tidescout.cli import app
+    from tidescout.config import load_fishery
 
-    monkeypatch.setattr(
-        salinity_fit, "collect_observations",
-        lambda *a, **k: _synthetic_calibration_input(),
-    )
+    data = _synthetic_calibration_input()
+    monkeypatch.setattr(salinity_fit, "collect_observations", lambda *a, **k: data)
     result = CliRunner().invoke(app, ["salinity", "calibrate", "winyah-bay"])
     out = re.sub(r"\s+", " ", re.sub(r"\x1b\[[0-9;]*m", "", result.output))
 
@@ -2767,9 +2825,23 @@ def test_calibrate_cli_prints_the_tau_scan_table_when_data_is_dated(monkeypatch)
     assert "discharge-memory tau scan" in out.lower()
     assert "diagnostic only" in out.lower()
     assert "rows scored" in out.lower()
-    # Every candidate in the grid is restricted to the SAME 5 rows this
-    # fixture's largest tau (30) retains -- see `_synthetic_calibration_input`.
-    assert re.search(r"\b5\b", out), "expected every tau to report the 5 shared rows"
+
+    fishery = load_fishery("winyah-bay")
+    expected_profile = salinity_fit.profile_memory(
+        data, fishery.salinity, salinity_fit.MEMORY_GRID_DAYS
+    )
+    expected_counts = salinity_fit.profile_memory_row_counts(data, salinity_fit.MEMORY_GRID_DAYS)
+    assert len(expected_profile) == len(salinity_fit.MEMORY_GRID_DAYS)
+    for (tau, rmse), n in zip(expected_profile, expected_counts, strict=True):
+        # This fixture is adequate data at every candidate tau (see
+        # `_synthetic_calibration_input`), so every rmse here is a real,
+        # distinct 4-decimal float, not `nan` -- a row a truncated zip
+        # dropped would leave ITS rmse string absent from `out` while every
+        # other row's remained, which a weaker "some numbers appear"
+        # check cannot distinguish from a correctly rendered table.
+        assert not np.isnan(rmse), f"fixture expected to fit at tau={tau:g}"
+        assert f"{rmse:.4f}" in out, f"missing rendered row for tau={tau:g} (rmse {rmse:.4f})"
+        assert str(n) in out
 
 
 def test_calibrate_cli_warns_when_the_grid_outruns_the_record(monkeypatch):
@@ -2778,7 +2850,12 @@ def test_calibrate_cli_warns_when_the_grid_outruns_the_record(monkeypatch):
     rmse. The footer's blanket claim ("every tau scored on the SAME row
     population") is technically still true at that point (0 == 0 == ...),
     but reads as if the scan succeeded on real data. This guard says
-    explicitly that nothing survived -- review's Minor 7."""
+    explicitly that nothing survived -- review's Minor 7.
+
+    Also the discriminating home for the `nan` -> `"n/a"` rendering branch
+    (review's Minor 6 residual): every rmse in THIS fixture is `nan` by
+    construction, so `"n/a"` must appear -- unlike the sibling table test
+    above, whose adequate-data fixture never exercises that branch at all."""
     from typer.testing import CliRunner
 
     from tidescout.cli import app
@@ -2801,6 +2878,11 @@ def test_calibrate_cli_warns_when_the_grid_outruns_the_record(monkeypatch):
 
     assert result.exit_code == 0, result.output
     assert "outran the record" in out.lower()
+    # The rendering branch itself: no test anywhere in this suite previously
+    # asserted "n/a" appears anywhere, so removing the
+    # `"n/a" if math.isnan(rmse) else f"{rmse:.4f}"` branch entirely (and
+    # rendering raw `nan` instead) left every existing test green.
+    assert "n/a" in out.lower()
 
 
 def test_reject_and_report_counts_observations_and_swings_lost_to_smoothing(monkeypatch):

@@ -522,9 +522,9 @@ def salinity_calibrate(
                 f"[yellow]the grid's largest tau ({max(MEMORY_GRID_DAYS):g} days) "
                 "outran the record[/yellow] -- its window needs more unbroken "
                 "preceding discharge history than this collection has, so every "
-                "candidate above restricted to an EMPTY population: 0 rows, "
-                "rmse n/a. The table above is not evidence of a poor fit; there "
-                "was no common population to fit at all."
+                "candidate above restricted to an EMPTY population: 0 rows, no "
+                "rmse computed. The table above is not evidence of a poor fit; "
+                "there was no common population to fit at all."
             )
         console.print(
             "[dim]Every tau above is scored on the SAME row population -- the days "

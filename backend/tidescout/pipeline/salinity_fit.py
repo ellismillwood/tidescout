@@ -2010,12 +2010,20 @@ def profile_memory(
     present), but because level rmse is the only residual this scan ever
     produces.
 
-    A candidate whose restricted population is too thin to fit at all --
-    fewer than 3 rows, or every row sharing one discharge, `fit_intrusion`'s
-    own preconditions (see its `ValueError`s) -- reports `nan` rather than
-    calling it, so one unfittable tau does not blank the whole curve and a
-    genuine bug inside `fit_intrusion` itself is not swallowed as `nan`
-    alongside it.
+    A candidate whose population is too thin to fit at all -- fewer than 3
+    FINITE rows, or every finite row sharing one discharge -- reports `nan`
+    rather than calling `fit_intrusion`. The guard filters through
+    `_finite_rows`, the SAME predicate `fit_intrusion` itself applies before
+    checking this precondition, so it evaluates the precondition on the
+    population `fit_intrusion` would actually see, not the unfiltered one:
+    a row whose smoothed discharge is NaN (`smooth_discharge` propagates a
+    NaN gauge reading through `np.dot` rather than dropping it -- only a
+    MISSING day is dropped) would otherwise pass a raw `len(rows)` check and
+    then raise inside `fit_intrusion` -- and now that the blanket
+    `except ValueError` below is gone, that would abort the whole scan
+    instead of reporting one unfittable tau as `nan`. A genuine bug inside
+    `fit_intrusion` (e.g. a real `phases` length mismatch) still propagates,
+    since nothing here catches it.
 
     DIAGNOSTIC ONLY. This does not write `cfg.discharge_memory_days`, does
     not touch `fitted`, and picks nothing: the caller (today, `salinity
@@ -2027,8 +2035,14 @@ def profile_memory(
     out: list[tuple[float, float]] = []
     for tau in taus:
         rows = rows_by_tau[tau]
-        flows = {q for _, q, _ in rows}
-        if len(rows) < 3 or len(flows) < 2:
+        # Filtered the SAME way `fit_intrusion` filters internally
+        # (`_finite_rows`), so this guard evaluates the precondition on the
+        # population `fit_intrusion` will actually see -- not the raw one,
+        # which a NaN in `smooth_discharge`'s output (propagated, not
+        # dropped -- see the docstring above) would otherwise slip past.
+        clean_rows, _ = _finite_rows(rows)
+        flows = {q for _, q, _ in clean_rows}
+        if len(clean_rows) < 3 or len(flows) < 2:
             out.append((tau, float("nan")))
             continue
         _, diag = fit_intrusion(rows, cfg, phases=phases)
