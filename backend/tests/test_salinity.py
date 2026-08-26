@@ -59,13 +59,97 @@ def test_discharge_sensitivity_survives_at_high_water_near_the_mouth():
     (high water) and x < excursion_km, the old clipped-exponential form
     pinned every such cell to exactly ocean_ppt regardless of discharge --
     North Jetty (2.58 km) was discharge-blind 37.9% of every tidal cycle.
-    This is the property that must never regress."""
-    x = np.full(1, 2.58)  # North Jetty
+    That bit-identical plateau is the property that must never regress, and
+    under the new form it does not: checked here across a grid of near-mouth
+    positions and every quarter-phase, spanning the full calibration
+    discharge range, zero points are bit-identical (0.00%, against 47.40%
+    under the old clipped form).
+
+    Wherever the tidal shift leaves x_eff > 0 (landward of the mouth, not
+    ocean-saturated), raising discharge must still measurably freshen the
+    water -- the real content of "discharge sensitivity must not regress".
+
+    Seaward of the mouth (x_eff < 0) the model is already within a fraction
+    of a ppt of ocean_ppt regardless of flow, by physical construction
+    (marine water is marine water there). Measured 2026-08-25 across a
+    4,525-point (x, phase) grid over the calibration range, under this
+    module's own `CFG` (`ocean_ppt=34.0`, above) -- the config this test
+    actually runs: 284 points (6.28%) there read a HIGHER discharge as a
+    hair SALTIER instead of fresher, by at most 0.0087 ppt (median 0.0071
+    ppt), always within 0.03 ppt of ocean_ppt. (The point count and
+    percentage are config-invariant; the shipped Winyah config's
+    ocean_ppt=35.5 gives the same count but 0.0091 ppt / 0.0074 ppt.) That is
+    a known, BOUNDED consequence of `W` sharing `L`'s exponent (see
+    `_discharge_scale`'s docstring) -- not the bit-identical plateau defect 1
+    was about, since it is never exactly tied and never material.
+
+    The bound below is enforced INSIDE the loop, for every x_eff < 0 point
+    this grid visits -- not just at one named coordinate. A single hardcoded
+    exception (e.g. only at North Jetty) would let the reversal grow
+    unboundedly at any other seaward point without failing anything; the
+    grid's own worst point (x=5.0, phase=0.5, x_eff=-2.0) is the one that
+    actually exercises the bound, not North Jetty."""
     lo, hi = CFG.calibration_range_cfs
-    low = salinity.salinity_at(x, cfs=lo, phase=0.5, cfg=CFG)[0]
-    high = salinity.salinity_at(x, cfs=hi, phase=0.5, cfg=CFG)[0]
-    assert low != high, "salinity must not be identical across the full discharge range"
-    assert high < low, "higher discharge must still freshen the cell, even at high water"
+    xs = np.array([0.5, 2.58, 5.0, 8.0, 12.0, 20.0, 31.57])
+    phases = np.array([0.0, 0.25, 0.5, 0.75])
+    # Measured maxima across this exact grid: reversal 0.008646 ppt (at
+    # x=5.0, phase=0.5), distance from ocean_ppt 0.014751 ppt (same point).
+    # These bounds carry roomy headroom above both so the test is not
+    # fragile to float noise, while still catching an order-of-magnitude
+    # regression (e.g. a reversal that grew to 0.5 ppt).
+    MAX_SATURATED_REVERSAL_PPT = 0.02
+    MAX_SATURATED_DISTANCE_FROM_OCEAN_PPT = 0.03
+
+    ties = 0
+    saturated_points_checked = 0
+    for x in xs:
+        for phase in phases:
+            x_eff = x + CFG.excursion_km * np.cos(2.0 * np.pi * phase)
+            low = float(salinity.salinity_at(np.array([x]), cfs=lo, phase=phase, cfg=CFG)[0])
+            high = float(salinity.salinity_at(np.array([x]), cfs=hi, phase=phase, cfg=CFG)[0])
+            if low == high:
+                ties += 1
+            if x_eff > 0:
+                assert high < low, (
+                    f"x={x}, phase={phase}, x_eff={x_eff:.2f} (landward of the mouth): "
+                    "higher discharge must still freshen the cell"
+                )
+            else:
+                # Seaward of the mouth: a reversal is sanctioned, but ONLY
+                # within the measured bound -- enforced for every such point
+                # the grid visits, so a regression cannot hide at a
+                # coordinate this loop happens not to name.
+                saturated_points_checked += 1
+                assert low != high, (
+                    f"x={x}, phase={phase}, x_eff={x_eff:.2f}: must never be "
+                    "bit-identical, even in the saturated exception"
+                )
+                assert abs(high - low) < MAX_SATURATED_REVERSAL_PPT, (
+                    f"x={x}, phase={phase}, x_eff={x_eff:.2f}: reversal "
+                    f"{high - low:.6f} ppt exceeds the known-bounded exception -- "
+                    "this is no longer the saturated corner the ruling accepted"
+                )
+                assert (
+                    CFG.ocean_ppt - high < MAX_SATURATED_DISTANCE_FROM_OCEAN_PPT
+                    and CFG.ocean_ppt - low < MAX_SATURATED_DISTANCE_FROM_OCEAN_PPT
+                ), (
+                    f"x={x}, phase={phase}, x_eff={x_eff:.2f}: reading strayed "
+                    "outside the saturated band near ocean_ppt"
+                )
+    assert ties == 0, (
+        "no position/phase may read bit-identical salinity across the full discharge range"
+    )
+    assert saturated_points_checked > 0, (
+        "the grid must include at least one x_eff < 0 point to exercise the bound above"
+    )
+
+    # North Jetty at high water: the headline example of the saturated
+    # exception (defect 1's original reproduction case), kept as a named,
+    # documentary pin -- x=2.58, phase=0.5 is already one of the points the
+    # loop above visits and bounds; this does not add new enforcement, only
+    # a reader-facing anchor for the historical defect this test traces to.
+    x_eff = 2.58 + CFG.excursion_km * np.cos(2.0 * np.pi * 0.5)
+    assert x_eff < 0, "this exception is sanctioned only seaward of the mouth"
 
 
 def test_intrusion_length_shrinks_as_a_power_law_in_discharge():
@@ -73,6 +157,117 @@ def test_intrusion_length_shrinks_as_a_power_law_in_discharge():
     doubled = salinity.intrusion_length_km(2 * CFG.q0_cfs, CFG)
     assert doubled == pytest.approx(CFG.l0_km * 2 ** (-CFG.k), rel=1e-6)
     assert doubled < CFG.l0_km
+
+
+# -- Task 1: the front's width scales with discharge -------------------------
+# `L(Q)` ranges 37.14 km -> 1.13 km across the observed 257x discharge span
+# while `front_width_km` was a constant, so the front could not be sharp at
+# high flow and broad at low flow at once. MEASURED (gate report, 2026-08-25,
+# one recipe on one 12,204-row population), at FIXED distance so it cannot be
+# confounded with position: the mean residual trended monotonically with
+# flow, -0.9001 -> -3.3387 ppt at x=16.68 km, +1.8385 -> -1.7403 at x=19.03 km.
+# Making the width carry the same scaling as the length cuts that trend
+# spread from 3.0087 to 0.3070 ppt. (An earlier draft of this banner cited
+# -1.33 -> -3.72, +1.33 -> -2.03, and a spread of 2.96 -> 0.55; those were
+# PRE-REGISTRATIONS on a different, unreproducible population and are
+# superseded by the figures above.)
+
+
+def test_front_width_scales_down_as_discharge_rises():
+    """A constant width cannot be sharp at high flow and broad at low flow.
+    Measured consequence of the old form (gate report, 2026-08-25): the
+    residual trended -0.9001 -> -3.3387 ppt across flow quintiles at a FIXED
+    distance (x=16.68 km). An earlier draft cited -1.33 -> -3.72, a
+    pre-registration superseded by the figure above."""
+    from tidescout.engine.salinity import front_width_at
+
+    low = front_width_at(1_000.0, CFG)
+    high = front_width_at(100_000.0, CFG)
+    assert high < low
+    assert high < 0.25 * low, "a 100x discharge range must sharpen the front substantially"
+
+
+def test_front_width_equals_the_authored_value_at_the_reference_discharge():
+    """`front_width_km` now means 'the front's width at q0_cfs'. At exactly
+    q0 the scaling is 1.0, so the authored number must come back unchanged --
+    that is what keeps the config field readable."""
+    from tidescout.engine.salinity import front_width_at
+
+    assert front_width_at(CFG.q0_cfs, CFG) == pytest.approx(CFG.front_width_km)
+
+
+def test_width_and_length_share_one_discharge_scaling():
+    """If these ever read different exponents the front's shape stops meaning
+    anything, and no output would look wrong. Pinned as a ratio so the test
+    survives any future change to the scaling itself."""
+    from tidescout.engine.salinity import front_width_at, intrusion_length_km
+
+    for cfs in (500.0, 4_000.0, 30_000.0, 200_000.0):
+        ratio = front_width_at(cfs, CFG) / intrusion_length_km(cfs, CFG)
+        assert ratio == pytest.approx(CFG.front_width_km / CFG.l0_km)
+
+
+def test_intrusion_length_is_unchanged_by_the_refactor():
+    """`intrusion_length_km` is reimplemented on the shared helper. Its VALUES
+    must not move -- l0_km's fitted meaning depends on them."""
+    from tidescout.engine.salinity import intrusion_length_km
+
+    for cfs, expected in ((1_000.0, CFG.l0_km * (1_000.0 / CFG.q0_cfs) ** -CFG.k),
+                          (CFG.q0_cfs, CFG.l0_km),
+                          (50_000.0, CFG.l0_km * (50_000.0 / CFG.q0_cfs) ** -CFG.k)):
+        assert intrusion_length_km(cfs, CFG) == pytest.approx(expected)
+
+
+def test_a_sharper_front_at_high_flow_drops_salinity_faster_with_distance():
+    """The point of the change, isolated from `L(Q)` shrinking with
+    discharge -- which already predated this task and is, by itself, enough
+    to make a low-vs-high-discharge comparison LOOK sharper over a fixed x
+    window. Confirmed: hand-building a constant-width control at the same
+    two discharges below (L still scales with Q, W frozen at
+    `front_width_km`) also satisfies `hi[-1] < lo[-1]` with both drops
+    positive -- the ORIGINAL, unisolated version of this test could not fail
+    on the thing it named.
+
+    This version holds discharge -- and therefore `L(Q)` and `x_eff` --
+    FIXED, and compares the real, discharge-scaled width against a
+    constant-width control at that SAME discharge. With `L` and `x`
+    identical between the two, any extra drop-off is attributable to the
+    width term alone, checked at both a low and a high discharge so the
+    isolation is not an artefact of picking one flow.
+
+    NOTE the extra drop comes from opposite mechanisms at the two flows,
+    and only the high one is literally "sharper" -- this test's name
+    describes that case, not both. At 60,000 cfs the scaled width (2.046
+    km) is genuinely narrower than the 5.0 km control and the front really
+    is sharper. At 2,000 cfs -- BELOW `q0_cfs` -- the scaled width is
+    WIDER (6.285 km), and the x window (2-14 km, against L = 22.626 km)
+    sits entirely on the sigmoid's landward tail: there the narrower
+    control saturates toward `ocean_ppt` and goes nearly flat, while the
+    wider real curve is still transitioning, so the wider front is the one
+    that drops more. Both directions are the width term doing the work,
+    which is what is asserted; neither is `L` moving, since `L` is pinned
+    per-discharge above."""
+    x = np.array([2.0, 6.0, 10.0, 14.0])
+    phase = 0.25
+
+    for cfs in (2_000.0, 60_000.0):
+        length = salinity.intrusion_length_km(cfs, CFG)
+        x_eff = x + CFG.excursion_km * np.cos(2.0 * np.pi * phase)
+        scaled_width = salinity.front_width_at(cfs, CFG)
+
+        real = CFG.ocean_ppt * 0.5 * (1.0 - np.tanh((x_eff - length) / scaled_width))
+        control = CFG.ocean_ppt * 0.5 * (1.0 - np.tanh((x_eff - length) / CFG.front_width_km))
+        # `real` must be exactly what production `salinity_at` computes, not
+        # a reimplementation that could silently drift from it.
+        assert np.allclose(real, salinity.salinity_at(x, cfs, phase, CFG))
+
+        real_drop = float(real[0] - real[-1])
+        control_drop = float(control[0] - control[-1])
+        assert real_drop > control_drop, (
+            f"cfs={cfs}: at the SAME discharge (same L, same x_eff), the "
+            "discharge-scaled width must fall off faster than a constant-width "
+            "control -- the width term itself, not L moving, must be doing the work"
+        )
 
 
 def test_high_water_is_saltier_than_low_water_at_the_same_place():
@@ -602,14 +797,6 @@ def test_composite_discharge_is_empty_when_a_gauge_never_reports():
     sites = [r.usgs_site for r in fishery.rivers]
     daily = {sites[0]: [(date(2026, 5, 1), 3000.0)]}
     assert salinity_fit.composite_discharge_by_day(fishery, daily) == {}
-
-
-def test_pair_daily_means_keeps_only_days_with_a_discharge():
-    d1, d2 = date(2026, 5, 1), date(2026, 5, 2)
-    obs = salinity_fit.pair_daily_means(
-        {"A": [(d1, 4.0), (d2, 5.0)]}, {d1: 3800.0}, {"A": 31.57}
-    )
-    assert obs == [(31.57, 3800.0, 4.0)]
 
 
 def test_daily_swings_drops_partial_days():
@@ -1552,6 +1739,38 @@ def test_calibrate_reports_off_axis_count_and_stem_fallback(monkeypatch):
     assert "co-located" in out.lower()
 
 
+def test_calibration_reports_the_memory_window_and_its_exclusions(monkeypatch):
+    """A dropped observation must be visible, not inferred from a smaller n."""
+    from typer.testing import CliRunner
+
+    from tidescout.cli import app
+
+    monkeypatch.setattr(
+        salinity_fit, "collect_observations",
+        lambda *a, **k: salinity_fit.CalibrationInput(
+            [(19.03, 4000.0, 6.0), (16.68, 9000.0, 3.0), (19.03, 9000.0, 2.0)],
+            [], [], 90, (date(2016, 1, 1), date(2026, 8, 22)), 90,
+            n_no_discharge_history=17, memory_days=7.0,
+        ),
+    )
+    result = CliRunner().invoke(app, ["salinity", "calibrate", "winyah-bay"])
+    out = re.sub(r"\s+", " ", re.sub(r"\x1b\[[0-9;]*m", "", result.output))
+    assert "17" in out
+    # The WINDOW value, not just the exclusion count -- hardcoding the CLI to
+    # a fixed "0 day(s)" and ignoring `data.memory_days` entirely would still
+    # pass a test that only checked the exclusion count below.
+    assert "memory window: 7 day(s)" in out.lower()
+    # A phrase unique to the memory-loss line itself. Plain `"history" in
+    # out.lower()` is a no-op here: the site-table header's unrelated
+    # "NERRS store: full held history)" text already contains "history", so
+    # deleting the entire memory-window line would still leave this
+    # assertion passing.
+    assert (
+        "excluded from the composite discharge series for insufficient "
+        "preceding history"
+    ) in out.lower()
+
+
 def test_wqp_stations_enter_as_individual_grab_samples_not_daily_means(monkeypatch):
     """WQP samples are single grabs -- a one-sample day fails the 40-reading
     gate in `daily_means_and_swings`, correctly. They must enter the fit
@@ -2229,3 +2448,573 @@ def test_ocean_ppt_matches_the_north_inlet_marine_measurement():
         f"{len(per_day)} days. Re-derive the YAML value and update its comment "
         "rather than widening this tolerance."
     )
+
+
+def test_zero_tau_returns_the_discharge_untouched():
+    """The backward-compatibility guarantee: every existing caller and test
+    must keep getting exactly today's behaviour."""
+    from datetime import date
+
+    from tidescout.pipeline.salinity_fit import smooth_discharge
+
+    raw = {date(2026, 5, d): 1000.0 * d for d in range(1, 11)}
+    out, dropped = smooth_discharge(raw, 0.0)
+    assert out == raw
+    assert dropped == 0
+
+
+def test_a_constant_series_smooths_to_itself():
+    """Any weighted mean of a constant is that constant. Catches a
+    normalisation bug, which would otherwise show up only as a scale error in
+    the fitted parameters."""
+    from datetime import date, timedelta
+
+    from tidescout.pipeline.salinity_fit import smooth_discharge
+
+    # Day index d maps to a sequential calendar day starting May 1, 2026 (not
+    # day-of-month d, which overflows past May's 31 days for d > 31).
+    def day(n: int) -> date:
+        return date(2026, 5, 1) + timedelta(days=n - 1)
+
+    raw = {day(d): 5000.0 for d in range(1, 61)}
+    out, dropped = smooth_discharge(raw, 7.0)
+    # tau=7, window=28, so a day needs 29 days of history (itself + 28 prior)
+    # -- only days 29-60 of the 60-day record qualify.
+    assert len(out) == 32
+    assert dropped == 28
+    assert all(v == pytest.approx(5000.0) for v in out.values())
+
+
+def test_smoothing_lags_a_step_change():
+    """The physical content: a discharge step must reach the model gradually.
+    One day after a 10x step, a 7-day memory must have moved well short of
+    the new value."""
+    from datetime import date, timedelta
+
+    from tidescout.pipeline.salinity_fit import smooth_discharge
+
+    # Day index d maps to a sequential calendar day starting May 1, 2026 (not
+    # day-of-month d, which overflows past May's 31 days for d > 31).
+    def day(n: int) -> date:
+        return date(2026, 5, 1) + timedelta(days=n - 1)
+
+    raw = {day(d): (1000.0 if d <= 40 else 10000.0) for d in range(1, 61)}
+    out, _ = smooth_discharge(raw, 7.0)
+    assert out[day(41)] < 4000.0
+    assert out[day(41)] > 1000.0
+    assert out[day(60)] > out[day(41)]
+
+
+def test_days_without_enough_history_are_dropped_and_counted():
+    """A day smoothed over a SHORT window is not comparable with one smoothed
+    over a full window -- its discharge would mean something different. Drop
+    and count, never default."""
+    from datetime import date
+
+    from tidescout.pipeline.salinity_fit import smooth_discharge
+
+    raw = {date(2026, 5, d): 5000.0 for d in range(1, 31)}
+    out, dropped = smooth_discharge(raw, 7.0)
+    assert dropped > 0
+    assert min(out) > min(raw), "the earliest days cannot have a full window"
+    assert dropped + len(out) == len(raw)
+
+
+def test_a_gap_in_the_discharge_record_drops_the_days_it_covers():
+    """A missing gauge day must not be interpolated across -- the composite
+    already refuses to sum short when a gauge is dark, and this must not
+    quietly undo that."""
+    from datetime import date, timedelta
+
+    from tidescout.pipeline.salinity_fit import smooth_discharge
+
+    # Day index d maps to a sequential calendar day starting May 1, 2026 (not
+    # day-of-month d, which overflows past May's 31 days for d > 31).
+    def day(n: int) -> date:
+        return date(2026, 5, 1) + timedelta(days=n - 1)
+
+    raw = {day(d): 5000.0 for d in range(1, 61) if d != 45}
+    out, dropped = smooth_discharge(raw, 7.0)
+    # 59 days present (60 minus day 45). A day survives when n >= 29 (full
+    # 29-day window) and its lookback clears the day-45 hole, i.e. n <= 44
+    # -- days 29-44 survive, 16 of them; the other 43 are dropped.
+    assert len(out) == 16
+    assert dropped == 43
+    assert day(46) not in out
+
+
+def test_a_longer_memory_drops_more_days_for_insufficient_history():
+    from datetime import date, timedelta
+
+    from tidescout.pipeline.salinity_fit import smooth_discharge
+
+    # Day index d maps to a sequential calendar day starting May 1, 2026 (not
+    # day-of-month d, which overflows past May's 31 days for d > 31).
+    def day(n: int) -> date:
+        return date(2026, 5, 1) + timedelta(days=n - 1)
+
+    raw = {day(d): 5000.0 for d in range(1, 61)}
+    # Both taus must leave SURVIVORS -- tau=21 gives a 84-day window against a
+    # 60-day record, so it drops everything and the assertion would then hold
+    # at saturation rather than because memory length drives exclusions.
+    # tau=3 -> window 12 -> 12 dropped; tau=10 -> window 40 -> 40 dropped.
+    _, few = smooth_discharge(raw, 3.0)
+    _, many = smooth_discharge(raw, 10.0)
+    assert many > few
+    assert few == 12 and many == 40
+
+
+# -- Task 3 of this plan: wiring memory into the fit, and profiling tau -----
+
+
+def _synthetic_calibration_input() -> "salinity_fit.CalibrationInput":
+    """A `CalibrationInput` with a DATED discharge span long enough for a
+    30-day memory window (needs 121 days of unbroken preceding history: a
+    day survives tau=30's 120-day window only from day index 121 onward).
+
+    Deliberately mixes two groups of observation days:
+
+    * day(50)/day(60) -- old enough to survive tau=0 and tau=7's (much
+      shorter) windows, but NOT tau=30's 120-day one.
+    * day(125)..day(145) -- old enough to survive every tau in the [0, 7, 30]
+      grid, tau=30 included.
+
+    A scan that let each tau keep whatever ITS OWN window retained would
+    therefore score tau in {0, 7} on 7 rows and tau=30 on only 5 -- three
+    DIFFERENT populations. Restricting every candidate to the days tau=30
+    retains (the correct behaviour) scores all three on the same 5. This
+    mix is what makes `test_memory_scan_scores_every_tau_on_the_same_rows`
+    able to fail on the defect it names; a helper whose observations all
+    already fell inside every candidate's own window (as an earlier draft
+    of this fixture did) could not distinguish the two implementations at
+    all -- both would report equal counts, RIGHT AND WRONG ALIKE, and the
+    test would pass by accident, not by proof.
+    """
+    from datetime import timedelta
+
+    def day(n: int) -> date:
+        return date(2026, 1, 1) + timedelta(days=n - 1)
+
+    discharge_by_day = {day(n): 3000.0 + 25.0 * n for n in range(1, 151)}
+    # The discharge value paired with each in `observations` below is a
+    # placeholder -- `_memory_rows_by_tau` replaces it with each candidate
+    # tau's own smoothed value at that day, never reading this one.
+    obs_days = [day(n) for n in (50, 60, 125, 130, 135, 140, 145)]
+    observations = [
+        (10.0 + 0.5 * i, discharge_by_day[d], 5.0 + 0.1 * i)
+        for i, d in enumerate(obs_days)
+    ]
+    # A per-row tidal phase, same length/order as `observations` -- lets
+    # `profile_memory` tests prove it forwards each retained row's OWN
+    # phase to `fit_intrusion` rather than silently defaulting every row to
+    # the shared `FIT_PHASE`. Values are arbitrary but distinct from
+    # `salinity_fit.FIT_PHASE` (0.25) so a test could tell the two apart.
+    observation_phases = [0.1 * i for i in range(len(obs_days))]
+    return salinity_fit.CalibrationInput(
+        observations, [], [], 150, (day(1), day(150)), 0,
+        discharge_by_day=discharge_by_day, observation_days=obs_days,
+        observation_phases=observation_phases,
+    )
+
+
+def test_memory_scan_scores_every_tau_on_the_same_rows():
+    """Larger tau drops more early days for insufficient history. Scoring each
+    tau on whatever it happens to retain would let a tau win by discarding
+    the hardest observations rather than by fitting better."""
+    from tidescout.pipeline import salinity_fit
+
+    counts = salinity_fit.profile_memory_row_counts(_synthetic_calibration_input(), [0, 7, 30])
+    assert len(set(counts)) == 1, f"populations differ across tau: {counts}"
+
+
+def test_the_fit_path_routes_its_discharge_through_smooth_discharge(monkeypatch):
+    """If `collect_observations` inlines its own smoothing, or ignores
+    `discharge_memory_days`, every fitted parameter silently describes a
+    different quantity than a prediction caller supplies -- and nothing
+    errors, because both are floats.
+
+    This watches the fit path itself. Calling `smooth_discharge` twice and
+    comparing the two results would NOT catch it: that only proves a pure
+    function is deterministic, which is true of any implementation including
+    an inlined duplicate.
+    """
+    from datetime import datetime, timedelta
+
+    from tidescout.config import load_fishery
+
+    fishery = load_fishery("winyah-bay")
+    monkeypatch.setattr(fishery.salinity, "discharge_memory_days", 7.0)
+
+    class _Store:
+        def salinity_series(self, station):
+            base = datetime(2026, 5, 1, 4, 0, tzinfo=UTC)
+            return [(base + timedelta(minutes=15 * i), 10.0 + (i % 8)) for i in range(96)]
+
+    monkeypatch.setattr(salinity_fit, "_open_store", lambda slug: _Store())
+    monkeypatch.setattr(
+        salinity_fit, "_store_distances",
+        lambda slug, fishery, sites: {s: (19.03, 5.0) for s in sites},
+    )
+    # A discharge record long enough that a 7-day memory (28-day window) has
+    # full history for the observation days above.
+    by_day = {date(2026, 3, 1) + timedelta(days=i): 4000.0 + 10.0 * i for i in range(70)}
+    monkeypatch.setattr(
+        salinity_fit, "_usgs_inputs", lambda *a, **k: ({}, by_day, [], {}),
+    )
+    from tidescout.sources import noaa
+
+    monkeypatch.setattr(noaa, "tide_events_range", lambda *a, **k: [])
+
+    real = salinity_fit.smooth_discharge
+    seen_taus: list[float] = []
+
+    def spy(by_day, tau_days):
+        seen_taus.append(tau_days)
+        return real(by_day, tau_days)
+
+    monkeypatch.setattr(salinity_fit, "smooth_discharge", spy)
+    salinity_fit.collect_observations("winyah-bay", fishery, cache=None, days=90)
+
+    assert seen_taus, (
+        "collect_observations never called smooth_discharge -- the fit path is "
+        "reading raw discharge, or has inlined its own smoothing"
+    )
+    assert seen_taus == [7.0], f"expected the CONFIGURED tau, saw {seen_taus}"
+
+
+def test_smoothing_at_the_configured_tau_is_not_a_no_op():
+    """Guards the test above: if tau were misread as 0 everywhere, the spy
+    would still fire and still see the configured value, while the discharge
+    reaching the fit was unchanged."""
+    from datetime import date, timedelta
+
+    from tidescout.pipeline.salinity_fit import smooth_discharge
+
+    def day(n: int) -> date:
+        return date(2026, 5, 1) + timedelta(days=n - 1)
+
+    raw = {day(d): 1000.0 + 100.0 * d for d in range(1, 61)}
+    out, _ = smooth_discharge(raw, 7.0)
+    target = day(55)
+    assert out[target] != pytest.approx(raw[target])
+    assert out[target] < raw[target], "a backward-weighted mean of a rising series must lag it"
+
+
+# -- Post-review fixes (coordinator review of Task 3, 2026-08-25) -----------
+
+
+def test_profile_memory_scores_each_tau_on_the_rows_own_resolved_phase(monkeypatch):
+    """`profile_memory` must forward each retained row's OWN resolved tidal
+    phase to `fit_intrusion`, not silently drop it and let every row default
+    to the shared `FIT_PHASE` -- exactly the gap review caught: the real
+    Winyah scan measured `n_phase_supplied` at 0 out of 12,204 rows, even
+    though 1,860 of that population are WQP grabs whose individually
+    resolved phase is worth up to 12.3 ppt at some sites (see
+    `fit_intrusion`'s own docstring).
+
+    A spy on `fit_intrusion`, not a rerun-and-compare: calling
+    `fit_intrusion` twice with the same phases would only prove it is
+    deterministic, which says nothing about whether `profile_memory` passed
+    phases in the first place -- the same reasoning the smooth_discharge spy
+    test above already applies to `collect_observations`.
+    """
+    from tidescout.pipeline import salinity_fit
+
+    data = _synthetic_calibration_input()
+    real = salinity_fit.fit_intrusion
+    seen_phase_lengths: list[int] = []
+
+    def spy(observations, cfg, swings=(), sources=(), phases=()):
+        seen_phase_lengths.append(len(phases))
+        return real(observations, cfg, swings=swings, sources=sources, phases=phases)
+
+    monkeypatch.setattr(salinity_fit, "fit_intrusion", spy)
+    profile = salinity_fit.profile_memory(data, CFG, [0, 7, 30])
+
+    # Every one of the 3 candidate taus scored on the 5 rows the largest
+    # (tau=30) retains -- see `_synthetic_calibration_input` -- each
+    # carrying its own resolved phase, not an empty (FIT_PHASE-default) tuple.
+    assert seen_phase_lengths == [5, 5, 5], (
+        f"expected 3 calls, each passed 5 phases (one per retained row) -- "
+        f"saw {seen_phase_lengths}"
+    )
+    # Also closes the coverage gap review named: nothing in this file called
+    # `profile_memory` before this test. Adequate synthetic data (>=3 rows,
+    # >=2 distinct discharges at every tau) -- confirms real numbers came
+    # back, not every candidate silently landing on the thin-data nan branch.
+    assert [tau for tau, _ in profile] == [0, 7, 30]
+    assert all(np.isfinite(rmse) for _, rmse in profile), profile
+
+
+def test_profile_memory_reports_nan_not_a_crash_for_a_tau_with_non_finite_rows():
+    """`profile_memory`'s thin-data guard must filter for finiteness the
+    SAME way `fit_intrusion`'s own `_finite_rows` does, evaluated BEFORE
+    checking `len(rows) < 3` -- not after. `smooth_discharge` PROPAGATES a
+    NaN gauge reading through `np.dot` rather than dropping it (only a
+    MISSING day is dropped, via the `any(h is None ...)` check), so a tau
+    whose retained population includes a corrupted discharge value has a
+    raw row count that can stay >= 3 while its FINITE row count drops below
+    it. Before this fix that raw-count-only guard let such a tau reach
+    `fit_intrusion`, which raises `ValueError: need at least 3 finite
+    observations...` once its own `_finite_rows` drops the same rows -- and
+    now that the blanket `except ValueError` around that call is correctly
+    narrowed (review's earlier finding), that exception PROPAGATES instead
+    of being swallowed as `nan`, which would abort `salinity calibrate`
+    mid-table for a fixture just like this one. Not reachable on today's
+    shipped data (`discharge_memory_days` stays 0.0, and `n_dropped: 0` on
+    the real Winyah collection), but reachable in principle."""
+    from datetime import timedelta
+
+    data = _synthetic_calibration_input()
+
+    def day(n: int) -> date:
+        return date(2026, 1, 1) + timedelta(days=n - 1)
+
+    # `_synthetic_calibration_input`'s 5 largest-tau survivors are
+    # day(125)/day(130)/day(135)/day(140)/day(145) (see its own docstring).
+    # Corrupting the LAST 3 of those to NaN leaves 5 raw rows at every tau
+    # (a day with a NaN discharge value is not DROPPED by `smooth_discharge`,
+    # only a genuinely MISSING one is) but only 2 FINITE ones -- below
+    # fit_intrusion's 3-row minimum, while the raw count (5) is not.
+    corrupted = dict(data.discharge_by_day)
+    for n in (135, 140, 145):
+        corrupted[day(n)] = float("nan")
+    data = salinity_fit.CalibrationInput(
+        data.observations, [], [], data.days, data.day_span, 0,
+        discharge_by_day=corrupted, observation_days=data.observation_days,
+        observation_phases=data.observation_phases,
+    )
+
+    profile = salinity_fit.profile_memory(data, CFG, [0, 7, 30])
+
+    assert [tau for tau, _ in profile] == [0, 7, 30]
+    assert all(np.isnan(rmse) for _, rmse in profile), (
+        f"expected every tau to report nan (2 finite rows, below the "
+        f"3-row minimum) rather than raise or silently fit on NaN -- "
+        f"got {profile}"
+    )
+
+
+def test_calibrate_cli_prints_the_tau_scan_table_when_data_is_dated(monkeypatch):
+    """The scan's CLI block -- gated on `data.discharge_by_day` and
+    `data.observation_days` both being populated (every OTHER CLI test in
+    this file hand-builds a `CalibrationInput` without those two fields, so
+    this block never executed under test before this one) -- contains a
+    `strict=True` zip over `profile`/`counts` and renders each row's rmse
+    with `f"{rmse:.4f}"`.
+
+    Asserted against the SAME `profile_memory`/`profile_memory_row_counts`
+    outputs the CLI itself computes internally, not a rerun-and-compare of
+    those functions alone: this proves the CLI's OWN rendering loop (the
+    zip, the formatting) is faithful to what they returned, one row per
+    grid candidate -- a real gap review caught (Minor 6 residual): a
+    truncated zip (e.g. `counts[:-1]`, silently dropping the last row) or a
+    removed `n/a`-on-nan branch both left this test's PREDECESSOR green,
+    because it checked only that the table existed, never that every row in
+    it did."""
+    from typer.testing import CliRunner
+
+    from tidescout.cli import app
+    from tidescout.config import load_fishery
+
+    data = _synthetic_calibration_input()
+    monkeypatch.setattr(salinity_fit, "collect_observations", lambda *a, **k: data)
+    result = CliRunner().invoke(app, ["salinity", "calibrate", "winyah-bay"])
+    out = re.sub(r"\s+", " ", re.sub(r"\x1b\[[0-9;]*m", "", result.output))
+
+    assert result.exit_code == 0, result.output
+    assert "discharge-memory tau scan" in out.lower()
+    assert "diagnostic only" in out.lower()
+    assert "rows scored" in out.lower()
+
+    fishery = load_fishery("winyah-bay")
+    expected_profile = salinity_fit.profile_memory(
+        data, fishery.salinity, salinity_fit.MEMORY_GRID_DAYS
+    )
+    expected_counts = salinity_fit.profile_memory_row_counts(data, salinity_fit.MEMORY_GRID_DAYS)
+    assert len(expected_profile) == len(salinity_fit.MEMORY_GRID_DAYS)
+    for (tau, rmse), n in zip(expected_profile, expected_counts, strict=True):
+        # This fixture is adequate data at every candidate tau (see
+        # `_synthetic_calibration_input`), so every rmse here is a real,
+        # distinct 4-decimal float, not `nan` -- a row a truncated zip
+        # dropped would leave ITS rmse string absent from `out` while every
+        # other row's remained, which a weaker "some numbers appear"
+        # check cannot distinguish from a correctly rendered table.
+        assert not np.isnan(rmse), f"fixture expected to fit at tau={tau:g}"
+        assert f"{rmse:.4f}" in out, f"missing rendered row for tau={tau:g} (rmse {rmse:.4f})"
+        assert str(n) in out
+
+
+def test_calibrate_cli_warns_when_the_grid_outruns_the_record(monkeypatch):
+    """When the largest tau in the grid cannot find ANY row in common with
+    the rest of the collection, every candidate reports 0 rows and `nan`
+    rmse. The footer's blanket claim ("every tau scored on the SAME row
+    population") is technically still true at that point (0 == 0 == ...),
+    but reads as if the scan succeeded on real data. This guard says
+    explicitly that nothing survived -- review's Minor 7.
+
+    Also the discriminating home for the `nan` -> `"n/a"` rendering branch
+    (review's Minor 6 residual): every rmse in THIS fixture is `nan` by
+    construction, so `"n/a"` must appear -- unlike the sibling table test
+    above, whose adequate-data fixture never exercises that branch at all."""
+    from typer.testing import CliRunner
+
+    from tidescout.cli import app
+
+    def _detached_days_input(*a, **k):
+        data = _synthetic_calibration_input()
+        return salinity_fit.CalibrationInput(
+            data.observations, [], [], data.days, data.day_span, 0,
+            discharge_by_day=data.discharge_by_day,
+            # None of these dates exist among `discharge_by_day`'s keys at
+            # all (which span 2026), so every candidate tau's restricted
+            # population is empty -- simulates the grid's largest tau
+            # outrunning the record.
+            observation_days=[date(1999, 1, 1)] * len(data.observations),
+        )
+
+    monkeypatch.setattr(salinity_fit, "collect_observations", _detached_days_input)
+    result = CliRunner().invoke(app, ["salinity", "calibrate", "winyah-bay"])
+    out = re.sub(r"\s+", " ", re.sub(r"\x1b\[[0-9;]*m", "", result.output))
+
+    assert result.exit_code == 0, result.output
+    assert "outran the record" in out.lower()
+    # The rendering branch itself: no test anywhere in this suite previously
+    # asserted "n/a" appears anywhere, so removing the
+    # `"n/a" if math.isnan(rmse) else f"{rmse:.4f}"` branch entirely (and
+    # rendering raw `nan` instead) left every existing test green.
+    assert "n/a" in out.lower()
+
+
+def test_reject_and_report_counts_observations_and_swings_lost_to_smoothing(monkeypatch):
+    """A day-level count of days dropped for insufficient history
+    (`n_no_discharge_history`) cannot be read as an observation-level count
+    -- a single dropped day can carry more than one admitted station's
+    reading. Measured on the real Winyah record: 112 days lost at tau=7 cost
+    164 observations and 142 swings, and neither number is derivable from
+    the other. Review's Important 1: this must be visible directly, not
+    inferred from a smaller `len(observations)`."""
+    from datetime import datetime, timedelta
+
+    from tidescout.config import load_fishery
+
+    fishery = load_fishery("winyah-bay")
+    monkeypatch.setattr(fishery.salinity, "discharge_memory_days", 7.0)
+
+    # index 4 (2026-03-05) -- DROPPED by tau=7's 28-day window (needs 28
+    # preceding days; only 4 exist). index 35 (2026-04-05) -- SURVIVES.
+    early = datetime(2026, 3, 5, 4, 0, tzinfo=UTC)
+    late = datetime(2026, 4, 5, 4, 0, tzinfo=UTC)
+
+    class _Store:
+        def salinity_series(self, station):
+            return [
+                (early + timedelta(minutes=15 * i), 10.0 + (i % 8)) for i in range(96)
+            ] + [(late + timedelta(minutes=15 * i), 12.0 + (i % 6)) for i in range(96)]
+
+    monkeypatch.setattr(salinity_fit, "_open_store", lambda slug: _Store())
+    monkeypatch.setattr(
+        salinity_fit, "_store_distances",
+        lambda slug, fishery, sites: {s: (19.03, 5.0) for s in sites},
+    )
+    # No WQP fixture in THIS test -- see the dedicated WQP test below for
+    # that half of the split; keeping this one to NERRS/USGS isolates the
+    # observation/swing counters from the WQP-specific counter.
+    monkeypatch.setattr(salinity_fit, "_wqp_sites", lambda slug: {})
+    raw_by_day = {date(2026, 3, 1) + timedelta(days=i): 4000.0 + 10.0 * i for i in range(40)}
+    monkeypatch.setattr(salinity_fit, "_usgs_inputs", lambda *a, **k: ({}, raw_by_day, [], {}))
+    from tidescout.sources import noaa
+
+    monkeypatch.setattr(noaa, "tide_events_range", lambda *a, **k: [])
+
+    data = salinity_fit.collect_observations("winyah-bay", fishery, cache=None, days=90)
+
+    # window = round(4 * 7) = 28 -> days index 0..27 (28 of them) dropped.
+    assert data.n_no_discharge_history == 28
+    # 3 on-axis NERRS stations (WYSS1, NIWWBWQ, NIWTAWQ) each lose their
+    # EARLY-day mean and EARLY-day swing to smoothing -- 3 observations and
+    # 3 swings, distinct from the 28-day count above.
+    assert data.n_obs_no_discharge_history == 3
+    assert data.n_swing_no_discharge_history == 3
+    # Unaffected by this failure mode -- no WQP fixture, no gauge-dark days.
+    assert data.n_wqp_no_discharge_day == 0
+    # The smaller `len` alone is real but was, before this fix, the ONLY
+    # place this loss was visible -- exactly what this counter now makes
+    # explicit instead.
+    assert len(data.observations) == 3
+    assert len(data.swings) == 3
+
+
+def test_wqp_grabs_lost_to_smoothing_are_not_misreported_as_no_discharge_day(monkeypatch):
+    """A WQP grab whose day genuinely HAD a composite discharge, but which
+    `smooth_discharge` then dropped for insufficient preceding history, must
+    not land in `n_wqp_no_discharge_day` -- that counter's own CLI text says
+    the cause is a day with NO discharge at all (e.g. a gauge's record
+    starting late), which would be FALSE for a row excluded this way. It
+    must count into `n_obs_no_discharge_history` instead, and
+    `n_wqp_no_discharge_day` must stay reserved for the genuinely-missing
+    day this fixture also carries. Review's Important 1, the WQP half."""
+    from datetime import datetime, timedelta
+
+    from tidescout.config import load_fishery
+
+    fishery = load_fishery("winyah-bay")
+    monkeypatch.setattr(fishery.salinity, "discharge_memory_days", 7.0)
+
+    class _NerrsStore:
+        def salinity_series(self, station):
+            return []
+
+    monkeypatch.setattr(salinity_fit, "_open_store", lambda slug: _NerrsStore())
+    monkeypatch.setattr(salinity_fit, "_store_distances", lambda slug, fishery, sites: {})
+    # 40 days of unbroken raw discharge starting 2026-03-01. tau=7 -> a
+    # 28-day window, so day index < 28 (2026-03-01..2026-03-28) is dropped
+    # by smoothing; day index >= 28 (2026-03-29 onward) survives.
+    raw_by_day = {date(2026, 3, 1) + timedelta(days=i): 4000.0 + 10.0 * i for i in range(40)}
+    monkeypatch.setattr(salinity_fit, "_usgs_inputs", lambda *a, **k: ({}, raw_by_day, [], {}))
+    monkeypatch.setattr(
+        salinity_fit, "_wqp_sites",
+        lambda slug: {
+            "WB-06": [
+                # index 4 -- HAS raw discharge but tau=7 drops it (needs a
+                # 29-day window; only 5 days precede it).
+                (datetime(2026, 3, 5, 15, 0, tzinfo=UTC), 5.0),
+                # index 35 -- survives tau=7's window.
+                (datetime(2026, 4, 5, 15, 0, tzinfo=UTC), 6.0),
+                # Outside the raw discharge record entirely (no gauge ever
+                # reported this day) -- the ORIGINAL failure mode
+                # `n_wqp_no_discharge_day` exists for.
+                (datetime(2026, 6, 1, 15, 0, tzinfo=UTC), 7.0),
+            ],
+        },
+    )
+    monkeypatch.setattr(
+        "tidescout.sources.wqp.station_coords",
+        lambda slug: {"WB-06": (-79.30, 33.30)},
+    )
+    monkeypatch.setattr(
+        salinity_fit, "site_distances_km",
+        lambda slug, fishery, sites: {s: (10.28, 5.0) for s in sites},
+    )
+    monkeypatch.setattr(
+        salinity_fit, "station_stem_km",
+        lambda slug, fishery, sites: dict.fromkeys(sites, 0.5),
+    )
+    from tidescout.sources import noaa
+
+    events = _bracketing_tide_events(
+        datetime(2026, 3, 1, tzinfo=UTC), datetime(2026, 6, 5, tzinfo=UTC)
+    )
+    monkeypatch.setattr(noaa, "tide_events_range", lambda *a, **k: events)
+
+    data = salinity_fit.collect_observations("winyah-bay", fishery, cache=None, days=90)
+
+    # Only the 2026-04-05 grab survives into the fit.
+    assert len(data.observations) == 1
+    assert data.observations[0][2] == pytest.approx(6.0)
+    # The genuinely-missing day (2026-06-01) is the ONLY thing
+    # n_wqp_no_discharge_day counts.
+    assert data.n_wqp_no_discharge_day == 1
+    # The smoothing-dropped day (2026-03-05) counts into the
+    # OBSERVATION-level counter instead, not the day-has-no-discharge one.
+    assert data.n_obs_no_discharge_history == 1

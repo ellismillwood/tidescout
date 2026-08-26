@@ -487,6 +487,53 @@ def salinity_calibrate(
         "means) score at the fixed daily-mean FIT_PHASE, which is correct for a "
         "quantity that already averages the tide out."
     )
+    console.print(
+        f"discharge memory window: {data.memory_days:g} day(s); "
+        f"{data.n_no_discharge_history} day(s) excluded from the composite discharge "
+        "series for insufficient preceding history (see "
+        "pipeline.salinity_fit.smooth_discharge) -- a DIFFERENT reason from a river "
+        "gauge going dark, so tracked separately. That day-level loss also drops "
+        f"{data.n_obs_no_discharge_history} salinity observation(s) and "
+        f"{data.n_swing_no_discharge_history} tidal-swing observation(s) that would "
+        "otherwise have paired against one of those days -- a smaller observation "
+        "count above is not visibility on its own; this line is."
+    )
+    if data.discharge_by_day and data.observation_days:
+        from tidescout.pipeline.salinity_fit import (
+            MEMORY_GRID_DAYS,
+            profile_memory,
+            profile_memory_row_counts,
+        )
+
+        profile = profile_memory(data, fishery.salinity, MEMORY_GRID_DAYS)
+        counts = profile_memory_row_counts(data, MEMORY_GRID_DAYS)
+        profile_table = Table(
+            title="discharge-memory tau scan -- DIAGNOSTIC ONLY, nothing here is adopted"
+        )
+        for col in ("tau (days)", "rmse (ppt)", "rows scored"):
+            profile_table.add_column(col)
+        for (tau, rmse), n in zip(profile, counts, strict=True):
+            profile_table.add_row(
+                f"{tau:g}", "n/a" if math.isnan(rmse) else f"{rmse:.4f}", str(n)
+            )
+        console.print(profile_table)
+        if all(n == 0 for n in counts):
+            console.print(
+                f"[yellow]the grid's largest tau ({max(MEMORY_GRID_DAYS):g} days) "
+                "outran the record[/yellow] -- its window needs more unbroken "
+                "preceding discharge history than this collection has, so every "
+                "candidate above restricted to an EMPTY population: 0 rows, no "
+                "rmse computed. The table above is not evidence of a poor fit; "
+                "there was no common population to fit at all."
+            )
+        console.print(
+            "[dim]Every tau above is scored on the SAME row population -- the days "
+            "the largest tau in this grid retains -- so a larger tau cannot win by "
+            "discarding the hardest observations rather than fitting better. This is "
+            "a scan, not a calibration: discharge_memory_days stays whatever the "
+            f"fishery YAML sets ({fishery.salinity.discharge_memory_days:g} day(s) "
+            "here), and nothing above is written back to it.[/dim]"
+        )
     from tidescout.pipeline.estuary import ON_AXIS_MAX_KM
 
     console.print(

@@ -441,11 +441,46 @@ salinity:
   # salinity AND the head near fresh, and on this fishery's real 31.57 km
   # domain those two pull in opposite directions hard enough that satisfying
   # the head cost North Jetty 8.5 of its 34 ppt. front_width_km decouples the
-  # front's sharpness from its position (l0_km). 5.0 km is sized, not
-  # guessed: swept 3-8 km against the real 587,325-cell distance field and
-  # picked the value where neither the mouth nor the head saturates to
-  # bit-identical output across the full calibration range below, while
-  # still keeping both ends plausibly near their limit. Pending Task 5's fit.
+  # front's sharpness from its position (l0_km).
+  #
+  # Redefined 2026-08-25: this is now the front's width AT q0_cfs, not
+  # everywhere. Away from that reference it scales as (Q/q0)^-k -- the SAME
+  # exponent l0_km's L(Q) uses (`_discharge_scale` in engine/salinity.py),
+  # because a constant width could not be sharp at high flow and broad at
+  # low flow at once: L(Q) itself ranges 37.14->1.13 km across the observed
+  # 257x discharge span while this value did not move. MEASURED (gate
+  # report, 2026-08-25, one recipe on one 12,204-row population): the mean
+  # residual at FIXED distance (so it can't be confounded with position) ran
+  # -0.9001->-3.3387 ppt at x=16.68 km and +1.8385->-1.7403 ppt at x=19.03 km
+  # across flow quintiles. (An earlier draft cited -1.33->-3.72 and
+  # +1.33->-2.03 here; those were PRE-REGISTRATIONS on a different,
+  # unreproducible population, superseded by the figures above.) Scaling the
+  # width the same way cuts that trend spread from 3.0087 to 0.3070 ppt --
+  # an 89.8% reduction, and the single largest systematic improvement this
+  # model has had.
+  #
+  # The 3.0087 -> 0.3070 trend-spread figures immediately above are ALSO
+  # MEASURED (gate report, 2026-08-25: per-station flow quintiles at x=16.68
+  # and x=19.03 km, trend = highest-quintile mean minus lowest-quintile mean,
+  # spread = mean of the two absolute trends, both forms scored through one
+  # code path on the same 12,204-row population). An earlier draft of this
+  # comment claimed "2.96 to 0.55", which were PRE-REGISTRATIONS computed by
+  # a method that could not be reproduced -- the spec's own quintile table
+  # averages 2.875, not 2.96 -- on a different population of 11,688 rows.
+  # Direction and rough size held; the numbers did not.
+  #
+  # The same gate found this width change does essentially ALL of the
+  # flattening on its own. Adding a discharge-memory window on top moves the
+  # spread the wrong way (0.4229), while still cutting rmse 12.5%. Memory is
+  # NOT enabled here -- see discharge_memory_days, which stays 0.0.
+  #
+  # 5.0 km itself is UNCHANGED and still sized the old way, not refitted:
+  # swept 3-8 km against the real 587,325-cell distance field and picked the
+  # value where neither the mouth nor the head saturates to bit-identical
+  # output across the full calibration range below, while still keeping both
+  # ends plausibly near their limit. It remains a theoretical starting point,
+  # not a measurement -- fitted stays False -- pending Task 5's fit under
+  # this new form.
   front_width_km: 5.0
   # Same min/max as discharge_buckets above (365-day USGS daily means, n=365):
   # min 1232 / max 22996 cfs. Outside this span, salinity_field flags

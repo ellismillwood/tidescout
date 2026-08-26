@@ -305,17 +305,24 @@ class SalinityConfig(BaseModel):
     # u_tidal * T / pi with u ~ 0.5 m/s and T = 12.42 h gives ~7 km.
     excursion_km: float = Field(default=7.0, gt=0)
     # Half-width of the logistic transition, in km -- the salt front's
-    # SHARPNESS, independent of l0_km's POSITION. Added because a single
-    # length scale is over-constrained: forcing near-fresh (1 ppt) at the
-    # real domain's 31.57 km head (36.19 km since the 2026-08-23 re-seeding)
-    # with a plain exponential forced l0_km down
-    # to 8.95 km, which alone cost North Jetty (2.58 km) 8.5 of its 34 ppt.
-    # Splitting position from sharpness fixes that -- under the same head
-    # constraint here, North Jetty loses 0.01 ppt. 5.0 km is a starting
-    # guess, sized so neither the mouth nor the head saturates to
-    # bit-identical output across the full calibration range (verified
-    # against the real 587,325-cell distance field; see Task 3's report).
-    # Fitted in Task 5 alongside the rest.
+    # SHARPNESS. Added because a single length scale is over-constrained:
+    # forcing near-fresh (1 ppt) at the real domain's 31.57 km head
+    # (36.19 km since the 2026-08-23 re-seeding) with a plain exponential
+    # forced l0_km down to 8.95 km, which alone cost North Jetty (2.58 km)
+    # 8.5 of its 34 ppt. Splitting position from sharpness fixes that --
+    # under the same head constraint here, North Jetty loses 0.01 ppt.
+    # 5.0 km is a starting guess, sized so neither the mouth nor the head
+    # saturates to bit-identical output across the full calibration range
+    # (verified against the real 587,325-cell distance field; see Task 3's
+    # report). Fitted in Task 5 alongside the rest.
+    #
+    # NOT independent of l0_km's discharge response, though it IS a
+    # separate knob from l0_km's POSITION (that decoupling is what fixes
+    # the over-constrained problem above). Since 2026-08-25 this is the
+    # front's width AT q0_cfs specifically -- away from that reference it
+    # scales as (Q/q0)^-k, the SAME exponent l0_km's L(Q) uses (see
+    # `engine.salinity._discharge_scale`), because a constant width could
+    # not be sharp at high flow and broad at low flow at once.
     front_width_km: float = Field(default=5.0, gt=0)
     # Discharge span the fit was made over, (lo, hi) with lo < hi. Outside
     # it, results are flagged rather than silently trusted.
@@ -353,6 +360,43 @@ class SalinityConfig(BaseModel):
     # `engine.salinity.Coverage`'s docstring for the concrete case of
     # `coverage=MEASURED` coexisting with `fitted=False`.
     fitted: bool = False
+
+    # Timescale, in days, over which the model integrates river discharge.
+    # 0.0 means "read today's discharge only", which is what every version
+    # before 2026-08-25 did and remains the default so existing configs are
+    # unchanged.
+    #
+    # A salt front does not respond to a single day's flow: the residual
+    # correlates with discharge averaged over PRIOR days, strengthening with
+    # lag then weakening, and the bottom sensor shows it about twice as
+    # strongly as the surface -- which is what a long-memory salt wedge should
+    # look like.
+    #
+    # Re-measured 2026-08-26 on the FULL record under the shipped model form
+    # (width-scaling, excluding the day itself), correlation at 1/7/14/60 days:
+    #
+    #   surface (WYSS1)   +0.12 / -0.01 / -0.10 / -0.09
+    #   bottom (NIWWBWQ)  -0.18 / -0.31 / -0.41 / -0.34
+    #
+    # The 2026-08-25 design probe reported -0.06/-0.13/-0.22/-0.15 and
+    # -0.23/-0.39/-0.46/-0.37 for the same eight cells. Those are PRE-CHANGE
+    # figures from the superseded 11,688-row population and do NOT reproduce
+    # on the full record -- every entry is off by 0.02-0.06 and the 1-day
+    # surface value flips sign. Every QUALITATIVE claim above survives in all
+    # four reconstructions that were tried, including the 14-day peak the next
+    # paragraph reasons from, so the conclusion stands; the digits do not.
+    #
+    # NOTE the correlation peaks at 14 days but the rmse-minimizing candidate
+    # on the tau scan is 7. Those are different questions, and neither
+    # settles a value to adopt here: the gate's day-clustered bootstrap
+    # (4,017 days, 2,000 reps) found tau=5 vs tau=7 differ by only +0.0115
+    # ppt, 95% CI [-0.0010, +0.0237] -- spanning zero, UNRESOLVED. The honest
+    # statement is a 5-7 day band, not tau=7 measured to the day (2026-08-25
+    # gate report, section 6) -- do not treat 7 as more precise than that.
+    # And nothing here is adopted: this field is 0.0, unchanged from every
+    # version before 2026-08-25 (see above), and holds NO fitted answer at
+    # all -- memory was MEASURED, never enabled.
+    discharge_memory_days: float = Field(default=0.0, ge=0.0, le=365.0)
 
     @field_validator("calibration_range_cfs")
     @classmethod
