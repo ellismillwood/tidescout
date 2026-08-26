@@ -19,7 +19,14 @@ redfish:
     flow: 1.0
     stage: 0.9
     light: 0.7
-    solunar: 0.3        # spec section 8: "small default weight, zeroable"
+    # Spec section 8: "small default weight, zeroable". DELIBERATELY the same
+    # 0.3 for all three species, and redfish and speckled trout deliberately
+    # share a byte-identical curve -- solunar is the one factor with no
+    # species-specific evidence behind it, so inventing three different shapes
+    # would be fabricating a distinction this project has not measured. Task 7's
+    # hindcast is what earns the right to differentiate these; until then they
+    # are honestly identical rather than decoratively different.
+    solunar: 0.3
     pressure: 0.6
     wind: 0.7
     water_temp: 0.8
