@@ -1337,6 +1337,12 @@ def _metrics(**kw):
         key="dropoff-abc123", type="dropoff", speed=0.5, ambush=0.4, strain=2e-3,
         okubo_w=-1e-5, convergence=1e-4, wet_fraction=1.0, flood_phase=float("nan"),
         n_cells=42,
+        # Required on FeatureMetrics and NOT optional -- omitting it is a
+        # TypeError, not a default. Added to the dataclass after this plan was
+        # written. 0.0 is the neutral value (no wet disc cell classifies as an
+        # eddy) and nothing in this task's scoring reads it: the structure
+        # sub-score is built from ambush, okubo_w and convergence.
+        eddy_share=0.0,
     )
     return FeatureMetrics(**{**base, **kw})
 
