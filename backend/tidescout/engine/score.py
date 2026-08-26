@@ -494,11 +494,31 @@ def _flat_wet_multiplier(metrics: FeatureMetrics, hour) -> tuple[float, str]:
     unused here) says WHERE in the 0 (low water) .. 1 (next low water) cycle
     this flat's wet window STARTS. `FeatureMetrics` carries no `drain_phase`,
     so the window's END is approximated as `flood_phase + wet_fraction` --
-    `pipeline/schedule.py`'s own module docstring measures the real
-    wet-window length at p50 = 0.523 across all nine shipped regimes and
-    notes that `wet_fraction` already IS that length (the share of the cycle
-    a cell holds water), so this is not inventing a new number, only using
-    two already-loaded ones together instead of one alone.
+    a KNOWN APPROXIMATION with a MEASURED cost, not a derivation from
+    `schedule.py` (2026-08-26 re-review: an earlier version of this comment
+    claimed `schedule.py` "notes `wet_fraction` already IS that length"; it
+    does not -- `schedule.py:13` defines the wet-window length as
+    `(drain_phase - flood_phase) % 1.0`, a DIFFERENT quantity from
+    `wet_fraction`, which line 61 documents separately as "share of the
+    cycle holding water"). Measured directly, 2026-08-26, over every cell in
+    the winyah-bay `mean_med` library with a partial `wet_fraction` and both
+    phases finite (51,558 of 587,325 domain cells): median error
+    (`wet_fraction` minus the true first-window length) -0.011, 2.38% of
+    cells off by more than 0.05 of a cycle, and 3.92% overshooting by more
+    than 0.02 into the UNSAFE direction -- reading a cell as wet when its
+    true drain has already passed. The mechanism is a residual puddle:
+    `wet_fraction` counts every wet snapshot across the whole cycle, while
+    `drain_phase` closes only the FIRST wet/dry transition after
+    `flood_phase` (`schedule_from_depths`'s own comment: "the first dry
+    transition AFTER the flood"), so a cell that dries, re-floods and dries
+    again reads as continuously wet straight across the dry gap in between.
+    At the feature level, 12 of the 196 in-domain flats have a mean
+    cell-level error beyond 0.05 -- materially wrong, though still a small
+    minority of the 196. `CellSchedule` already carries `drain_phase` per
+    cell; `sample_features` simply does not sample it onto `FeatureMetrics`
+    yet. Adding it would remove this approximation entirely, but that is
+    Phase 1 code and an improvement to a working gate, not a defect in it --
+    out of scope here, recorded as a follow-up rather than fixed.
 
     Three cases:
       wet_fraction >= 1.0  -- always wet, full credit regardless of hour.

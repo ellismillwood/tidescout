@@ -2,15 +2,25 @@
 of its response, not a calibrated value -- the curves are tuned by hindcasting
 and every number in them will move."""
 
+import dataclasses
 import math
 
 import pytest
+import yaml
 
 from tidescout.config import load_species
 from tidescout.engine.activation import FeatureMetrics
 from tidescout.engine.conditions import HourlyConditions
-from tidescout.engine.score import FACTORS, SubScore, combine, score_factors, score_feature
+from tidescout.engine.score import (
+    FACTORS,
+    HourScore,
+    SubScore,
+    combine,
+    score_factors,
+    score_feature,
+)
 from tidescout.models import StructureThresholds
+from tidescout.paths import FISHERIES_DIR
 
 
 def _hour(**kw):
@@ -666,8 +676,6 @@ def test_a_partly_wet_flat_scores_full_at_high_tide_and_zero_at_low():
     rejected -- 0.6 vs the true per-hour 1.0 differ by exactly enough to
     make that comparison assert nothing useful.
     """
-    import dataclasses
-
     red = load_species()["redfish"]
     metrics = _metrics(type="flat", wet_fraction=0.6, flood_phase=0.2)
     control = dataclasses.replace(metrics, type="dropoff")
@@ -753,3 +761,143 @@ def test_a_feature_with_no_finite_structure_sample_is_missing_not_zero():
     assert structure_sub.missing is True
     assert math.isnan(structure_sub.value)
     assert "structure" in got.excluded
+
+
+def test_editing_structure_weight_in_yaml_alone_moves_the_activation(tmp_path):
+    """2026-08-26 re-review, unpinned fix 1 of 4: `structure_weight` has to
+    be genuinely READ from the species profile at runtime, not merely
+    declared as a field while a stale Python constant keeps doing the real
+    work -- the reviewer proved this exact regression stays GREEN if all
+    that exists is the field declaration. Copies the real
+    `species_weights.yaml`, edits ONE number, reloads through the real
+    `load_species` loader, and checks the ambush weak/strong activation gap
+    actually widens -- the same style of proof Task 3's own review used for
+    the nine hourly factors ("copied the YAML, edited one y-value, reloaded
+    and watched the score move with zero Python touched"), extended to the
+    tenth. Measured manually during this fix: 0.2 gives a 20-point gap,
+    5.0 gives an 85-point gap; the threshold below is set well inside that.
+    """
+    raw = yaml.safe_load((FISHERIES_DIR / "species_weights.yaml").read_text())
+    assert raw["redfish"]["structure_weight"] == pytest.approx(0.2), "baseline assumption"
+    raw["redfish"]["structure_weight"] = 5.0
+    edited = tmp_path / "species_weights.yaml"
+    edited.write_text(yaml.safe_dump(raw))
+
+    baseline = load_species()["redfish"]
+    mutated = load_species(edited)["redfish"]
+
+    weak, strong = _metrics(ambush=0.0), _metrics(ambush=0.9)
+
+    def gap(profile):
+        lo = score_feature(weak, _hour(), None, profile, salinity=_sal(18.0), thresholds=_T)
+        hi = score_feature(strong, _hour(), None, profile, salinity=_sal(18.0), thresholds=_T)
+        return hi.activation - lo.activation
+
+    baseline_gap = gap(baseline)
+    mutated_gap = gap(mutated)
+    assert mutated_gap > baseline_gap + 20, (baseline_gap, mutated_gap)
+
+
+def test_editing_a_structure_curve_in_yaml_alone_moves_the_subscore(tmp_path):
+    """2026-08-26 re-review, unpinned fix 2 of 4 -- the constraint this task
+    was cited for in the first place was never only the WEIGHT.
+    `_structure_subscore`'s response shape (Important 2's second sentence:
+    "a clamped linear ramp ... IS a response curve") has to come from YAML
+    too, or nothing stops a future edit from quietly moving it back into
+    Python the way it started. Flattens redfish's `structure_ambush` curve
+    to a constant 0.05 and checks the structure sub-score actually drops --
+    if the ramp were still hardcoded in Python, editing this YAML key would
+    change nothing at all, which is exactly the regression the reviewer's
+    mutation produced.
+    """
+    raw = yaml.safe_load((FISHERIES_DIR / "species_weights.yaml").read_text())
+    original = raw["redfish"]["curves"]["structure_ambush"]
+    assert original["y"][-1] == pytest.approx(1.0), "baseline assumption"
+    raw["redfish"]["curves"]["structure_ambush"] = {"x": [0.0, 1.0], "y": [0.05, 0.05]}
+    edited = tmp_path / "species_weights.yaml"
+    edited.write_text(yaml.safe_dump(raw))
+
+    baseline = load_species()["redfish"]
+    mutated = load_species(edited)["redfish"]
+
+    # ambush is the only nonzero structural signal here (okubo_w, convergence
+    # and eddy_share all sit at their curves' x=0 -> y=0), so the structure
+    # sub-score is read straight off the ambush curve with nothing else able
+    # to win the MAX and mask a flat curve.
+    metrics = _metrics(ambush=0.9, okubo_w=0.0, convergence=0.0, eddy_share=0.0)
+
+    baseline_structure = _by_factor(
+        score_feature(metrics, _hour(), None, baseline, salinity=_sal(18.0),
+                      thresholds=_T).subs
+    )["structure"]
+    mutated_structure = _by_factor(
+        score_feature(metrics, _hour(), None, mutated, salinity=_sal(18.0),
+                      thresholds=_T).subs
+    )["structure"]
+    assert baseline_structure.value == pytest.approx(1.0)
+    assert mutated_structure.value == pytest.approx(0.05)
+
+
+def test_an_unknown_wet_fraction_gates_a_flat_to_dry_not_full_credit():
+    """2026-08-26 re-review, unpinned fix 3 of 4. Finding 9: "a NaN
+    wet_fraction skips the gate and scores FULL -- the optimistic default
+    the plan forbids." A flat with NO schedule data reaching it at all must
+    be treated as NOT confirmed wet, never as fully wet -- the reviewer's
+    mutation (skip the gate on NaN, same as the pre-fix code) stayed GREEN
+    because nothing exercised this specific input.
+    """
+    red = load_species()["redfish"]
+    metrics = _metrics(type="flat", wet_fraction=float("nan"), flood_phase=float("nan"))
+    control = dataclasses.replace(metrics, type="dropoff")
+
+    got = score_feature(metrics, _hour(), None, red, salinity=_sal(18.0), thresholds=_T)
+    unrestricted = score_feature(control, _hour(), None, red, salinity=_sal(18.0),
+                                 thresholds=_T)
+
+    assert got.activation == 0
+    # Sanity check that the gate, not otherwise-poor conditions, is what
+    # zeroed this: the identical inputs on a non-flat type score well.
+    assert unrestricted.activation > 50
+    assert "unknown" in got.reason.lower()
+
+
+def test_single_rounding_not_double_on_a_worked_example(monkeypatch):
+    """2026-08-26 re-review, unpinned fix 4 of 4. Finding 9: the OLD code
+    rounded `combine()`'s raw [0, 1] value into `combined.score` (an int),
+    THEN multiplied by the flat's wet multiplier and rounded a second time
+    -- two roundings where one suffices, and the two orders measurably
+    disagree. Worked example the review supplied, reproduced here exactly:
+    raw=0.5082, wet multiplier=0.579 (the "no tide reading this hour, use
+    the cycle average" path, so the multiplier equals wet_fraction exactly).
+
+        single (correct, what `score_feature` must produce):
+            round(100 * 0.5082 * 0.579)        = round(29.4248) = 29
+        double (the old bug, reintroduced by the reviewer's mutation):
+            round(round(100 * 0.5082) * 0.579) = round(51 * 0.579)
+                                                = round(29.529)  = 30
+
+    `combine` is monkeypatched to return this exact `raw` deterministically:
+    reproducing 0.5082 from real factor inputs would mean reverse-engineering
+    nine factors' worth of curve values to four decimal places, which tests
+    nothing this arithmetic-precision check needs -- what is under test is
+    the ONE line of arithmetic downstream of `combine`, not `combine` itself
+    (already covered elsewhere).
+    """
+    single = int(round(100 * 0.5082 * 0.579))
+    double = int(round(int(round(100 * 0.5082)) * 0.579))
+    assert (single, double) == (29, 30), "the worked example itself must produce these two numbers"
+
+    import tidescout.engine.score as score_mod
+
+    fixed = HourScore(
+        score=51, subs=[], excluded=[], confidence=1.0, constrained_share=1.0,
+        provisional=[], raw=0.5082,
+    )
+    monkeypatch.setattr(score_mod, "combine", lambda subs: fixed)
+
+    red = load_species()["redfish"]
+    # No tide_frac/tide_phase -> _flat_wet_multiplier's "no tide reading"
+    # fallback, which returns wet_fraction itself as the multiplier.
+    metrics = _metrics(type="flat", wet_fraction=0.579, flood_phase=0.1)
+    got = score_feature(metrics, _hour(), None, red, salinity=_sal(18.0), thresholds=_T)
+    assert got.activation == single == 29
