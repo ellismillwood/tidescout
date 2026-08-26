@@ -58,6 +58,8 @@ def test_phase_is_none_before_the_first_low_water():
 def test_phase_is_none_when_there_are_no_lows():
     events = [TideEvent(time=HIGH, height_ft=4.8, kind="H")]
     assert library_phase(events, HIGH) is None
+
+
 def test_library_phase_deliberately_disagrees_with_the_salinity_models_phase_at():
     """Both return "tidal phase in [0, 1)" with phase 0 at low water, and they
     are NOT interchangeable -- see this task's note above. `phase_at` brackets

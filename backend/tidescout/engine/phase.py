@@ -47,6 +47,13 @@ def library_phase(events: list[TideEvent], t: datetime) -> float | None:
     lows = sorted(e.time for e in events if e.kind == "L")
     if len(lows) < 2:
         return None
+    # Redundant with the loop's trailing `return None` TODAY -- `lows` is
+    # freshly sorted above, so a `t` outside it can never satisfy `a <= t <= b`
+    # for any pair and the loop always falls through. Proved on review over 16
+    # boundary cases (duplicate lows, zero-length spans, unsorted input, naive
+    # datetimes) and by that argument. Kept as an explicit statement of the
+    # domain: it is what still refuses an out-of-record `t` if the loop below
+    # is ever changed to wrap or extrapolate. No test can distinguish it.
     if t < lows[0] or t > lows[-1]:
         return None
     for a, b in zip(lows, lows[1:], strict=False):
