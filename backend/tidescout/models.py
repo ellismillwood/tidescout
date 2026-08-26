@@ -361,6 +361,23 @@ class SalinityConfig(BaseModel):
     # `coverage=MEASURED` coexisting with `fitted=False`.
     fitted: bool = False
 
+    # Timescale, in days, over which the model integrates river discharge.
+    # 0.0 means "read today's discharge only", which is what every version
+    # before 2026-08-25 did and remains the default so existing configs are
+    # unchanged.
+    #
+    # A salt front does not respond to a single day's flow. Measured on the
+    # real record: the residual correlates with discharge averaged over PRIOR
+    # days, strengthening with lag then weakening -- at 1/7/14/60 days,
+    # -0.06/-0.13/-0.22/-0.15 at the surface sensor and -0.23/-0.39/-0.46/-0.37
+    # at the bottom one. The bottom shows it about twice as strongly, which is
+    # what a long-memory salt wedge should look like.
+    #
+    # NOTE the correlation peaks at 14 days but the best FIT is at 7. Those
+    # are different questions; this field holds the fitted answer, not the
+    # correlation peak.
+    discharge_memory_days: float = Field(default=0.0, ge=0.0, le=365.0)
+
     @field_validator("calibration_range_cfs")
     @classmethod
     def _calibration_range_is_ordered(cls, v: tuple[float, float]) -> tuple[float, float]:

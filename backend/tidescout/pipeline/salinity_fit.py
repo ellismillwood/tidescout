@@ -905,6 +905,44 @@ def station_bias(
     return out, dropped
 
 
+# Windows shorter than this many multiples of tau lose meaningful weight; the
+# exponential kernel is truncated here and days without that much history are
+# dropped rather than smoothed over a stub.
+_MEMORY_WINDOW_TAUS = 4.0
+
+
+def smooth_discharge(
+    by_day: Mapping[date, float], tau_days: float
+) -> tuple[dict[date, float], int]:
+    """Exponentially-weighted discharge over the preceding `tau_days`.
+
+    Returns the smoothed map and the number of days DROPPED for insufficient
+    history. A day whose preceding window is not fully covered is dropped, not
+    smoothed over a shorter window: a short window is a different quantity,
+    and mixing the two would make early days' discharge mean something other
+    than later days'. `composite_discharge_by_day` already refuses to sum a
+    day short when a gauge is dark, for the same reason -- this must not
+    quietly undo that by averaging across the hole.
+
+    `tau_days == 0.0` returns the input unchanged, which is every caller's
+    behaviour before 2026-08-25.
+    """
+    if tau_days <= 0.0:
+        return dict(by_day), 0
+    window = int(round(_MEMORY_WINDOW_TAUS * tau_days))
+    weights = np.exp(-np.arange(window + 1) / tau_days)
+    weights /= weights.sum()
+    out: dict[date, float] = {}
+    dropped = 0
+    for day in sorted(by_day):
+        history = [by_day.get(day - timedelta(days=i)) for i in range(window + 1)]
+        if any(h is None for h in history):
+            dropped += 1
+            continue
+        out[day] = float(np.dot(weights, history))
+    return out, dropped
+
+
 def composite_discharge_by_day(
     fishery: Fishery, daily: dict[str, list[tuple[date, float]]]
 ) -> dict[date, float]:

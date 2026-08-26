@@ -2415,3 +2415,88 @@ def test_ocean_ppt_matches_the_north_inlet_marine_measurement():
         f"{len(per_day)} days. Re-derive the YAML value and update its comment "
         "rather than widening this tolerance."
     )
+
+
+def test_zero_tau_returns_the_discharge_untouched():
+    """The backward-compatibility guarantee: every existing caller and test
+    must keep getting exactly today's behaviour."""
+    from datetime import date
+
+    from tidescout.pipeline.salinity_fit import smooth_discharge
+
+    raw = {date(2026, 5, d): 1000.0 * d for d in range(1, 11)}
+    out, dropped = smooth_discharge(raw, 0.0)
+    assert out == raw
+    assert dropped == 0
+
+
+def test_a_constant_series_smooths_to_itself():
+    """Any weighted mean of a constant is that constant. Catches a
+    normalisation bug, which would otherwise show up only as a scale error in
+    the fitted parameters."""
+    from datetime import date, timedelta
+
+    from tidescout.pipeline.salinity_fit import smooth_discharge
+
+    # Day index d maps to a sequential calendar day starting May 1, 2026 (not
+    # day-of-month d, which overflows past May's 31 days for d > 31).
+    def day(n: int) -> date:
+        return date(2026, 5, 1) + timedelta(days=n - 1)
+
+    raw = {day(d): 5000.0 for d in range(1, 61)}
+    out, _ = smooth_discharge(raw, 7.0)
+    assert all(v == pytest.approx(5000.0) for v in out.values())
+
+
+def test_smoothing_lags_a_step_change():
+    """The physical content: a discharge step must reach the model gradually.
+    One day after a 10x step, a 7-day memory must have moved well short of
+    the new value."""
+    from datetime import date, timedelta
+
+    from tidescout.pipeline.salinity_fit import smooth_discharge
+
+    # Day index d maps to a sequential calendar day starting May 1, 2026 (not
+    # day-of-month d, which overflows past May's 31 days for d > 31).
+    def day(n: int) -> date:
+        return date(2026, 5, 1) + timedelta(days=n - 1)
+
+    raw = {day(d): (1000.0 if d <= 40 else 10000.0) for d in range(1, 61)}
+    out, _ = smooth_discharge(raw, 7.0)
+    assert out[day(41)] < 4000.0
+    assert out[day(41)] > 1000.0
+    assert out[day(60)] > out[day(41)]
+
+
+def test_days_without_enough_history_are_dropped_and_counted():
+    """A day smoothed over a SHORT window is not comparable with one smoothed
+    over a full window -- its discharge would mean something different. Drop
+    and count, never default."""
+    from datetime import date
+
+    from tidescout.pipeline.salinity_fit import smooth_discharge
+
+    raw = {date(2026, 5, d): 5000.0 for d in range(1, 31)}
+    out, dropped = smooth_discharge(raw, 7.0)
+    assert dropped > 0
+    assert min(out) > min(raw), "the earliest days cannot have a full window"
+    assert dropped + len(out) == len(raw)
+
+
+def test_a_gap_in_the_discharge_record_drops_the_days_it_covers():
+    """A missing gauge day must not be interpolated across -- the composite
+    already refuses to sum short when a gauge is dark, and this must not
+    quietly undo that."""
+    from datetime import date, timedelta
+
+    from tidescout.pipeline.salinity_fit import smooth_discharge
+
+    # Day index d maps to a sequential calendar day starting May 1, 2026 (not
+    # day-of-month d, which overflows past May's 31 days for d > 31).
+    def day(n: int) -> date:
+        return date(2026, 5, 1) + timedelta(days=n - 1)
+
+    raw = {day(d): 5000.0 for d in range(1, 61) if d != 45}
+    out, dropped = smooth_discharge(raw, 7.0)
+    assert day(46) not in out
+    assert dropped > 0
