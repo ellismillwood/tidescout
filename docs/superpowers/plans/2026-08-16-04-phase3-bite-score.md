@@ -679,7 +679,7 @@ import pytest
 
 from tidescout.config import load_species
 from tidescout.engine.conditions import HourlyConditions
-from tidescout.engine.score import score_factors
+from tidescout.engine.score import FACTORS, score_factors
 
 
 def _hour(**kw):
@@ -705,6 +705,24 @@ def _sal(ppt: float, *, fitted: bool = False, extrapolated: bool = False):
 
     return SalinityReading(ppt, SalinityProvenance.MODELLED,
                            fitted=fitted, extrapolated=extrapolated)
+
+
+def test_the_factor_list_and_the_authored_yaml_cannot_drift_apart():
+    """Task 3's test file declares its own FACTORS set and this module declares
+    a FACTORS tuple. They agree today -- verified 2026-08-26 -- and nothing
+    else makes them keep agreeing.
+
+    Drift is silent and expensive in both directions: a factor named here but
+    absent from the YAML raises KeyError deep inside `_scored` at scoring time,
+    and a factor weighted in the YAML but missing here is simply never
+    evaluated, so its weight quietly vanishes from the geometric mean and every
+    score shifts with no error anywhere.
+
+    This is the one place that can see both, because Task 3 ships before this
+    module exists and its tests cannot import FACTORS from here.
+    """
+    for name, profile in load_species().items():
+        assert set(FACTORS) == set(profile.weights), name
 
 
 def test_slack_water_craters_the_flow_factor():
