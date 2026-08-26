@@ -75,17 +75,30 @@ def test_discharge_sensitivity_survives_at_high_water_near_the_mouth():
     4,525-point (x, phase) grid over the calibration range: 284 points
     (6.28%) there read a HIGHER discharge as a hair SALTIER instead of
     fresher, by at most 0.0091 ppt (median 0.0074 ppt), always within
-    0.03 ppt of ocean_ppt. That is a known, bounded consequence of `W`
+    0.03 ppt of ocean_ppt. That is a known, BOUNDED consequence of `W`
     sharing `L`'s exponent (see `_discharge_scale`'s docstring) -- not the
     bit-identical plateau defect 1 was about, since it is never exactly tied
-    and never material. North Jetty at high water is exactly this case,
-    pinned explicitly below so the exception is documented, not merely
-    excluded from the loop above it."""
+    and never material.
+
+    The bound below is enforced INSIDE the loop, for every x_eff < 0 point
+    this grid visits -- not just at one named coordinate. A single hardcoded
+    exception (e.g. only at North Jetty) would let the reversal grow
+    unboundedly at any other seaward point without failing anything; the
+    grid's own worst point (x=5.0, phase=0.5, x_eff=-2.0) is the one that
+    actually exercises the bound, not North Jetty."""
     lo, hi = CFG.calibration_range_cfs
     xs = np.array([0.5, 2.58, 5.0, 8.0, 12.0, 20.0, 31.57])
     phases = np.array([0.0, 0.25, 0.5, 0.75])
+    # Measured maxima across this exact grid: reversal 0.008646 ppt (at
+    # x=5.0, phase=0.5), distance from ocean_ppt 0.014751 ppt (same point).
+    # These bounds carry roomy headroom above both so the test is not
+    # fragile to float noise, while still catching an order-of-magnitude
+    # regression (e.g. a reversal that grew to 0.5 ppt).
+    MAX_SATURATED_REVERSAL_PPT = 0.02
+    MAX_SATURATED_DISTANCE_FROM_OCEAN_PPT = 0.03
 
     ties = 0
+    saturated_points_checked = 0
     for x in xs:
         for phase in phases:
             x_eff = x + CFG.excursion_km * np.cos(2.0 * np.pi * phase)
@@ -98,27 +111,42 @@ def test_discharge_sensitivity_survives_at_high_water_near_the_mouth():
                     f"x={x}, phase={phase}, x_eff={x_eff:.2f} (landward of the mouth): "
                     "higher discharge must still freshen the cell"
                 )
+            else:
+                # Seaward of the mouth: a reversal is sanctioned, but ONLY
+                # within the measured bound -- enforced for every such point
+                # the grid visits, so a regression cannot hide at a
+                # coordinate this loop happens not to name.
+                saturated_points_checked += 1
+                assert low != high, (
+                    f"x={x}, phase={phase}, x_eff={x_eff:.2f}: must never be "
+                    "bit-identical, even in the saturated exception"
+                )
+                assert abs(high - low) < MAX_SATURATED_REVERSAL_PPT, (
+                    f"x={x}, phase={phase}, x_eff={x_eff:.2f}: reversal "
+                    f"{high - low:.6f} ppt exceeds the known-bounded exception -- "
+                    "this is no longer the saturated corner the ruling accepted"
+                )
+                assert (
+                    CFG.ocean_ppt - high < MAX_SATURATED_DISTANCE_FROM_OCEAN_PPT
+                    and CFG.ocean_ppt - low < MAX_SATURATED_DISTANCE_FROM_OCEAN_PPT
+                ), (
+                    f"x={x}, phase={phase}, x_eff={x_eff:.2f}: reading strayed "
+                    "outside the saturated band near ocean_ppt"
+                )
     assert ties == 0, (
         "no position/phase may read bit-identical salinity across the full discharge range"
     )
+    assert saturated_points_checked > 0, (
+        "the grid must include at least one x_eff < 0 point to exercise the bound above"
+    )
 
-    # North Jetty at high water: the sanctioned saturated-mouth exception,
-    # pinned explicitly rather than merely skipped by the `x_eff > 0` guard
-    # above. If this reversal ever grows past the measured bound, or ever
-    # shows up where x_eff >= 0, that is a real regression, not this known
-    # corner.
-    x = np.full(1, 2.58)  # North Jetty
+    # North Jetty at high water: the headline example of the saturated
+    # exception (defect 1's original reproduction case), kept as a named,
+    # documentary pin -- x=2.58, phase=0.5 is already one of the points the
+    # loop above visits and bounds; this does not add new enforcement, only
+    # a reader-facing anchor for the historical defect this test traces to.
     x_eff = 2.58 + CFG.excursion_km * np.cos(2.0 * np.pi * 0.5)
     assert x_eff < 0, "this exception is sanctioned only seaward of the mouth"
-    low = salinity.salinity_at(x, cfs=lo, phase=0.5, cfg=CFG)[0]
-    high = salinity.salinity_at(x, cfs=hi, phase=0.5, cfg=CFG)[0]
-    assert low != high, "must never be bit-identical, even in the saturated exception"
-    assert abs(high - low) < 0.01, (
-        "the reversal must stay near the measured ~0.0066 ppt, not grow"
-    )
-    assert CFG.ocean_ppt - high < 0.05 and CFG.ocean_ppt - low < 0.05, (
-        "both readings must stay within the saturated band near ocean_ppt"
-    )
 
 
 def test_intrusion_length_shrinks_as_a_power_law_in_discharge():
@@ -182,19 +210,42 @@ def test_intrusion_length_is_unchanged_by_the_refactor():
 
 
 def test_a_sharper_front_at_high_flow_drops_salinity_faster_with_distance():
-    """The point of the change, stated as behaviour rather than parameters:
-    at high discharge the profile must fall off over a shorter distance."""
-    import numpy as np
+    """The point of the change, isolated from `L(Q)` shrinking with
+    discharge -- which already predated this task and is, by itself, enough
+    to make a low-vs-high-discharge comparison LOOK sharper over a fixed x
+    window. Confirmed: hand-building a constant-width control at the same
+    two discharges below (L still scales with Q, W frozen at
+    `front_width_km`) also satisfies `hi[-1] < lo[-1]` with both drops
+    positive -- the ORIGINAL, unisolated version of this test could not fail
+    on the thing it named.
 
-    from tidescout.engine.salinity import salinity_at
-
+    This version holds discharge -- and therefore `L(Q)` and `x_eff` --
+    FIXED, and compares the real, discharge-scaled width against a
+    constant-width control at that SAME discharge. With `L` and `x`
+    identical between the two, any extra drop-off is attributable to the
+    width term alone, checked at both a low and a high discharge so the
+    isolation is not an artefact of picking one flow."""
     x = np.array([2.0, 6.0, 10.0, 14.0])
-    lo = salinity_at(x, 2_000.0, 0.25, CFG)
-    hi = salinity_at(x, 60_000.0, 0.25, CFG)
-    lo_drop = float(lo[0] - lo[-1])
-    hi_drop = float(hi[0] - hi[-1])
-    assert hi[-1] < lo[-1], "high flow must be fresher far up the estuary"
-    assert hi_drop > 0 and lo_drop > 0
+    phase = 0.25
+
+    for cfs in (2_000.0, 60_000.0):
+        length = salinity.intrusion_length_km(cfs, CFG)
+        x_eff = x + CFG.excursion_km * np.cos(2.0 * np.pi * phase)
+        scaled_width = salinity.front_width_at(cfs, CFG)
+
+        real = CFG.ocean_ppt * 0.5 * (1.0 - np.tanh((x_eff - length) / scaled_width))
+        control = CFG.ocean_ppt * 0.5 * (1.0 - np.tanh((x_eff - length) / CFG.front_width_km))
+        # `real` must be exactly what production `salinity_at` computes, not
+        # a reimplementation that could silently drift from it.
+        assert np.allclose(real, salinity.salinity_at(x, cfs, phase, CFG))
+
+        real_drop = float(real[0] - real[-1])
+        control_drop = float(control[0] - control[-1])
+        assert real_drop > control_drop, (
+            f"cfs={cfs}: at the SAME discharge (same L, same x_eff), the "
+            "discharge-scaled width must fall off faster than a constant-width "
+            "control -- the width term itself, not L moving, must be doing the work"
+        )
 
 
 def test_high_water_is_saltier_than_low_water_at_the_same_place():
