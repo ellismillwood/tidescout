@@ -58,6 +58,89 @@ def test_slack_water_craters_the_flow_factor():
     running = _by_factor(score_factors(_hour(), None, p, flow_speed=0.5))["flow"]
     assert slack.value < 0.3
     assert running.value > slack.value
+    # Absolute pins, not just the two relative checks above (2026-08-26
+    # review, Minor 5): `flow_speed` is m/s already on this path -- only the
+    # CO-OPS knot fallback converts units -- so a bug that quietly
+    # re-applied the knot->m/s factor here would still satisfy "slack <
+    # running" but must fail these. redfish's flow curve is exact at both
+    # points: x=0.01 sits on the 0.0->0.10 segment (y 0.10->0.45), x=0.5 is
+    # an authored breakpoint (y=1.00).
+    assert abs(slack.value - 0.135) < 0.01
+    assert abs(running.value - 1.0) < 0.01
+
+
+def test_stage_factor_converts_the_half_cycle_frac_to_a_full_cycle_and_labels_it_right():
+    """2026-08-26 review, Important 1: `stage_at`'s `frac` resets to 0 at
+    every hi/lo turn -- a HALF-cycle fraction -- but the YAML curves are
+    authored against the FULL 0 (low water) .. 1 (next low water) cycle.
+    `tide_phase` says which half, so the factor must recombine them:
+    flooding halves the half-cycle frac, ebbing adds it to the far side.
+
+    This is also the flood/ebb label test Important 2 asked for: it ties the
+    reason's "flooding"/"ebbing" word to the `tide_phase` that produced it,
+    so swapping the labels -- the exact defect that shipped -- fails here,
+    and so does skipping the conversion (the same raw 0.8 would appear in
+    both reasons instead of 0.40 and 0.90)."""
+    p = load_species()["redfish"]
+    flood = _by_factor(score_factors(
+        _hour(tide_frac=0.8, tide_phase="rising"), None, p))["stage"]
+    ebb = _by_factor(score_factors(
+        _hour(tide_frac=0.8, tide_phase="falling"), None, p))["stage"]
+    assert "flooding" in flood.reason
+    assert "0.40" in flood.reason, flood.reason  # 0.8 / 2
+    assert "ebbing" in ebb.reason
+    assert "0.90" in ebb.reason, ebb.reason  # 0.5 + 0.8 / 2
+    # Same half-cycle frac, opposite phase -- must NOT produce the same
+    # full-cycle value or the curve cannot express a direction bias at all.
+    assert flood.value != ebb.value
+
+
+def test_stage_missing_phase_marks_missing_even_with_a_frac_present():
+    """`tide_phase` can be None independently of `tide_frac` (see
+    `stage_at`) -- a frac with no phase to interpret it is not enough
+    information to guess a half, so it must not silently default to one."""
+    p = load_species()["redfish"]
+    sub = _by_factor(score_factors(_hour(tide_frac=0.3, tide_phase=None), None, p))["stage"]
+    assert sub.missing is True
+
+
+def test_light_reason_quotes_the_cloud_widened_value_actually_scored():
+    """2026-08-26 review, Minor 3/4: the curve is evaluated at `effective`
+    (cloud-widened), not the raw hours-from-twilight, and the disclosure
+    must fire whenever cloud cover is non-zero, not only above some cutoff.
+    """
+    from datetime import datetime
+    from types import SimpleNamespace
+    from zoneinfo import ZoneInfo
+
+    from tidescout.sources.astronomy import SunTimes
+
+    tz = ZoneInfo("America/New_York")
+    sunrise = datetime(2026, 10, 15, 7, 0, tzinfo=tz)
+    sunset = datetime(2026, 10, 15, 19, 0, tzinfo=tz)
+    sun = SunTimes(dawn=sunrise, sunrise=sunrise, sunset=sunset, dusk=sunset)
+    day = SimpleNamespace(sun=sun, solunar=[], water=None)
+    p = load_species()["redfish"]
+
+    # 09:00 is 2.0 h after sunrise (the nearer of the two twilights); 100%
+    # cloud widens it to 2.0 * (1 - 0.35) = 1.30 h -- the value the curve is
+    # actually evaluated at.
+    cloudy = _by_factor(score_factors(
+        _hour(time=datetime(2026, 10, 15, 9, 0, tzinfo=tz), cloud_cover_pct=100.0),
+        day, p))["light"]
+    # The number the curve was actually evaluated at leads the reason;
+    # the raw pre-widening value may still appear afterward as context
+    # (it does here, in "widened it from 2.0 h"), so this checks WHERE
+    # 1.3 appears rather than banning 2.0 outright.
+    assert cloudy.reason.startswith("1.3"), cloudy.reason
+    assert "cloud" in cloudy.reason.lower()
+
+    # Clear sky: effective == raw, no cloud note needed.
+    clear = _by_factor(score_factors(
+        _hour(time=datetime(2026, 10, 15, 9, 0, tzinfo=tz), cloud_cover_pct=0.0),
+        day, p))["light"]
+    assert "2.0" in clear.reason
+    assert "cloud" not in clear.reason.lower()
 
 
 def test_every_sub_score_carries_a_reason():
@@ -150,6 +233,17 @@ def test_season_factor_uses_the_month_of_the_hour():
         _hour(time=datetime(2026, 10, 15, 12, tzinfo=tz)), None, p))["season"]
     assert 0.0 <= oct_.value <= 1.0
     assert str(10) in oct_.reason or "octo" in oct_.reason.lower()
+
+    # A second month, checked against the profile's own table rather than a
+    # second hardcoded literal (2026-08-26 review, Minor 5): the previous
+    # version passed even with the month hardcoded to 10, since it never
+    # tried any other month.
+    jan = _by_factor(score_factors(
+        _hour(time=datetime(2026, 1, 15, 12, tzinfo=tz)), None, p))["season"]
+    assert "january" in jan.reason.lower()
+    assert jan.value == p.months[1]
+    assert oct_.value == p.months[10]
+    assert jan.value != oct_.value
 
 
 def test_all_nine_factors_are_always_present():

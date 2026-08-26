@@ -129,26 +129,56 @@ def score_factors(
         kind = "slack" if speed < 0.1 else "moving" if speed < 0.8 else "ripping"
         subs.append(_scored("flow", profile, speed, f"flow {speed:.2f} m/s — {kind}"))
 
-    # 2. Tide stage. tide_frac runs 0 at low water to 0.5 at high, matching the
-    # flow library's phase convention -- NOT 0 at high water.
+    # 2. Tide stage. `stage_at`'s `frac` resets to 0 at every hi/lo turn --
+    # it is a HALF-cycle fraction between whichever pair of events brackets
+    # this hour, NOT the full 0 (low water) .. 1 (next low water) fraction
+    # the YAML curves are authored against (species_weights.yaml: "stage
+    # tide_frac (0 = low water, 0.5 = high)"). `tide_phase` says which half
+    # we are in, so it recombines the two: half the half-cycle frac while
+    # flooding (rising, heading to the next high water), and 0.5 plus half
+    # of it while ebbing (falling, heading to the next low). `tide_phase`
+    # can be None independently of `tide_frac` (see `stage_at`), so it is
+    # guarded on its own rather than folded into one combined check that
+    # could silently guess a half.
+    # (2026-08-26 review, Important 1 -- this comment previously, and
+    # wrongly, claimed `tide_frac` already matched the flow library's phase
+    # convention; `library_phase` is a different quantity than
+    # `stage_at().frac` and conflating them left the curve seeing the same
+    # x on flood and ebb, unable to express any direction bias at all.)
     if hour.tide_frac is None:
         subs.append(_missing("stage", profile, "no tide prediction"))
+    elif hour.tide_phase is None:
+        subs.append(_missing("stage", profile, "no tide phase"))
     else:
-        half = "flooding" if hour.tide_frac < 0.5 else "ebbing"
-        subs.append(_scored("stage", profile, hour.tide_frac,
-                            f"tide {hour.tide_frac:.2f} of cycle — {half}"))
+        full = hour.tide_frac / 2 if hour.tide_phase == "rising" else 0.5 + hour.tide_frac / 2
+        half = "flooding" if hour.tide_phase == "rising" else "ebbing"
+        subs.append(_scored("stage", profile, full,
+                            f"tide {full:.2f} of cycle — {half}"))
 
     # 3. Light. Cloud cover widens the low-light window, so heavy cloud is
-    # credited as bringing the hour closer to twilight.
+    # credited as bringing the hour closer to twilight. The curve is
+    # evaluated at `effective`, the cloud-widened value -- the reason quotes
+    # THAT number, not the raw `hours_off`, or it would describe a different
+    # score than the one actually produced (2026-08-26 review, Minor 3).
     hours_off = _hours_from_twilight(hour.time, getattr(day, "sun", None))
     if hours_off is None:
         subs.append(_missing("light", profile, "no sun times"))
     else:
-        cloud = hour.cloud_cover_pct or 0.0
+        # Explicit `is None` check, not `cloud_cover_pct or 0.0`: `or` would
+        # collapse a genuine 0.0% reading into the same branch as "no cloud
+        # data," which is a different claim (2026-08-26 review, Minor 4).
+        # Missing cloud data still degrades to "no widening" rather than
+        # marking the whole light factor missing -- cloud is a refinement
+        # of this factor, not a precondition for scoring it.
+        cloud = hour.cloud_cover_pct if hour.cloud_cover_pct is not None else 0.0
         effective = hours_off * (1.0 - 0.35 * cloud / 100.0)
-        note = f", {cloud:.0f}% cloud widens it" if cloud > 50 else ""
+        # Disclosed whenever the adjustment is non-zero, not only above some
+        # threshold -- a silent +0.070 at cloud=50 under the old `> 50`
+        # cutoff is exactly the kind of right-value-wrong-justification gap
+        # this project has been bitten by before.
+        note = f", {cloud:.0f}% cloud widened it from {hours_off:.1f} h" if cloud > 0 else ""
         subs.append(_scored("light", profile, effective,
-                            f"{hours_off:.1f} h from twilight{note}"))
+                            f"{effective:.1f} h from twilight{note}"))
 
     # 4. Solunar. Smallest default weight of the nine, per spec section 8.
     mins = _minutes_from_solunar(hour.time, getattr(day, "solunar", None))
