@@ -839,8 +839,8 @@ def station_bias(
 
     `Observation` is `(distance_km, cfs, ppt)` -- it carries no station id
     (see the type alias's own comment), so this groups admitted sites by
-    their EXACT `distance_km`, the same float value `pair_daily_means` /
-    `collect_observations` used to build `observations` in the first place,
+    their EXACT `distance_km`, the same float value `_dated_daily_mean_pairs`
+    / `collect_observations` used to build `observations` in the first place,
     so the match is exact, not a tolerance. Two admitted stations that snap
     to the identical distance -- e.g. WYSS1 and NIWWBWQ, the surface/bottom
     pair sharing one along-estuary position at 19.03 km on the real Winyah
@@ -977,16 +977,14 @@ def _dated_daily_mean_pairs(
     discharge_by_day: dict[date, float],
     distance_km: dict[str, float],
 ) -> list[tuple[date, Observation]]:
-    """`pair_daily_means`'s exact filter-and-pair logic, with each row's
-    calendar day kept alongside it.
+    """The filter-and-pair logic behind every daily-mean `Observation` this
+    module builds, with each row's calendar day kept alongside it.
 
     `Observation` itself carries no date (see its own comment) -- deliberate,
     since most callers never need one. `collect_observations` does: it tracks
     each row's day (`CalibrationInput.observation_days`) so `profile_memory`
     can later re-derive the SAME rows at a DIFFERENT tau. This is the one
-    place that pairing happens, so `pair_daily_means` below is now a thin
-    wrapper over it rather than a second, drift-prone copy of the same
-    filter.
+    place that pairing happens -- every call site below uses it directly.
     """
     return [
         (day, (distance_km[site], discharge_by_day[day], ppt))
@@ -994,18 +992,6 @@ def _dated_daily_mean_pairs(
         if site in distance_km
         for day, ppt in rows
         if day in discharge_by_day
-    ]
-
-
-def pair_daily_means(
-    salinity_daily: dict[str, list[tuple[date, float]]],
-    discharge_by_day: dict[date, float],
-    distance_km: dict[str, float],
-) -> list[Observation]:
-    """(distance, that day's composite discharge, that day's mean salinity)."""
-    return [
-        obs
-        for _, obs in _dated_daily_mean_pairs(salinity_daily, discharge_by_day, distance_km)
     ]
 
 
@@ -1733,8 +1719,9 @@ def collect_observations(
     n_off_axis = sum(1 for r in records if "axis" in r.note.lower())
     n_colocated = sum(1 for r in records if "co-located" in r.note.lower())
 
-    # `_dated_daily_mean_pairs`, not `pair_daily_means`, so each row's
-    # calendar day is kept alongside it in `obs_days` -- `profile_memory`
+    # `_dated_daily_mean_pairs` is used here rather than a bare list of
+    # `Observation`s, so each row's calendar day is kept alongside it in
+    # `obs_days` -- `profile_memory`
     # needs that to re-pair a row against a DIFFERENT candidate tau's
     # smoothed discharge later (see `CalibrationInput.observation_days`).
     usgs_pairs = _dated_daily_mean_pairs(salinity_daily, by_day, usable)

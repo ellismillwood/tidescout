@@ -373,9 +373,16 @@ class SalinityConfig(BaseModel):
     # at the bottom one. The bottom shows it about twice as strongly, which is
     # what a long-memory salt wedge should look like.
     #
-    # NOTE the correlation peaks at 14 days but the best FIT is at 7. Those
-    # are different questions; this field holds the fitted answer, not the
-    # correlation peak.
+    # NOTE the correlation peaks at 14 days but the rmse-minimizing candidate
+    # on the tau scan is 7. Those are different questions, and neither
+    # settles a value to adopt here: the gate's day-clustered bootstrap
+    # (4,017 days, 2,000 reps) found tau=5 vs tau=7 differ by only +0.0115
+    # ppt, 95% CI [-0.0010, +0.0237] -- spanning zero, UNRESOLVED. The honest
+    # statement is a 5-7 day band, not tau=7 measured to the day (2026-08-25
+    # gate report, section 6) -- do not treat 7 as more precise than that.
+    # And nothing here is adopted: this field is 0.0, unchanged from every
+    # version before 2026-08-25 (see above), and holds NO fitted answer at
+    # all -- memory was MEASURED, never enabled.
     discharge_memory_days: float = Field(default=0.0, ge=0.0, le=365.0)
 
     @field_validator("calibration_range_cfs")

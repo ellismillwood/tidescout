@@ -448,21 +448,26 @@ salinity:
   # exponent l0_km's L(Q) uses (`_discharge_scale` in engine/salinity.py),
   # because a constant width could not be sharp at high flow and broad at
   # low flow at once: L(Q) itself ranges 37.14->1.13 km across the observed
-  # 257x discharge span while this value did not move, and the mean residual
-  # measured at FIXED distance (so it can't be confounded with position)
-  # trended -1.33->-3.72 ppt at x=16.68 km and +1.33->-2.03 ppt at x=19.03 km
-  # across flow quintiles as a result. Scaling the width the same way cuts
-  # that trend spread from 3.0087 to 0.3070 ppt -- an 89.8% reduction, and
-  # the single largest systematic improvement this model has had.
+  # 257x discharge span while this value did not move. MEASURED (gate
+  # report, 2026-08-25, one recipe on one 12,204-row population): the mean
+  # residual at FIXED distance (so it can't be confounded with position) ran
+  # -0.9001->-3.3387 ppt at x=16.68 km and +1.8385->-1.7403 ppt at x=19.03 km
+  # across flow quintiles. (An earlier draft cited -1.33->-3.72 and
+  # +1.33->-2.03 here; those were PRE-REGISTRATIONS on a different,
+  # unreproducible population, superseded by the figures above.) Scaling the
+  # width the same way cuts that trend spread from 3.0087 to 0.3070 ppt --
+  # an 89.8% reduction, and the single largest systematic improvement this
+  # model has had.
   #
-  # Those two figures are MEASURED (gate report, 2026-08-25: per-station flow
-  # quintiles at x=16.68 and x=19.03 km, trend = highest-quintile mean minus
-  # lowest-quintile mean, spread = mean of the two absolute trends, both forms
-  # scored through one code path on one 12,204-row population). An earlier
-  # draft of this comment claimed "2.96 to 0.55", which were PRE-REGISTRATIONS
-  # computed by a method that could not be reproduced -- the spec's own
-  # quintile table averages 2.875, not 2.96 -- on a different population of
-  # 11,688 rows. Direction and rough size held; the numbers did not.
+  # The 3.0087 -> 0.3070 trend-spread figures immediately above are ALSO
+  # MEASURED (gate report, 2026-08-25: per-station flow quintiles at x=16.68
+  # and x=19.03 km, trend = highest-quintile mean minus lowest-quintile mean,
+  # spread = mean of the two absolute trends, both forms scored through one
+  # code path on the same 12,204-row population). An earlier draft of this
+  # comment claimed "2.96 to 0.55", which were PRE-REGISTRATIONS computed by
+  # a method that could not be reproduced -- the spec's own quintile table
+  # averages 2.875, not 2.96 -- on a different population of 11,688 rows.
+  # Direction and rough size held; the numbers did not.
   #
   # The same gate found this width change does essentially ALL of the
   # flattening on its own. Adding a discharge-memory window on top moves the

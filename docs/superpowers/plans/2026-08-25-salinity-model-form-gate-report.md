@@ -321,9 +321,9 @@ more by the standalone script (bit-identical rmse to four decimals on every cand
 
 Shape: a clear U with a single interior minimum. Total range across the grid is 0.6174 ppt.
 
-**τ does not land on a bound.** The grid's bounds are 0 and 30; the argmin is 7, four grid points
-in from one end and four from the other. This is not the `at_bounds` case the spec's decision
-table required be flagged.
+**τ does not land on a bound.** The grid's bounds are 0 and 30; the argmin is 7 — index 3 on
+`(0, 3, 5, 7, 10, 14, 21, 30)`, three grid points in from the low end and four from the high end.
+This is not the `at_bounds` case the spec's decision table required be flagged.
 
 **The profile is not flat, but it is flat NEAR the minimum, and that distinction matters.** The
 margin between best (τ=7, 3.5602) and second-best (τ=5, 3.5716) is **0.0114 ppt — 0.32% of the
@@ -522,11 +522,15 @@ hardcoded (`test_the_fit_path_routes_its_discharge_through_smooth_discharge`, pl
 `test_smoothing_at_the_configured_tau_is_not_a_no_op`).
 
 **The PREDICTION half is NOT test-covered.** There is no production caller of
-`engine.salinity.salinity_field` anywhere in `backend/tidescout/` — verified by grep; the only
-matches are two comments. So the constraint spec §4b calls decisive ("if the calibration fits
-against smoothed discharge and the runtime path passes raw same-day discharge, the fitted
-parameters do not apply and nothing will error") currently rests on a **module note** in
-`engine/salinity.py`, not on a test. That note is explicit about it, and this report does not
+`engine.salinity.salinity_field` anywhere in `backend/tidescout/` — verified by grep:
+`grep -rn salinity_field backend/tidescout/` returns four matches (the function's own definition
+in `engine/salinity.py`, two module comments naming it, and `cli.py:358`'s `salinity_field` CLI
+command — a same-named but unrelated command that builds its distance field via
+`pipeline.estuary.build_distance_field` and never calls this function) — none of the four is a
+production call site, so the substantive claim holds. The constraint spec §4b calls decisive
+("if the calibration fits against smoothed discharge and the runtime path passes raw same-day
+discharge, the fitted parameters do not apply and nothing will error") currently rests on a
+**module note** in `engine/salinity.py`, not on a test. That note is explicit about it, and this report does not
 claim parity between the two paths. Today the exposure is nil because `discharge_memory_days` is
 0.0 everywhere; **the first caller that reads a memory-configured `SalinityConfig` and passes a
 same-day discharge reading will be silently wrong**, and no assertion in this codebase will catch
@@ -566,3 +570,36 @@ additive throughout, as required.
 this task. This report is the gate's entire output. Whether width scaling stays, whether τ is ever
 adopted and at what band, whether the YAML comment in §9.9 is corrected, and whether a depth axis
 is the next plan are the owner's decisions, not this task's.
+
+## Addendum (added 2026-08-25, after `8079990`)
+
+This report was written and pinned at `c02a04d`, and everything above is left as written — its
+measurements, tables and conclusions are unchanged. Two things happened on this same branch
+immediately afterward, before a separate whole-branch review closed out further prose findings
+(including the ones below); a reader merging this branch should take the following as current,
+not §9.9, §10's diff-stat line, or the Appendix's "Status" line above:
+
+* **Finding 9 (§9.9) is closed.** Commit `8079990`, the very next commit on this branch, replaced
+  the pre-registered "2.96 to 0.55" figure in `fisheries/winyah-bay.yaml`'s `front_width_km`
+  comment with this gate's own measurement (3.0087 → 0.3070) and an explicit note distinguishing
+  it from the superseded pre-registration it replaced. §9's point 9, and §10's "**Not corrected
+  here**" / "Flagged for whoever takes the next plan" language, describe a state that no longer
+  holds — read them as history of what this task found, not as an open to-do.
+* **§10's diff-stat line is stale.** §10 states the YAML diff against `16609ce` is "20 insertions,
+  5 deletions." That was accurate at `c02a04d`. `8079990` grew it to 35 insertions, 5 deletions
+  (comment-only, per that commit's own message). A subsequent editing pass — closing this same
+  branch's whole-branch review, including a companion finding that several OTHER pre-registered
+  figures in this same YAML comment block and in `engine/salinity.py` had likewise shipped as
+  measurements — added further comment-only clarifications, bringing it to **40 insertions, 5
+  deletions** as of this addendum. Every value in the `salinity:` block remains byte-identical to
+  `16609ce` throughout, each time reverified by `yaml.safe_load` equality rather than by eyeballing
+  the diff.
+* **The Appendix's "Status: no code change was needed to produce this report" line** is true of
+  what THIS task produced at `c02a04d` and is not rewritten above. It should not be read as a
+  claim that the files it lists are still byte-identical to that commit: `fisheries/winyah-bay.yaml`
+  has since received the comment-only correction above (and further comment-only corrections to
+  the same block), and `engine/salinity.py` / `models.py` have likewise had stale or
+  pre-registration-as-measurement prose corrected — comments and docstrings only, no behaviour
+  change, `fitted` still False, `discharge_memory_days` still 0.0.
+
+No measurement, table, or conclusion elsewhere in this report is altered by this addendum.

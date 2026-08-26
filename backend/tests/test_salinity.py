@@ -72,13 +72,16 @@ def test_discharge_sensitivity_survives_at_high_water_near_the_mouth():
     Seaward of the mouth (x_eff < 0) the model is already within a fraction
     of a ppt of ocean_ppt regardless of flow, by physical construction
     (marine water is marine water there). Measured 2026-08-25 across a
-    4,525-point (x, phase) grid over the calibration range: 284 points
-    (6.28%) there read a HIGHER discharge as a hair SALTIER instead of
-    fresher, by at most 0.0091 ppt (median 0.0074 ppt), always within
-    0.03 ppt of ocean_ppt. That is a known, BOUNDED consequence of `W`
-    sharing `L`'s exponent (see `_discharge_scale`'s docstring) -- not the
-    bit-identical plateau defect 1 was about, since it is never exactly tied
-    and never material.
+    4,525-point (x, phase) grid over the calibration range, under this
+    module's own `CFG` (`ocean_ppt=34.0`, above) -- the config this test
+    actually runs: 284 points (6.28%) there read a HIGHER discharge as a
+    hair SALTIER instead of fresher, by at most 0.0087 ppt (median 0.0071
+    ppt), always within 0.03 ppt of ocean_ppt. (The point count and
+    percentage are config-invariant; the shipped Winyah config's
+    ocean_ppt=35.5 gives the same count but 0.0091 ppt / 0.0074 ppt.) That is
+    a known, BOUNDED consequence of `W` sharing `L`'s exponent (see
+    `_discharge_scale`'s docstring) -- not the bit-identical plateau defect 1
+    was about, since it is never exactly tied and never material.
 
     The bound below is enforced INSIDE the loop, for every x_eff < 0 point
     this grid visits -- not just at one named coordinate. A single hardcoded
@@ -159,17 +162,23 @@ def test_intrusion_length_shrinks_as_a_power_law_in_discharge():
 # -- Task 1: the front's width scales with discharge -------------------------
 # `L(Q)` ranges 37.14 km -> 1.13 km across the observed 257x discharge span
 # while `front_width_km` was a constant, so the front could not be sharp at
-# high flow and broad at low flow at once. Measured at FIXED distance (so it
-# cannot be confounded with position), the mean residual trended monotonically
-# with flow: -1.33 -> -3.72 ppt at x=16.68 km, +1.33 -> -2.03 at x=19.03 km.
+# high flow and broad at low flow at once. MEASURED (gate report, 2026-08-25,
+# one recipe on one 12,204-row population), at FIXED distance so it cannot be
+# confounded with position: the mean residual trended monotonically with
+# flow, -0.9001 -> -3.3387 ppt at x=16.68 km, +1.8385 -> -1.7403 at x=19.03 km.
 # Making the width carry the same scaling as the length cuts that trend
-# spread from 2.96 to 0.55 ppt.
+# spread from 3.0087 to 0.3070 ppt. (An earlier draft of this banner cited
+# -1.33 -> -3.72, +1.33 -> -2.03, and a spread of 2.96 -> 0.55; those were
+# PRE-REGISTRATIONS on a different, unreproducible population and are
+# superseded by the figures above.)
 
 
 def test_front_width_scales_down_as_discharge_rises():
     """A constant width cannot be sharp at high flow and broad at low flow.
-    Measured consequence of the old form: the residual trended -1.33 -> -3.72
-    ppt across flow quintiles at a FIXED distance."""
+    Measured consequence of the old form (gate report, 2026-08-25): the
+    residual trended -0.9001 -> -3.3387 ppt across flow quintiles at a FIXED
+    distance (x=16.68 km). An earlier draft cited -1.33 -> -3.72, a
+    pre-registration superseded by the figure above."""
     from tidescout.engine.salinity import front_width_at
 
     low = front_width_at(1_000.0, CFG)
@@ -788,14 +797,6 @@ def test_composite_discharge_is_empty_when_a_gauge_never_reports():
     sites = [r.usgs_site for r in fishery.rivers]
     daily = {sites[0]: [(date(2026, 5, 1), 3000.0)]}
     assert salinity_fit.composite_discharge_by_day(fishery, daily) == {}
-
-
-def test_pair_daily_means_keeps_only_days_with_a_discharge():
-    d1, d2 = date(2026, 5, 1), date(2026, 5, 2)
-    obs = salinity_fit.pair_daily_means(
-        {"A": [(d1, 4.0), (d2, 5.0)]}, {d1: 3800.0}, {"A": 31.57}
-    )
-    assert obs == [(31.57, 3800.0, 4.0)]
 
 
 def test_daily_swings_drops_partial_days():

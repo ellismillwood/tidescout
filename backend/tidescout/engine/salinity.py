@@ -14,9 +14,13 @@ three discharge values spanning 2,774-6,292 cfs, while the observed record runs
 W0 = `front_width_km`, the front's width AT THE REFERENCE DISCHARGE Q0. L and
 W read the SAME exponent (`_discharge_scale`) so the front's shape stays
 coherent across discharge -- see that function's docstring for why: a
-constant W could not be sharp at high flow and broad at low flow at once,
-which real-data residuals at fixed distance showed trending -1.33 -> -3.72
-ppt (x=16.68 km) and +1.33 -> -2.03 ppt (x=19.03 km) across flow quintiles.
+constant W could not be sharp at high flow and broad at low flow at once.
+MEASURED (gate report, 2026-08-25, one recipe on one 12,204-row population):
+real-data residuals at fixed distance trended -0.9001 -> -3.3387 ppt
+(x=16.68 km) and +1.8385 -> -1.7403 ppt (x=19.03 km) across flow quintiles.
+An earlier draft of this docstring cited -1.33 -> -3.72 and +1.33 -> -2.03;
+those were PRE-REGISTRATIONS on a different, unreproducible population and
+are superseded by the figures above.
 
 A first version of this model used a clipped exponential --
 S = S_ocean * exp(-max(0, x_eff) / L) -- and a real-data review caught two
@@ -54,10 +58,13 @@ and the whole field read exactly ocean_ppt regardless of the exact
 about, just relocated to where this model never claimed to be trustworthy.
 Now W scales by the SAME factor as L (`_discharge_scale`), so the two grow
 together at the floor (W -> ~77 km alongside L -> ~278 km, with the defaults
-below) and that specific tie is gone: verified at cfs=1 across x in
-[0, 40] km, the field now reads 33.80-33.98 ppt -- close to, but never
-bit-identical to, ocean_ppt. Every discharge this low is still flagged
-`extrapolated=True` regardless of which form is in play.
+below) and that specific tie is gone: verified at cfs=1 across x in [0, 40]
+km at every quarter phase (4,001 x 4 points), the field reads 33.9144-
+33.9788 ppt under `SalinityConfig()`'s own defaults (`ocean_ppt` 34.0) and
+35.4107-35.4779 ppt under the shipped Winyah config (`ocean_ppt` 35.5) --
+close to, but with ZERO exact ties to, ocean_ppt in either case. Every
+discharge this low is still flagged `extrapolated=True` regardless of which
+form is in play.
 
 L (WHERE the front sits) is independent of W (HOW SHARP it is), so
 satisfying the head's near-fresh condition no longer has to fight the
@@ -281,10 +288,13 @@ def _discharge_scale(cfs: float, cfg: SalinityConfig) -> float:
     independent: `L` scaled with discharge while `front_width_km` was a
     constant, and that mismatch was the model's largest systematic error.
     Measured 2026-08-25 at FIXED distance, so it cannot be confounded with
-    position: the mean residual ran -1.33 -> -3.72 ppt across flow quintiles
-    at x=16.68 km and +1.33 -> -2.03 at x=19.03, because `L` collapses
-    37.14 -> 1.13 km across the observed 257x discharge span while the width
-    did not move at all.
+    position (gate report, 2026-08-25, one recipe on one 12,204-row
+    population): the mean residual ran -0.9001 -> -3.3387 ppt across flow
+    quintiles at x=16.68 km and +1.8385 -> -1.7403 at x=19.03, because `L`
+    collapses 37.14 -> 1.13 km across the observed 257x discharge span while
+    the width did not move at all. (An earlier draft cited -1.33 -> -3.72
+    and +1.33 -> -2.03; those were PRE-REGISTRATIONS on a different,
+    unreproducible population, now superseded by the figures above.)
 
     Keeping it in one function is not tidiness. If a later change gave these
     two different exponents or different floors, the front's shape would stop
@@ -315,9 +325,13 @@ def intrusion_length_km(cfs: float, cfg: SalinityConfig) -> float:
     caps L at ~277.9 km, an order of magnitude past L at either end of
     `calibration_range_cfs` (~26.5 km at 1,232 cfs, ~10.1 km at 22,996 cfs).
     That is a guard against the power law blowing up at Q=0, not a physical
-    property of the estuary -- and that gap is exactly what saturates
-    `salinity_at`'s tanh outside the calibration range (see the module
-    docstring); it is not sized to keep L "reasonable" in any absolute sense.
+    property of the estuary -- and it is not sized to keep L "reasonable" in
+    any absolute sense. Before this task, that gap alone was exactly what
+    saturated `salinity_at`'s tanh outside the calibration range. Now that
+    `front_width_at` scales by the SAME factor (`_discharge_scale`), W grows
+    alongside L at the floor and that specific saturation is GONE (see the
+    module docstring) -- this floor no longer, on its own, drives the tanh
+    to a plateau.
     """
     return cfg.l0_km * _discharge_scale(cfs, cfg)
 
