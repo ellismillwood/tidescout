@@ -452,7 +452,22 @@ salinity:
   # measured at FIXED distance (so it can't be confounded with position)
   # trended -1.33->-3.72 ppt at x=16.68 km and +1.33->-2.03 ppt at x=19.03 km
   # across flow quintiles as a result. Scaling the width the same way cuts
-  # that trend spread from 2.96 to 0.55 ppt.
+  # that trend spread from 3.0087 to 0.3070 ppt -- an 89.8% reduction, and
+  # the single largest systematic improvement this model has had.
+  #
+  # Those two figures are MEASURED (gate report, 2026-08-25: per-station flow
+  # quintiles at x=16.68 and x=19.03 km, trend = highest-quintile mean minus
+  # lowest-quintile mean, spread = mean of the two absolute trends, both forms
+  # scored through one code path on one 12,204-row population). An earlier
+  # draft of this comment claimed "2.96 to 0.55", which were PRE-REGISTRATIONS
+  # computed by a method that could not be reproduced -- the spec's own
+  # quintile table averages 2.875, not 2.96 -- on a different population of
+  # 11,688 rows. Direction and rough size held; the numbers did not.
+  #
+  # The same gate found this width change does essentially ALL of the
+  # flattening on its own. Adding a discharge-memory window on top moves the
+  # spread the wrong way (0.4229), while still cutting rmse 12.5%. Memory is
+  # NOT enabled here -- see discharge_memory_days, which stays 0.0.
   #
   # 5.0 km itself is UNCHANGED and still sized the old way, not refitted:
   # swept 3-8 km against the real 587,325-cell distance field and picked the
