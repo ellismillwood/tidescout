@@ -517,6 +517,18 @@ class SpeciesProfile(BaseModel):
     `HourlyConditions` attribute -- Task 4 reads it on its own path. `season`
     has no curve at all: months are discrete, so its response lives entirely
     in `months`.
+
+    `structure_weight` is a SIBLING of `weights`, not a member of it.
+    `test_every_species_covers_every_factor` requires `weights` to equal
+    `FACTORS` exactly, and `FACTORS` is pinned to the nine hourly factors --
+    putting "structure" inside `weights` would need a matching `FACTORS`
+    entry, which would make `score_factors` emit a TENTH sub-score for every
+    fishery-wide hour and break `test_all_nine_factors_are_always_present`.
+    `structure` only ever applies at the per-FEATURE boundary
+    (`engine.score.score_feature`), never the hourly one, so it gets its own
+    field instead -- still authored per species, in YAML, exactly like every
+    other weight, just outside the set that has to sum to nine (2026-08-26
+    review, Important 2).
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -525,6 +537,7 @@ class SpeciesProfile(BaseModel):
     curves: dict[str, Curve]
     salinity: Curve
     months: dict[int, float]
+    structure_weight: float
 
     @model_validator(mode="after")
     def _weights_are_non_negative(self):
@@ -539,9 +552,16 @@ class SpeciesProfile(BaseModel):
         factor.
 
         Zero is allowed: spec section 8 calls solunar "zeroable", and a zero
-        weight correctly drops a factor out of the mean.
+        weight correctly drops a factor out of the mean. `structure_weight`
+        is checked alongside `weights` for the same reason even though it
+        lives outside that dict: it feeds the exact same geometric mean,
+        inside `score_feature` rather than `score_factors`, and a negative
+        value would push a feature's structure signal the wrong way exactly
+        as a negative `weights` entry would push an hourly one.
         """
         bad = {k: v for k, v in self.weights.items() if v < 0.0}
+        if self.structure_weight < 0.0:
+            bad["structure_weight"] = self.structure_weight
         if bad:
             raise ValueError(f"species weights must be >= 0, got {bad}")
         return self

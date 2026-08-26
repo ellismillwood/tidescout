@@ -10,6 +10,7 @@ from tidescout.config import load_species
 from tidescout.engine.activation import FeatureMetrics
 from tidescout.engine.conditions import HourlyConditions
 from tidescout.engine.score import FACTORS, SubScore, combine, score_factors, score_feature
+from tidescout.models import StructureThresholds
 
 
 def _hour(**kw):
@@ -457,34 +458,167 @@ def _metrics(**kw):
         # Required on FeatureMetrics and NOT optional -- omitting it is a
         # TypeError, not a default. Added to the dataclass after this plan was
         # written. 0.0 is the neutral value (no wet disc cell classifies as an
-        # eddy) and nothing in this task's scoring reads it: the structure
-        # sub-score is built from ambush, okubo_w and convergence.
+        # eddy).
         eddy_share=0.0,
     )
     return FeatureMetrics(**{**base, **kw})
 
 
+_T = StructureThresholds()  # the class defaults; `score_feature` requires this argument.
+
+
+def _full_hour(**kw):
+    """An hour with EVERY factor's INPUT live -- unlike `_hour()` above,
+    which deliberately carries only a timestamp so the sparse-input tests in
+    this file can isolate one factor at a time.
+
+    `score_feature`'s tests need the OPPOSITE (2026-08-26 review, Important
+    1): the original version of the headline salinity test ran on a plain
+    `_hour()`, under which 6 of 9 factors come back missing and `confidence`
+    lands at 0.38-0.40. Excluding 6 factors doesn't just shrink the sample --
+    it RENORMALISES the remaining weights over a much smaller total, so
+    salinity's share of the geometric mean roughly triples versus what it is
+    on a real, fully-observed hour. That inflated share is what let the
+    original test pass; on a fully-populated hour the same assertion fails
+    (measured below). Every field here is live, so `confidence` is 1.0 and
+    every factor counts at its AUTHORED weight, not an inflated one.
+    """
+    from datetime import datetime
+    from zoneinfo import ZoneInfo
+
+    base = dict(
+        time=datetime(2026, 10, 15, 15, 0, tzinfo=ZoneInfo("America/New_York")),
+        air_temp_f=78.0, wind_speed_kn=8.0, wind_dir_deg=180.0, wind_gust_kn=12.0,
+        pressure_mb=1015.0, pressure_trend_mb_3h=-0.8, cloud_cover_pct=30.0,
+        precip_in=0.0, tide_height_ft=2.8, tide_phase="rising", tide_frac=0.4,
+        current_speed_kn=None, current_dir_deg=90.0,
+    )
+    return HourlyConditions(**{**base, **kw})
+
+
+def _full_day():
+    """A `day` with `.sun`, `.solunar` and `.water` all populated, paired
+    with `_full_hour`.
+
+    A `SimpleNamespace`, not a real `DayConditions`: `score_factors` only
+    ever reads these three attributes off `day`, via `getattr`, so a real
+    `DayConditions` (with the `discharge`/`missing`/`hours` machinery Task 7
+    needs) would be scaffolding this task has no use for -- the same idiom
+    `test_light_reason_quotes_the_cloud_widened_value_actually_scored`
+    already uses above, just with `solunar` and `water` filled in too instead
+    of left empty/None.
+    """
+    from datetime import datetime
+    from types import SimpleNamespace
+    from zoneinfo import ZoneInfo
+
+    from tidescout.sources.astronomy import SolunarPeriod, SunTimes
+    from tidescout.sources.usgs import WaterSummary
+
+    tz = ZoneInfo("America/New_York")
+    d = datetime(2026, 10, 15, tzinfo=tz)
+    return SimpleNamespace(
+        sun=SunTimes(dawn=d.replace(hour=6, minute=30), sunrise=d.replace(hour=7),
+                    sunset=d.replace(hour=18, minute=45),
+                    dusk=d.replace(hour=19, minute=15)),
+        solunar=[SolunarPeriod(kind="major", start=d.replace(hour=14),
+                               end=d.replace(hour=16))],
+        water=WaterSummary(temp_f=71.0, temp_trend_f_3d=-0.5,
+                          salinity_ppt=None, source="synthetic"),
+    )
+
+
 def test_the_same_feature_scores_lower_in_fresh_water_for_trout():
-    """Spec section 7: 'the same eddy scores near zero up-bay after a freshet
-    and lights up 5 miles down-bay'."""
+    """Spec section 7's actual, owner-ratified requirement (2026-08-26
+    review): salinity moves a feature's activation DIRECTIONALLY, by a
+    margin that holds species by species -- NOT the literal multiplier spec
+    section 7's prose also describes, which the owner rejected because it
+    hands one still-uncalibrated factor veto power over the whole map
+    (Winyah's `fitted=False`). Spec section 8 lists salinity as factor 8 of
+    nine, weighted like the others, and that is the design this asserts.
+
+    Runs on `_full_hour()`/`_full_day()`, not the sparse `_hour()`: see
+    `_full_hour`'s docstring for why a sparse fixture inflates salinity's
+    share and makes this test pass for the wrong reason. Measured directly
+    against the shipped code 2026-08-26, fresh (1 ppt) vs salty (22 ppt),
+    same eddy (`_metrics()`'s defaults), same hour, same day:
+
+        trout:     salty 84, fresh 61  (ratio 0.73)
+        flounder:  salty 82, fresh 73  (ratio 0.89)
+        redfish:   salty 86, fresh 82  (ratio 0.95) -- "broadly tolerant"
+
+    Trout moves the most (spec section 7: "~10-30 ppt, avoid near-fresh"),
+    flounder moves less but still down, and redfish is nearly flat, which
+    spec section 7 calls out by name rather than treating as a bug -- so
+    this pins that near-flatness too, rather than only the two species that
+    move.
+    """
     trout = load_species()["speckled_trout"]
-    salty = score_feature(_metrics(), _hour(), None, trout, salinity=_sal(22.0))
-    fresh = score_feature(_metrics(), _hour(), None, trout, salinity=_sal(1.0))
-    assert fresh.activation < salty.activation / 2
+    flounder = load_species()["southern_flounder"]
+    red = load_species()["redfish"]
+
+    def scores(profile):
+        salty = score_feature(_metrics(), _full_hour(), _full_day(), profile,
+                              salinity=_sal(22.0), thresholds=_T)
+        fresh = score_feature(_metrics(), _full_hour(), _full_day(), profile,
+                              salinity=_sal(1.0), thresholds=_T)
+        return salty.activation, fresh.activation
+
+    trout_salty, trout_fresh = scores(trout)
+    flounder_salty, flounder_fresh = scores(flounder)
+    red_salty, red_fresh = scores(red)
+
+    # Directional and by a real margin for the two salinity-sensitive species.
+    assert trout_fresh < trout_salty - 15, (trout_fresh, trout_salty)
+    assert flounder_fresh < flounder_salty - 5, (flounder_fresh, flounder_salty)
+    # Trout is the sharper of the two (spec section 7 singles it out).
+    trout_drop = trout_salty - trout_fresh
+    flounder_drop = flounder_salty - flounder_fresh
+    assert trout_drop > flounder_drop, (trout_drop, flounder_drop)
+    # Redfish is "broadly tolerant": present, not absent, but small.
+    assert 0 <= red_salty - red_fresh < 10, (red_salty, red_fresh)
 
 
 def test_a_strong_ambush_pocket_outscores_featureless_water():
     red = load_species()["redfish"]
-    strong = score_feature(_metrics(ambush=0.9), _hour(), None, red, salinity=_sal(18.0))
-    weak = score_feature(_metrics(ambush=0.0), _hour(), None, red, salinity=_sal(18.0))
+    strong = score_feature(_metrics(ambush=0.9), _hour(), None, red,
+                           salinity=_sal(18.0), thresholds=_T)
+    weak = score_feature(_metrics(ambush=0.0), _hour(), None, red,
+                         salinity=_sal(18.0), thresholds=_T)
     assert strong.activation > weak.activation
+
+
+def test_a_strong_eddy_share_reading_registers_as_structure():
+    """2026-08-26 review, Finding 3: `eddy_share` is Phase 1's DEDICATED eddy
+    channel -- "the eddy channel that leaves `okubo_w` alone", per
+    `FeatureMetrics`'s own docstring -- because `okubo_w` is MAX-reduced per
+    feature and structurally cannot report an eddy (of 13,614 real
+    per-feature samples measured over the whole winyah-bay library, the most
+    negative is -8.8e-7, ten times inside the quiet band -- floating-point
+    residue, not a rotation). Spec section 7's headline object IS an eddy,
+    so this pins that a strong `eddy_share` reading actually moves the
+    structure sub-score, with every OTHER structural signal held quiet --
+    the case the PREVIOUS version of `_structure_subscore` (deriving "eddy"
+    from negative `okubo_w` instead) could not recognise at all.
+    """
+    red = load_species()["redfish"]
+    quiet = _metrics(ambush=0.0, okubo_w=0.0, convergence=0.0, eddy_share=0.0)
+    eddying = _metrics(ambush=0.0, okubo_w=0.0, convergence=0.0, eddy_share=0.2)
+    no_eddy = score_feature(quiet, _hour(), None, red, salinity=_sal(18.0), thresholds=_T)
+    has_eddy = score_feature(eddying, _hour(), None, red, salinity=_sal(18.0), thresholds=_T)
+    no_eddy_structure = _by_factor(no_eddy.subs)["structure"]
+    has_eddy_structure = _by_factor(has_eddy.subs)["structure"]
+    assert "eddy" in has_eddy_structure.reason
+    assert has_eddy_structure.value > no_eddy_structure.value
+    assert has_eddy.activation > no_eddy.activation
 
 
 def test_a_feature_outside_the_domain_scores_zero_with_an_explanation():
     """n_cells == 0 means the feature has no library cells; it must not be
     silently scored on NaN metrics."""
     red = load_species()["redfish"]
-    out = score_feature(_metrics(n_cells=0), _hour(), None, red, salinity=_sal(18.0))
+    out = score_feature(_metrics(n_cells=0), _hour(), None, red,
+                        salinity=_sal(18.0), thresholds=_T)
     assert out.activation == 0
     assert "outside" in out.reason.lower() or "no cells" in out.reason.lower()
 
@@ -493,16 +627,65 @@ def test_activation_carries_the_feature_key_unchanged():
     """The frontend keys markers off this; Phase 1 Task 8 made it stable."""
     red = load_species()["redfish"]
     got = score_feature(_metrics(key="bar-9f2c1a7b4e05"), _hour(), None, red,
-                        salinity=_sal(18.0))
+                        salinity=_sal(18.0), thresholds=_T)
     assert got.key == "bar-9f2c1a7b4e05"
 
 
 def test_a_dry_flat_scores_zero_however_good_the_conditions():
-    """You cannot fish a flat that has no water on it."""
+    """You cannot fish a flat that has no water on it, at any hour --
+    `wet_fraction <= 0.0` gates to zero regardless of the tide."""
     red = load_species()["redfish"]
     dry = score_feature(_metrics(type="flat", wet_fraction=0.0, speed=0.0),
-                        _hour(), None, red, salinity=_sal(18.0))
+                        _hour(), None, red, salinity=_sal(18.0), thresholds=_T)
     assert dry.activation < 10
+
+
+def test_a_partly_wet_flat_scores_full_at_high_tide_and_zero_at_low():
+    """2026-08-26 review, Finding 4: the case that ACTUALLY happens to most
+    real flats (median shipped `wet_fraction` 0.735) was untested -- only the
+    always-dry edge case (`wet_fraction == 0.0`, which no real flat hits;
+    the shipped minimum is 0.143) was pinned. A flat with a partial
+    `wet_fraction` must score near its full, un-gated activation at an hour
+    when it IS flooded, and near zero at an hour when it is NOT -- not a
+    fixed haircut applied at every hour alike.
+
+    `flood_phase=0.2` means this flat's wet window opens at tide fraction
+    0.2 (just past low water, still on the flood) and, with
+    `wet_fraction=0.6`, closes at (0.2 + 0.6) % 1.0 = 0.8. tide_frac/
+    tide_phase are chosen so `_recombine_tide_frac` lands well inside that
+    window for "flooded" (full=0.5, high water) and well outside it for
+    "dry" (full=0.05, just past low water).
+
+    "Full" is checked against a CONTROL with the identical metrics but
+    `type="dropoff"` instead of `"flat"` -- so it is never gated at all --
+    scored at the SAME flooded hour, rather than against some other
+    plausible-looking number: the flat multiplier at a flooded hour is
+    exactly 1.0, so a flat and a non-flat with otherwise identical inputs
+    must land on the identical activation. A comparison against the cycle
+    average (`wet_fraction` alone, no tide reading) was tried first and
+    rejected -- 0.6 vs the true per-hour 1.0 differ by exactly enough to
+    make that comparison assert nothing useful.
+    """
+    import dataclasses
+
+    red = load_species()["redfish"]
+    metrics = _metrics(type="flat", wet_fraction=0.6, flood_phase=0.2)
+    control = dataclasses.replace(metrics, type="dropoff")
+
+    flooded_hour = _hour(tide_frac=1.0, tide_phase="rising")
+    dry_hour = _hour(tide_frac=0.1, tide_phase="rising")
+    # tide_frac=1.0 rising -> full = 1.0/2 = 0.5 (high water) -- inside
+    # [0.2, 0.8). tide_frac=0.1 rising -> full = 0.05 -- outside it.
+
+    flooded = score_feature(metrics, flooded_hour, None, red,
+                            salinity=_sal(18.0), thresholds=_T)
+    dry = score_feature(metrics, dry_hour, None, red, salinity=_sal(18.0), thresholds=_T)
+    unrestricted = score_feature(control, flooded_hour, None, red,
+                                 salinity=_sal(18.0), thresholds=_T)
+
+    assert dry.activation < 5
+    assert flooded.activation > dry.activation + 30
+    assert flooded.activation == unrestricted.activation
 
 
 def test_a_features_flow_comes_from_its_own_metrics_not_a_bay_wide_default():
@@ -515,8 +698,10 @@ def test_a_features_flow_comes_from_its_own_metrics_not_a_bay_wide_default():
     but the wrong SOURCE entirely.
     """
     red = load_species()["redfish"]
-    slack = score_feature(_metrics(speed=0.01), _hour(), None, red, salinity=_sal(18.0))
-    ripping = score_feature(_metrics(speed=1.2), _hour(), None, red, salinity=_sal(18.0))
+    slack = score_feature(_metrics(speed=0.01), _hour(), None, red,
+                          salinity=_sal(18.0), thresholds=_T)
+    ripping = score_feature(_metrics(speed=1.2), _hour(), None, red,
+                            salinity=_sal(18.0), thresholds=_T)
     slack_flow = _by_factor(slack.subs)["flow"]
     ripping_flow = _by_factor(ripping.subs)["flow"]
     assert slack_flow.missing is False and ripping_flow.missing is False
@@ -531,25 +716,40 @@ def test_an_uncalibrated_salinity_still_flags_a_feature_as_provisional():
     feature boundary, not just the hourly one: the map cannot quietly show an
     unconstrained per-feature number as a confident one. Winyah's salinity
     model is `fitted=False` -- the default `_sal()` produces -- so this is
-    the path that actually runs in production."""
+    the path that actually runs in production. Checks BOTH the structured
+    `FeatureActivation.provisional` field (2026-08-26 review, Finding 5 --
+    it used to survive only as prose) and the sub-score it names.
+
+    Runs on `_full_hour()`/`_full_day()`, not the sparse `_hour()`: with
+    only a timestamp set, 6 of 9 factors come back missing, `confidence`
+    lands around 0.38, and "nothing was EXCLUDED, only flagged" would not
+    actually be true of the fixture -- the same degenerate-fixture trap
+    `_full_hour`'s docstring describes for the headline salinity test.
+    """
     red = load_species()["redfish"]
-    got = score_feature(_metrics(), _hour(), None, red, salinity=_sal(18.0))
+    got = score_feature(_metrics(), _full_hour(), _full_day(), red,
+                        salinity=_sal(18.0), thresholds=_T)
     salinity_sub = _by_factor(got.subs)["salinity"]
     assert salinity_sub.missing is False
     assert salinity_sub.provisional is True
     assert "UNCALIBRATED" in salinity_sub.reason
+    assert got.provisional == ["salinity"]
+    assert got.confidence == pytest.approx(1.0), "nothing was EXCLUDED, only flagged"
+    assert got.constrained_share < 1.0
     assert "provisional" in got.reason.lower()
 
 
 def test_a_feature_with_no_finite_structure_sample_is_missing_not_zero():
-    """`sample_features` can leave ambush/okubo_w/convergence all NaN even
-    with `n_cells > 0` -- an entirely dry disc, for instance. That must read
-    as missing data, never as a silently-computed zero."""
+    """`sample_features` can leave ambush/okubo_w/eddy_share/convergence all
+    NaN even with `n_cells > 0` -- an entirely dry disc, for instance. That
+    must read as missing data, never as a silently-computed zero."""
     red = load_species()["redfish"]
     got = score_feature(
-        _metrics(ambush=float("nan"), okubo_w=float("nan"), convergence=float("nan")),
-        _hour(), None, red, salinity=_sal(18.0),
+        _metrics(ambush=float("nan"), okubo_w=float("nan"), eddy_share=float("nan"),
+                 convergence=float("nan")),
+        _hour(), None, red, salinity=_sal(18.0), thresholds=_T,
     )
     structure_sub = _by_factor(got.subs)["structure"]
     assert structure_sub.missing is True
     assert math.isnan(structure_sub.value)
+    assert "structure" in got.excluded

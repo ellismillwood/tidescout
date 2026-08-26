@@ -172,11 +172,30 @@ def test_a_negative_weight_is_rejected_rather_than_inverting_a_factor():
 
     good = dict(
         curves={}, salinity=Curve(x=[0.0, 1.0], y=[0.0, 1.0]),
-        months=dict.fromkeys(range(1, 13), 1.0),
+        months=dict.fromkeys(range(1, 13), 1.0), structure_weight=0.2,
     )
     SpeciesProfile(weights={"flow": 0.0}, **good)          # zero is fine
     with pytest.raises(ValidationError, match="must be >= 0"):
         SpeciesProfile(weights={"flow": -0.5}, **good)
+
+
+def test_a_negative_structure_weight_is_rejected_too():
+    """`structure_weight` lives OUTSIDE `weights` (2026-08-26 review,
+    Important 2: it cannot join `weights` without breaking `FACTORS`'s
+    nine-factor pin), so it needs its own guard rather than inheriting the
+    one above by accident. Without this, a validator that only ever looked
+    at `self.weights` would silently let a negative `structure_weight`
+    through -- the discriminating half of the check just above.
+    """
+    from tidescout.models import Curve, SpeciesProfile
+
+    good = dict(
+        weights={"flow": 0.0}, curves={}, salinity=Curve(x=[0.0, 1.0], y=[0.0, 1.0]),
+        months=dict.fromkeys(range(1, 13), 1.0),
+    )
+    SpeciesProfile(structure_weight=0.0, **good)          # zero is fine here too
+    with pytest.raises(ValidationError, match="must be >= 0"):
+        SpeciesProfile(structure_weight=-0.2, **good)
 
 
 def test_every_month_has_a_season_modifier():
