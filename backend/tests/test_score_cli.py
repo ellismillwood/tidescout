@@ -87,3 +87,31 @@ def test_score_cli_prints_the_reason_text_not_just_the_number(monkeypatch):
     result = _run(monkeypatch)
     assert result.exit_code == 0, result.exception or result.stdout
     assert "flow 0.04 m/s — slack" in result.stdout
+
+
+def test_score_cli_validates_species_before_building_the_payload(monkeypatch):
+    """2026-08-26 review, Minor 12: `--species` used to be checked only
+    AFTER `build_payload` returned, so a typo cost a full real scoring run
+    (~70s) before failing. `load_species()` -- the same source `build_
+    payload` uses internally to populate `payload["species"]`'s keys -- is
+    now checked first. `build_payload` is stubbed to raise if it is EVER
+    called, so this fails loudly if the bad `--species` value ever reaches
+    it rather than being caught before.
+    """
+    import tidescout.pipeline.payload as payload_module
+
+    def _must_not_run(*a, **k):
+        raise AssertionError("build_payload must not run for an invalid --species")
+
+    monkeypatch.setattr(payload_module, "build_payload", _must_not_run)
+    result = runner.invoke(
+        app,
+        ["score", "winyah-bay", "2026-08-16", "--species", "nonexistent-species"],
+        env=WIDE,
+    )
+    # A BadParameter is a click UsageError (exit code 2) with the message in
+    # the output; an uncaught AssertionError from the stub above (meaning
+    # build_payload DID run) would instead exit 1 with a traceback -- these
+    # two failure modes are deliberately distinguishable.
+    assert result.exit_code == 2, (result.exit_code, result.exception, result.stdout)
+    assert "species must be one of" in result.output

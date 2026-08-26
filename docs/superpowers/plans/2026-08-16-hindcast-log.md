@@ -9,43 +9,95 @@ Filling `actual` with plausible-looking guesses would mean every future
 weight is tuned against fiction while the tuning looks rigorous -- do not
 do this, ever, to this file.
 
-**This is the third generation of this log (2026-08-26).** The first had
-two problems: its three dates were in the future (Ellis cannot report
-`actual` for a day that has not happened), and its discharge was
-day-blind (every row read today's live gauge regardless of the date
-named). The second fixed both, on real past dates with genuinely different
-discharge -- but its water temperature and salinity were STILL day-blind,
-which this generation fixes. Every input this log's three dates depend on
--- weather, tides, currents, sun, moon, solunar, discharge, water
-temperature, and the bay-wide salinity fallback -- now reads that
-SPECIFIC date, not "now".
+**This is the fourth generation of this log (2026-08-26, whole-branch
+review).** The first had two problems: its three dates were in the future
+(Ellis cannot report `actual` for a day that has not happened), and its
+discharge was day-blind (every row read today's live gauge regardless of
+the date named). The second fixed both, on real past dates with genuinely
+different discharge. The third closed the same day-blindness in water
+temperature and the bay-wide salinity fallback. **This regeneration fixes
+two further defects the review found, both of which change every number
+below:**
+
+- **Important 1 (out-of-domain gauge mislabelled MEASURED).** Station
+  021108125 -- the gauge behind every "salinity 0.0 ppt" reading in the
+  previous generation -- sits 9,498 m outside the model domain (see
+  `fisheries/winyah-bay.yaml`'s water-station comments), snapped to the
+  along-estuary distance field's own extreme fresh end. `payload.
+  _bay_salinity_reading` labelled it `MEASURED` anyway, which made
+  `constrained_share = 1.00` on every row below regardless of species --
+  the exact case the "Read `constrained_share`" section used to (wrongly)
+  say could not happen from a live-reporting gauge. `WaterSensor.in_domain`
+  (now `false` for this station) makes the payload fall through to the
+  spatial MODELLED estimate instead, carrying the existing `fitted`/
+  `extrapolated` disclosure machinery. Salinity numbers below are
+  therefore genuinely different from the third generation, not just
+  relabelled -- see "Salinity is now the model, not the gauge" below.
+- **Important 3 (wrong limiting factors on one row).** The previous
+  generation's southern_flounder / 2026-07-28 row printed "salinity 0.20;
+  light 0.58" as the two lowest sub-scores at the 13:00 peak. The true
+  three lowest, confirmed by direct measurement against that row's own
+  scored hour, are salinity 0.20, **water_temp 0.47**, light 0.58 -- index
+  1 of the ascending-sorted list (water_temp, weight 1.0 for flounder) was
+  skipped in favour of index 2 (light, weight 0.5), an off-by-one in
+  whatever selected that row's factors. The other eight rows were
+  independently confirmed correct at generation time. Rather than patch
+  one row inside a table whose selection rule already varied between "2"
+  and "3" factors per row with no stated criterion for which, this
+  regeneration adopts one fixed, unambiguous rule for every row: **always
+  the three lowest-value sub-scores, ascending, ties broken by list
+  order** -- a rule an off-by-one has no room to hide in.
+
+Every input this log's three dates depend on -- weather, tides, currents,
+sun, moon, solunar, discharge, water temperature, and salinity (now
+correctly resolved to the spatial model, not a mislabelled gauge) -- reads
+that SPECIFIC date, not "now".
 
 ## Read `constrained_share` before trusting a row
 
 `constrained_share < 1.0` on a row means the salinity factor THAT hour
 rests on `engine.salinity`'s uncalibrated model (`fitted: false` in
 `fisheries/winyah-bay.yaml` -- Winyah's live, permanent state) rather than
-an observation. All nine rows below read `constrained_share = 1.00`,
-because each date's USGS gauge (021108125) reported a real salinity value
-that day (all three happen to read 0.0 ppt -- a genuinely near-fresh tidal
-reach on every one of these three dates) and `build_payload` prefers a
-real sensor reading over the model whenever one exists. **A stale/dark
-salinity gauge is NOT what would flip this** -- `usgs.water_summary` never
-returns `salinity_ppt=None`; a gauge that stops reporting SALINITY
-specifically falls back to a monthly climatology GUESS while `source`
-stays labelled by whichever sensor (if any) still reports TEMPERATURE, and
-`payload._bay_salinity_reading` treats that fallback as MEASURED too
-unless `source` itself reads `"climatology"`. The actual trigger is
-narrower: `water` failing entirely (the whole USGS water fetch errors out)
-or EVERY configured sensor's TEMPERATURE series going dark at once (so
-`source` itself falls to `"climatology"`). `test_an_uncalibrated_salinity_
-reaches_the_payload_as_provisional` (`backend/tests/test_payload.py`)
-exercises that path directly with a synthetic day, since none of these
-nine rows do. The per-FEATURE numbers behind "top-ranked features" are
-unaffected either way: `score_feature` always uses the spatial model at
-the feature's own along-estuary distance, never the bay-wide sensor value,
-so every map marker's activation rests on the unfitted model regardless of
-what the gauge says.
+an observation. **All nine rows below now read `constrained_share < 1.0`**
+-- unlike the previous generation, where all nine read exactly `1.00`
+because station 021108125's out-of-domain reading was wrongly accepted as
+`MEASURED` (see Important 1 above). With that fixed, no station Winyah
+Bay has ever configured can make `constrained_share` read 1.00 on this
+fishery: every declared USGS salinity sensor is either climatology-graded
+or, now, correctly excluded as out-of-domain, so the bay-wide salinity
+reading always falls through to the uncalibrated spatial model, and
+`fitted: false` keeps it provisional every time. `constrained_share`
+differs slightly BY SPECIES, not by date, because it is a function of each
+species' own relative factor weights (`(total_weight - salinity_weight) /
+total_weight`) and salinity is the only factor provisional on any of these
+rows: 0.92 for redfish (salinity weight 0.5 of 6.3), 0.87 for speckled
+trout (0.9 of 6.4 -- trout weights salinity heaviest of the three, so
+losing it to "provisional" costs the most confidence), 0.91 for southern
+flounder (0.6 of 6.4). `test_an_uncalibrated_salinity_reaches_the_payload_
+as_provisional` (`backend/tests/test_payload.py`) exercises this path with
+a synthetic day; `test_an_out_of_domain_gauge_is_never_labelled_measured`
+(same file) is the test added for Important 1 specifically, proving this
+against a REAL declared Winyah Bay station rather than only a synthetic
+one. The per-FEATURE numbers behind "top-ranked features" are unaffected
+either way and always were: `score_feature` always uses the spatial model
+at the feature's own along-estuary distance, never the bay-wide sensor
+value, so every map marker's activation rested on the unfitted model
+regardless of what the gauge said, in every generation of this log.
+
+## Salinity is now the model, not the gauge
+
+The previous generation's "salinity 0.0 ppt -- near-fresh" on every row
+was a real number from a real, live-reporting station -- it was simply the
+WRONG station's number for the reach being scored (see Important 1 above).
+With the gauge correctly excluded, the bay-wide salinity reading below
+comes from `engine.salinity`'s spatial model evaluated at the domain's
+median along-estuary distance and that hour's tidal phase, and it now
+MOVES with discharge and tide the way the model actually predicts, rather
+than sitting fixed at the gauge's repeated 0.0 ppt. It is still
+UNCALIBRATED (`fitted: false`), so every salinity number below carries
+that caveat in its `reason` and counts toward `provisional`/
+`constrained_share` exactly as any other unfitted model estimate does --
+the number changed, the honesty did not.
 
 ## Every input below is now date-faithful
 
@@ -57,7 +109,7 @@ daily mean (`fetch_daily`, the NWIS `dv` service already used by
 `pipeline.salinity_fit` for calibration) instead of the live instantaneous
 feed.
 
-**Fixed 2026-08-26 (this, third regeneration):** `sources.usgs.water_summary`
+**Fixed 2026-08-26 (third regeneration):** `sources.usgs.water_summary`
 had the identical bug -- water temperature (weight 1.0 for speckled trout
 and southern flounder, joint-highest of the nine factors, 0.8 for redfish)
 and the bay-wide salinity fallback both always read the live 7-day window.
@@ -71,7 +123,10 @@ repeated three times (the earlier all-live version, and the un-rounded
 `temp_f` the two-decimal precision above is pulled from -- the printed
 `reason` string itself rounds to the nearest whole degree, which is why
 07-21 and 07-28 both display as "87F" in the table below despite being
-87.44 and 86.54 underneath).
+87.44 and 86.54 underneath). Water temperature is unaffected by this
+generation's two fixes (Important 1 is salinity-only; Important 3 is
+selection-only) and these three readings are unchanged from the previous
+generation.
 
 `source` stays exactly as honest, and exactly as limited, as it always
 was: it names whichever sensor supplied TEMPERATURE (`usgs:021108125` on
@@ -81,10 +136,10 @@ sensors disagree could still slip a climatology salinity value through
 labelled by a temperature station's name) but is unreachable on Winyah's
 current sensor config -- station 021108125 reports both parameters, tried
 first -- and closing it fully is a `WaterSensor`/`WaterSummary` shape
-change, not a `day`-threading one. Every input this log depends on is now
-correctly date-specific; this one residual gap is about attribution
-labelling on a path that, for Winyah today, always resolves the same
-station for both parameters anyway.
+change, not a `day`-threading one. It is now ALSO the station Important 1
+excludes from `MEASURED` salinity (`in_domain: false`) -- that exclusion is
+about salinity only; this station's TEMPERATURE reading is unaffected and
+still names `source` correctly.
 
 ## How these were produced
 
@@ -96,24 +151,26 @@ tidescout score winyah-bay 2026-07-28   # high discharge, spring tide
 
 All three are real past dates (today is 2026-08-26). Each command scores
 all three species from one `build_payload` call; the table below pulls the
-day's score range, its single highest hour, the TWO OR THREE LOWEST-VALUE
+day's score range, its single highest hour, the THREE LOWEST-VALUE
 sub-scores that hour (under `combine`'s weighted geometric mean, a low
-value -- not a high one -- is what actually constrains the score), and
+value -- not a high one -- is what actually constrains the score; always
+exactly three, not "two or three" -- see Important 3 above for why the
+previous generation's variable count is what let one row go wrong), and
 that hour's own `water_temp` reason string.
 
 ## Predictions
 
 | date | tide regime | discharge (cfs) | bucket | water temp | species | score range (day) | peak hour | peak score | limiting factors at peak (value — reason) | confidence | constrained_share | actual | notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 2026-07-21 | neap | 2,317.94 | low (clamped to `neap_low`) | 87°F (87.44°F) | redfish | 57-70 | 03:00 | 70 | salinity 0.45 — "salinity 0.0 ppt — near-fresh"; flow 0.46 — "flow 0.10 m/s — moving" | 1.00 | 1.00 | | |
-| 2026-07-21 | neap | 2,317.94 | low | 87°F (87.44°F) | speckled_trout | 39-47 | 03:00 | 47 | salinity 0.05 — "salinity 0.0 ppt — near-fresh"; water_temp 0.46 — "water 87F" | 1.00 | 1.00 | | |
-| 2026-07-21 | neap | 2,317.94 | low | 87°F (87.44°F) | southern_flounder | 52-65 | 07:00 | 65 | salinity 0.20 — "salinity 0.0 ppt — near-fresh"; water_temp 0.42 — "water 87F" | 1.00 | 1.00 | | |
-| 2026-08-05 | neap | 4,037.80 | med (`neap_low`/`neap_med` blend) | 83°F (82.76°F) | redfish | 57-70 | 13:00 | 70 | light 0.43 — "4.9 h from twilight, 70% cloud widened it from 6.5 h"; flow 0.45 — "flow 0.10 m/s — slack" | 1.00 | 1.00 | | |
-| 2026-08-05 | neap | 4,037.80 | med | 83°F (82.76°F) | speckled_trout | 41-52 | 19:00 | 52 | salinity 0.05 — "salinity 0.0 ppt — near-fresh"; flow 0.51 — "flow 0.10 m/s — moving"; water_temp 0.69 — "water 83F" | 1.00 | 1.00 | | |
-| 2026-08-05 | neap | 4,037.80 | med | 83°F (82.76°F) | southern_flounder | 56-72 | 19:00 | 72 | salinity 0.20 — "salinity 0.0 ppt — near-fresh"; water_temp 0.66 — "water 83F" | 1.00 | 1.00 | | |
-| 2026-07-28 | spring | 8,853.80 | high (`spring_high`/`spring_freshet` blend) | 87°F (86.54°F) | redfish | 61-77 | 20:00 | 77 | salinity 0.45 — "salinity 0.0 ppt — near-fresh"; flow 0.57 — "flow 0.14 m/s — moving"; water_temp 0.74 — "water 87F" | 1.00 | 1.00 | | |
-| 2026-07-28 | spring | 8,853.80 | high | 87°F (86.54°F) | speckled_trout | 42-53 | 20:00 | 53 | salinity 0.05 — "salinity 0.0 ppt — near-fresh"; water_temp 0.51 — "water 87F" | 1.00 | 1.00 | | |
-| 2026-07-28 | spring | 8,853.80 | high | 87°F (86.54°F) | southern_flounder | 57-67 | 13:00 | 67 | salinity 0.20 — "salinity 0.0 ppt — near-fresh"; light 0.58 — "4.6 h from twilight, 84% cloud widened it from 6.5 h" | 1.00 | 1.00 | | |
+| 2026-07-21 | neap | 2,317.94 | low (clamped to `neap_low`) | 87°F (87.44°F) | redfish | 59-73 | 03:00 | 73 | flow 0.46 — "flow 0.10 m/s — moving"; solunar 0.56 — "180 min from a solunar period"; light 0.63 — "2.2 h from twilight, 96% cloud widened it from 3.4 h" | 1.00 | 0.92 | | |
+| 2026-07-21 | neap | 2,317.94 | low | 87°F (87.44°F) | speckled_trout | 54-67 | 07:00 | 67 | water_temp 0.46 — "water 87F"; flow 0.48 — "flow 0.10 m/s — moving"; pressure 0.58 — "pressure +0.7 mb/3h — steady" | 1.00 | 0.87 | | |
+| 2026-07-21 | neap | 2,317.94 | low | 87°F (87.44°F) | southern_flounder | 60-75 | 07:00 | 75 | water_temp 0.42 — "water 87F"; flow 0.65 — "flow 0.10 m/s — moving"; pressure 0.72 — "pressure +0.7 mb/3h — steady" | 1.00 | 0.91 | | |
+| 2026-08-05 | neap | 4,037.80 | med (`neap_low`/`neap_med` blend) | 83°F (82.76°F) | redfish | 61-75 | 19:00 | 75 | flow 0.46 — "flow 0.10 m/s — moving"; stage 0.59 — "tide 0.83 of cycle — ebbing"; solunar 0.69 — "71 min from a solunar period" | 1.00 | 0.92 | | |
+| 2026-08-05 | neap | 4,037.80 | med | 83°F (82.76°F) | speckled_trout | 58-75 | 19:00 | 75 | flow 0.51 — "flow 0.10 m/s — moving"; water_temp 0.69 — "water 83F"; solunar 0.69 — "71 min from a solunar period" | 1.00 | 0.87 | | |
+| 2026-08-05 | neap | 4,037.80 | med | 83°F (82.76°F) | southern_flounder | 64-83 | 19:00 | 83 | water_temp 0.66 — "water 83F"; flow 0.68 — "flow 0.10 m/s — moving"; solunar 0.76 — "71 min from a solunar period" | 1.00 | 0.91 | | |
+| 2026-07-28 | spring | 8,853.80 | high (`spring_high`/`spring_freshet` blend) | 87°F (86.54°F) | redfish | 64-81 | 20:00 | 81 | flow 0.57 — "flow 0.14 m/s — moving"; salinity 0.74 — "salinity ~34.9 ppt — salty (UNCALIBRATED model estimate, no observation constrains it)"; water_temp 0.74 — "water 87F" | 1.00 | 0.92 | | |
+| 2026-07-28 | spring | 8,853.80 | high | 87°F (86.54°F) | speckled_trout | 50-74 | 20:00 | 74 | water_temp 0.51 — "water 87F"; flow 0.63 — "flow 0.14 m/s — moving"; salinity 0.66 — "salinity ~34.9 ppt — salty (UNCALIBRATED model estimate, no observation constrains it)" | 1.00 | 0.87 | | |
+| 2026-07-28 | spring | 8,853.80 | high | 87°F (86.54°F) | southern_flounder | 64-77 | 13:00 | 77 | water_temp 0.47 — "water 87F"; light 0.58 — "4.6 h from twilight, 84% cloud widened it from 6.5 h"; solunar 0.74 — "76 min from a solunar period" | 1.00 | 0.91 | | |
 
 `flow.clamped` was `True` on 2026-07-21 (2,317.94 cfs sits genuinely below
 `neap_low`'s own simulated flow, 2,774 cfs -- a real single-regime pin, not
@@ -129,13 +186,16 @@ nor `test_payload_flags_an_extrapolated_salinity` (`backend/tests/test_
 payload.py`) depends on these dates; both use a synthetic freshet day
 instead.
 
-`salinity` reads "near-fresh, 0.0 ppt" on every row -- unlike water
-temperature, this is NOT a residual live-only artifact: `water_summary`'s
-historical path fetches `PARAM_SALINITY` daily means exactly the way it
-fetches `PARAM_TEMP_C`, and station 021108125 genuinely reported ~0 ppt on
-all three of these specific dates (mid-to-late summer, a tidal-freshwater
-reach). It is a real, if repetitive, three-for-three coincidence in the
-data, not a wiring gap.
+Salinity no longer reads "near-fresh, 0.0 ppt" on every row (see "Salinity
+is now the model, not the gauge" above) -- it only surfaces among a row's
+three lowest sub-scores on 2026-07-28, the highest-discharge date, where
+the model's tidal/discharge state pushes it to 0.74/0.66 ("salty") for
+redfish and speckled trout. On the other two, lower-discharge dates the
+modelled value scores well enough that some OTHER factor is always among
+the three lowest instead -- salinity is still computed, still `provisional`,
+and still counted at full weight every hour (`constrained_share` above
+proves that), it simply is not always among the worst three at the single
+peak hour this table reports.
 
 ## Ellis's homework
 

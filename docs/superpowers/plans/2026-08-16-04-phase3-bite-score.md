@@ -33,7 +33,7 @@ Identical to Phases 1 and 2 — Python ≥3.12, ruff `["E","F","I","UP","B","DTZ
 | Path | Responsibility |
 |---|---|
 | `fisheries/species_weights.yaml` | Every weight and response curve, per species |
-| `backend/tidescout/models.py` (additions) | `SpeciesProfile`, `Curve`, `ScoringConfig` |
+| `backend/tidescout/models.py` (additions) | `SpeciesProfile`, `Curve` |
 | `backend/tidescout/engine/curves.py` | Piecewise-linear curve evaluation |
 | `backend/tidescout/engine/score.py` | Nine factors, geometric-mean combination, explanations |
 | `backend/tidescout/engine/phase.py` | Wall-clock hour → library tide phase |
@@ -993,12 +993,26 @@ def score_factors(
 
     # 3. Light. Cloud cover widens the low-light window, so heavy cloud is
     # credited as bringing the hour closer to twilight.
+    #
+    # CORRECTED 2026-08-26 (whole-branch review, Important 2): the sample
+    # below originally hard-coded `0.35` as a Python literal, species-
+    # independent, even though `light`'s WEIGHT and CURVE are both authored
+    # per species in the same file. That is the same class of violation as
+    # the `structure_ambush` ramp Task 6 had to move into YAML, and it
+    # contradicts this plan's own Global Constraints ("All curves and
+    # weights live in `fisheries/species_weights.yaml`. No response shape is
+    # hard-coded in Python."). The shipped fix reads
+    # `profile.light_cloud_widen` -- a new per-species field on
+    # `SpeciesProfile`, sibling to `structure_weight`, authored in
+    # `species_weights.yaml` at 0.35 for all three species (unchanged
+    # default; only its home moved). Reproduced here as it actually ships,
+    # not as originally drafted:
     hours_off = _hours_from_twilight(hour.time, getattr(day, "sun", None))
     if hours_off is None:
         subs.append(_missing("light", profile, "no sun times"))
     else:
         cloud = hour.cloud_cover_pct or 0.0
-        effective = hours_off * (1.0 - 0.35 * cloud / 100.0)
+        effective = hours_off * (1.0 - profile.light_cloud_widen * cloud / 100.0)
         note = f", {cloud:.0f}% cloud widens it" if cloud > 50 else ""
         subs.append(_scored("light", profile, effective,
                             f"{hours_off:.1f} h from twilight{note}"))

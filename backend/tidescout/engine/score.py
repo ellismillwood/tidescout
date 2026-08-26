@@ -11,6 +11,29 @@ Every factor obeys the same contract:
     and "conditions are dead" are different claims and spec section 8 requires
     the first to renormalise rather than score;
   - it always returns a reason, because the UI renders factor bars with text.
+
+DEFERRED FROM SPEC SECTION 8 -- recorded here as a decision, not an
+oversight (2026-08-26 review, Minor 10). Both shipped this way from the
+plan's own Task 4 sample code, so neither was ever lost; they were simply
+never picked back up:
+
+  - Factor 6, "wind": spec asks for "speed curve + direction vs fishery
+    orientation (bait push vs fishability)". `HourlyConditions.wind_dir_deg`
+    is populated by every source that reaches this pipeline and
+    `Fishery.orientation_deg` is authored (135 for Winyah Bay), but the wind
+    factor below reads `wind_speed_kn` only -- direction never enters the
+    sub-score or the reason. The two numbers needed to close this exist;
+    nothing yet compares them.
+  - Factor 7, "water temp + trend": spec asks for "optimal ranges AND
+    seasonal behavior states" driven by trend, not just level. `water_temp`
+    below reads `temp_f` against the curve and mentions `temp_trend_f_3d` in
+    the REASON TEXT ONLY when it moves at least 1F/3d -- the trend never
+    shifts the sub-score itself, so a fish-triggering cold snap and a flat
+    week at the same instantaneous temperature score identically.
+
+Closing either is a new factor input (a direction-vs-orientation curve
+shape for wind; a way to fold a trend into a single-value curve lookup for
+water_temp), not a bug fix to what is here -- out of scope for this pass.
 """
 
 import math
@@ -55,7 +78,15 @@ class SalinityReading:
     provenance: SalinityProvenance
     # Did a calibration EVER constrain these parameters. Config-level, so it
     # is identical at every cell and hour. False for Winyah Bay today.
-    fitted: bool = True
+    # REQUIRED, no default (2026-08-26 review, Minor 5): a `True` default
+    # would be the optimistic guess on exactly the field the owner's
+    # include-and-flag decision hinges on, and this project's own test
+    # helper (`test_score.py`'s `_sal`) already defaults it to `False` with
+    # a docstring explaining why -- the production dataclass silently
+    # disagreeing with its own test helper's judgement is the bug. Every
+    # call site must say which it means, even a MEASURED one where
+    # `constrained` will short-circuit past it either way.
+    fitted: bool
     # Was THIS evaluation's discharge outside `calibration_range_cfs`.
     # Per-evaluation; changes with the river. Independent of `fitted`.
     extrapolated: bool = False
@@ -148,8 +179,17 @@ def score_factors(
     if speed is None:
         subs.append(_missing("flow", profile, "no flow state or current station"))
     else:
-        kind = "slack" if speed < 0.1 else "moving" if speed < 0.8 else "ripping"
-        subs.append(_scored("flow", profile, speed, f"flow {speed:.2f} m/s — {kind}"))
+        # Label the ROUNDED value the reason actually prints, not the raw
+        # float (2026-08-26 review, Minor 7): at a speed like 0.0999..., the
+        # unrounded comparison called it "slack" while `:.2f` printed the
+        # same "0.10 m/s" a value just above the threshold would ALSO print
+        # labelled "moving" -- the identical displayed number reading two
+        # different labels depending on which side of an invisible boundary
+        # it started on. Comparing against the rounded value instead makes
+        # the label and the printed number describe the same number.
+        speed_r = round(speed, 2)
+        kind = "slack" if speed_r < 0.1 else "moving" if speed_r < 0.8 else "ripping"
+        subs.append(_scored("flow", profile, speed, f"flow {speed_r:.2f} m/s — {kind}"))
 
     # 2. Tide stage. `stage_at`'s `frac` resets to 0 at every hi/lo turn --
     # it is a HALF-cycle fraction between whichever pair of events brackets
@@ -182,6 +222,14 @@ def score_factors(
     # evaluated at `effective`, the cloud-widened value -- the reason quotes
     # THAT number, not the raw `hours_off`, or it would describe a different
     # score than the one actually produced (2026-08-26 review, Minor 3).
+    #
+    # `profile.light_cloud_widen` -- NOT a hard-coded `0.35` -- decides how
+    # much cloud widens the window. It used to be a Python literal, species-
+    # independent, even though `light`'s weight and curve are both authored
+    # per species in `species_weights.yaml`; that is the same class of bug
+    # the `structure_*` curves were pulled out of Python for. Measured on
+    # the real 2026-08-05 payload: moving it 0.35 -> 0.10/0.60 shifts 34 of
+    # 72 hour-scores by 1-2 points (2026-08-26 review, Important 2).
     hours_off = _hours_from_twilight(hour.time, getattr(day, "sun", None))
     if hours_off is None:
         subs.append(_missing("light", profile, "no sun times"))
@@ -193,7 +241,7 @@ def score_factors(
         # marking the whole light factor missing -- cloud is a refinement
         # of this factor, not a precondition for scoring it.
         cloud = hour.cloud_cover_pct if hour.cloud_cover_pct is not None else 0.0
-        effective = hours_off * (1.0 - 0.35 * cloud / 100.0)
+        effective = hours_off * (1.0 - profile.light_cloud_widen * cloud / 100.0)
         # Disclosed whenever the adjustment is non-zero, not only above some
         # threshold -- a silent +0.070 at cloud=50 under the old `> 50`
         # cutoff is exactly the kind of right-value-wrong-justification gap
@@ -215,20 +263,26 @@ def score_factors(
         subs.append(_missing("pressure", profile, "no pressure trend"))
     else:
         p = hour.pressure_trend_mb_3h
-        note = ("falling — pre-frontal feeding window" if p < -0.5
-                else "rising sharply — post-frontal shutdown" if p > 2.0
+        # Rounded before labelling, same reason as the flow factor above
+        # (2026-08-26 review, Minor 7) -- `:+.1f` is what the reason prints.
+        p_r = round(p, 1)
+        note = ("falling — pre-frontal feeding window" if p_r < -0.5
+                else "rising sharply — post-frontal shutdown" if p_r > 2.0
                 else "steady")
         subs.append(_scored("pressure", profile, p,
-                            f"pressure {p:+.1f} mb/3h — {note}"))
+                            f"pressure {p_r:+.1f} mb/3h — {note}"))
 
     # 6. Wind.
     if hour.wind_speed_kn is None:
         subs.append(_missing("wind", profile, "no wind forecast"))
     else:
         w = hour.wind_speed_kn
-        note = ("calm" if w < 5 else "light" if w < 12
-                else "building" if w < 18 else "hard — fishability suffers")
-        subs.append(_scored("wind", profile, w, f"wind {w:.0f} kn — {note}"))
+        # Rounded before labelling, same reason as flow/pressure above
+        # (2026-08-26 review, Minor 7) -- `:.0f` is what the reason prints.
+        w_r = round(w)
+        note = ("calm" if w_r < 5 else "light" if w_r < 12
+                else "building" if w_r < 18 else "hard — fishability suffers")
+        subs.append(_scored("wind", profile, w, f"wind {w_r:.0f} kn — {note}"))
 
     # 7. Water temperature.
     water = getattr(day, "water", None)
@@ -250,9 +304,12 @@ def score_factors(
         subs.append(_missing("salinity", profile, "no salinity estimate"))
     else:
         ppt = salinity.ppt
-        note = "near-fresh" if ppt < 5 else "brackish" if ppt < 18 else "salty"
+        # Rounded before labelling, same reason as flow/pressure/wind above
+        # (2026-08-26 review, Minor 7) -- `:.1f` is what the reason prints.
+        ppt_r = round(ppt, 1)
+        note = "near-fresh" if ppt_r < 5 else "brackish" if ppt_r < 18 else "salty"
         if salinity.constrained:
-            reason = f"salinity {ppt:.1f} ppt — {note}"
+            reason = f"salinity {ppt_r:.1f} ppt — {note}"
         else:
             caveats = []
             if not salinity.fitted:
@@ -261,7 +318,7 @@ def score_factors(
                 caveats.append("discharge outside the calibrated range")
             # "~" on the number as well as the caveat: the tilde survives
             # truncation in a narrow UI column, the parenthetical may not.
-            reason = f"salinity ~{ppt:.1f} ppt — {note} ({'; '.join(caveats)})"
+            reason = f"salinity ~{ppt_r:.1f} ppt — {note} ({'; '.join(caveats)})"
         subs.append(SubScore("salinity", evaluate(profile.salinity, ppt),
                              profile.weights["salinity"], reason, False,
                              provisional=not salinity.constrained))

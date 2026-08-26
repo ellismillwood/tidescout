@@ -37,6 +37,18 @@
 # 2026-08-26 (percentiles recorded in engine/score.py's `_structure_subscore`
 # docstring, reproducible via the same `tidescout flow-structure` sampling
 # path `cli.py` already uses).
+#
+# `light_cloud_widen` is a second SIBLING of `weights`, same reasoning:
+# how much heavy cloud widens the light factor's low-light window
+# (`effective = hours_off * (1.0 - light_cloud_widen * cloud_pct / 100.0)`,
+# `engine/score.py`'s factor 3) used to be a hard-coded Python `0.35`,
+# species-independent, even though `light`'s own weight and curve are both
+# authored per species right here (2026-08-26 review, Important 2).
+# Byte-identical 0.35 across all three species below, deliberately, for the
+# same reason `structure_*` and solunar are: this move only relocates the
+# number from Python to YAML, it does not claim any species-specific
+# evidence for a DIFFERENT cloud response -- that is Task 7 hindcast
+# territory, same as everything else in this file.
 
 redfish:
   weights:
@@ -58,6 +70,7 @@ redfish:
     season: 0.8
   # See the file header: sibling of `weights`, not a member of it.
   structure_weight: 0.2
+  light_cloud_widen: 0.35
   curves:
     flow:
       x: [0.0, 0.10, 0.25, 0.50, 0.90, 1.50]
@@ -114,6 +127,7 @@ speckled_trout:
     salinity: 0.9       # spec section 7: ~10-30 ppt, avoid near-fresh
     season: 0.8
   structure_weight: 0.2
+  light_cloud_widen: 0.35
   curves:
     flow:
       x: [0.0, 0.10, 0.25, 0.50, 0.90, 1.50]
@@ -167,6 +181,7 @@ southern_flounder:
     salinity: 0.6
     season: 1.0
   structure_weight: 0.2
+  light_cloud_widen: 0.35
   curves:
     flow:
       x: [0.0, 0.08, 0.20, 0.45, 0.80, 1.50]

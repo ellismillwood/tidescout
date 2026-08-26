@@ -69,6 +69,36 @@ def test_an_uncalibrated_salinity_reaches_the_payload_as_provisional(synthetic_d
     assert all(h["constrained_share"] < 1.0 for h in flagged)
 
 
+def test_an_out_of_domain_gauge_is_never_labelled_measured(synthetic_day_out_of_domain_gauge):
+    """2026-08-26 review, Important 1: station 021108125 is a real,
+    live-reporting USGS sensor -- but it sits 9,498 m outside the model
+    domain and snaps, along with a second station 1,362 m outside it, to the
+    along-estuary distance field's own extreme fresh end, so neither
+    station's number describes the reach the scoring layer actually reads.
+    Before the fix, `water.source != "climatology"` was the ONLY gate
+    `_bay_salinity_reading` applied, so this station's 0.0 ppt reached
+    every hour as `SalinityProvenance.MEASURED` -- `constrained`
+    unconditionally True, no caveat, on the one factor this project has
+    spent five PRs learning to disclose. This is exactly the hourly half of
+    the payload a person actually sees (`tidescout score`'s table), unlike
+    the per-feature half, which never took this sensor-vs-model path at all.
+    """
+    from tidescout.pipeline.payload import build_payload
+
+    p = build_payload(**synthetic_day_out_of_domain_gauge)
+
+    assert p["salinity"]["series"], "no bay-wide salinity reading resolved at all"
+    for row in p["salinity"]["series"]:
+        assert row["provenance"] != "measured", row
+
+    flagged = [
+        h for rows in p["species"].values() for h in rows["hours"]
+        if "salinity" in h["provisional"]
+    ]
+    assert flagged, "an out-of-domain gauge must not silently pass as constrained salinity"
+    assert all(h["constrained_share"] < 1.0 for h in flagged)
+
+
 def test_payload_flags_an_extrapolated_salinity(synthetic_day_freshet):
     """Spec section 10: degraded inputs surface, they do not hide."""
     from tidescout.pipeline.payload import build_payload

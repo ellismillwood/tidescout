@@ -61,6 +61,23 @@ class WaterSensor(BaseModel):
     # main stem -- the computed screen will still catch it if the geometry
     # agrees, and will report it excluded either way.
     off_axis: bool = False
+    # True when this station's coordinates actually snap to an in-domain
+    # library cell close enough to trust its reading as describing the reach
+    # it snaps to -- the SAME style of computed-then-authored override
+    # `off_axis` is: a human reads `pipeline.salinity_fit.site_distances_km`'s
+    # `snap_gap_m` for the station and records the verdict here, rather than
+    # `pipeline.payload`'s per-hour scoring path reaching for the network or
+    # re-deriving the distance field on every call. Default `True` because
+    # most declared stations ARE in or near the domain; set `False` only for
+    # a station independently confirmed to snap to a cell kilometres away
+    # (2026-08-26 review, Important 1: Winyah's own `021108125`, at 9,498 m,
+    # and `02110815`, at 1,362 m, both snap to the SAME cell -- the distance
+    # field's extreme fresh end -- so a real reading from either one is not a
+    # reading of the reach the scoring layer actually reads). Unlike
+    # `off_axis`, this is not a branch-identity question and has no computed
+    # per-payload-run screen behind it yet; treat it exactly as hand-set as
+    # `off_axis` was before Task 5 computed a screen for that one.
+    in_domain: bool = True
 
 
 class Stations(BaseModel):
@@ -529,6 +546,18 @@ class SpeciesProfile(BaseModel):
     field instead -- still authored per species, in YAML, exactly like every
     other weight, just outside the set that has to sum to nine (2026-08-26
     review, Important 2).
+
+    `light_cloud_widen` is a second SIBLING, added for the same reason:
+    `score_factors`'s light factor used to widen the low-light window by a
+    hard-coded Python `0.35`, species-independent, even though `light`'s
+    weight (0.5-0.9 across the three species) and its curve are both
+    authored per species right here. That is the same class of bug the
+    `structure_*` curves were pulled out of Python for (2026-08-26 review,
+    Important 2). It is not a member of `curves` because it is a single
+    coefficient, not a piecewise response shape, and not a member of
+    `weights` because it does not multiply the factor's contribution to the
+    geometric mean -- it reshapes the INPUT the light curve is evaluated at,
+    before `_scored` ever runs.
     """
 
     model_config = ConfigDict(extra="forbid")
@@ -538,6 +567,7 @@ class SpeciesProfile(BaseModel):
     salinity: Curve
     months: dict[int, float]
     structure_weight: float
+    light_cloud_widen: float
 
     @model_validator(mode="after")
     def _weights_are_non_negative(self):
@@ -564,4 +594,22 @@ class SpeciesProfile(BaseModel):
             bad["structure_weight"] = self.structure_weight
         if bad:
             raise ValueError(f"species weights must be >= 0, got {bad}")
+        return self
+
+    @model_validator(mode="after")
+    def _light_cloud_widen_is_a_fraction(self):
+        """`score_factors` computes `effective = hours_off * (1.0 -
+        light_cloud_widen * cloud / 100.0)`. Outside [0, 1] this can flip
+        `effective`'s sign (a value > 1.0, at cloud=100) or make heavier
+        cloud read as FARTHER from twilight instead of nearer (a negative
+        value) -- both incoherent for a quantity the file header documents
+        as hours from twilight. `Curve.y` and `structure_weight`'s own
+        non-negative check exist for the identical reason: a typo this
+        file's header invites editing should fail loudly, not silently
+        invert a factor.
+        """
+        if not 0.0 <= self.light_cloud_widen <= 1.0:
+            raise ValueError(
+                f"light_cloud_widen must be between 0 and 1, got {self.light_cloud_widen}"
+            )
         return self

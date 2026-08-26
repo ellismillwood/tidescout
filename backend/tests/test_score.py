@@ -101,6 +101,23 @@ def test_flow_reason_labels_the_regime_the_code_actually_computed():
     assert "slack" not in ripping.reason and "moving" not in ripping.reason
 
 
+def test_the_same_printed_flow_speed_never_carries_two_labels():
+    """2026-08-26 review, Minor 7: the label used to compare the RAW speed
+    against the 0.1/0.8 thresholds while the reason printed the speed
+    rounded to 2 dp. 0.0999 m/s is genuinely below 0.1 but displays as
+    "0.10 m/s" -- the same string a speed just ABOVE 0.1 also displays,
+    which the old code labelled "moving". Without the fix this reads
+    "flow 0.10 m/s — slack", identically formatted to a real "moving"
+    reading -- a reader (or a hindcast log scraping the reason string) can
+    no longer tell the two apart from the number and label alone.
+    """
+    p = load_species()["redfish"]
+    sub = _by_factor(score_factors(_hour(), None, p, flow_speed=0.0999))["flow"]
+    assert "0.10" in sub.reason, sub.reason
+    assert "moving" in sub.reason, sub.reason
+    assert "slack" not in sub.reason, sub.reason
+
+
 def test_stage_factor_converts_the_half_cycle_frac_to_a_full_cycle_and_labels_it_right():
     """2026-08-26 review, Important 1: `stage_at`'s `frac` resets to 0 at
     every hi/lo turn -- a HALF-cycle fraction -- but the YAML curves are
@@ -185,6 +202,56 @@ def test_light_reason_quotes_the_cloud_widened_value_actually_scored():
         day, p))["light"]
     assert mid.reason.startswith("1.6"), mid.reason
     assert "cloud" in mid.reason.lower()
+
+
+def test_editing_light_cloud_widen_in_yaml_alone_moves_the_hour_score(tmp_path):
+    """2026-08-26 review, Important 2: the cloud-widening coefficient in the
+    light factor (`effective = hours_off * (1.0 - light_cloud_widen *
+    cloud / 100.0)`) used to be a hard-coded Python `0.35`, unreachable from
+    YAML and species-independent, even though `light`'s WEIGHT (0.5-0.9) and
+    its CURVE are both authored per species right beside it -- the same
+    class of violation `structure_ambush` shipped with until Task 6 pulled
+    its ramp into YAML. Same style of proof
+    `test_editing_structure_weight_in_yaml_alone_moves_the_activation` uses:
+    copy the real `species_weights.yaml`, edit ONE number, reload through
+    the real `load_species` loader, and watch the light sub-score -- and the
+    hour score built from it -- move with zero Python touched.
+    """
+    from datetime import datetime
+    from types import SimpleNamespace
+    from zoneinfo import ZoneInfo
+
+    from tidescout.sources.astronomy import SunTimes
+
+    raw = yaml.safe_load((FISHERIES_DIR / "species_weights.yaml").read_text())
+    assert raw["redfish"]["light_cloud_widen"] == pytest.approx(0.35), "baseline assumption"
+    raw["redfish"]["light_cloud_widen"] = 0.60
+    edited = tmp_path / "species_weights.yaml"
+    edited.write_text(yaml.safe_dump(raw))
+
+    baseline = load_species()["redfish"]
+    mutated = load_species(edited)["redfish"]
+
+    tz = ZoneInfo("America/New_York")
+    sunrise = datetime(2026, 10, 15, 7, 0, tzinfo=tz)
+    sunset = datetime(2026, 10, 15, 19, 0, tzinfo=tz)
+    sun = SunTimes(dawn=sunrise, sunrise=sunrise, sunset=sunset, dusk=sunset)
+    day = SimpleNamespace(sun=sun, solunar=[], water=None)
+    # 09:00, 100% cloud -- same fixture shape as the reason test above, so
+    # `effective` genuinely differs between baseline (1.3 h) and mutated
+    # (0.8 h) rather than both clamping to the same curve breakpoint.
+    hour = _hour(time=datetime(2026, 10, 15, 9, 0, tzinfo=tz), cloud_cover_pct=100.0)
+
+    baseline_light = _by_factor(score_factors(hour, day, baseline))["light"]
+    mutated_light = _by_factor(score_factors(hour, day, mutated))["light"]
+    assert mutated_light.value != baseline_light.value
+    # More widening at the same cloud cover pushes `effective` FURTHER below
+    # `hours_off`, i.e. closer to twilight, which this curve scores higher.
+    assert mutated_light.value > baseline_light.value, (baseline_light, mutated_light)
+
+    baseline_score = combine(score_factors(hour, day, baseline)).score
+    mutated_score = combine(score_factors(hour, day, mutated)).score
+    assert mutated_score != baseline_score, "the hour score must move too, not just the sub-score"
 
 
 def test_every_sub_score_carries_a_reason():
@@ -299,11 +366,18 @@ def test_an_uncalibrated_salinity_is_scored_but_marked_provisional():
 
 def test_a_measured_salinity_carries_no_caveat():
     """The discriminating half. Without this, a bug marking EVERYTHING
-    provisional would pass the test above."""
+    provisional would pass the test above.
+
+    `fitted=False` here is deliberate, not an oversight: `SalinityReading.
+    fitted` is a required field (2026-08-26 review, Minor 5), and passing
+    `False` -- the "worst case" for that field -- proves `constrained`
+    genuinely short-circuits on `provenance is MEASURED` rather than merely
+    happening to agree with a `True` default that was never exercised.
+    """
     from tidescout.engine.score import SalinityProvenance, SalinityReading
 
     red = load_species()["redfish"]
-    reading = SalinityReading(22.0, SalinityProvenance.MEASURED)
+    reading = SalinityReading(22.0, SalinityProvenance.MEASURED, fitted=False)
     sub = _by_factor(score_factors(_hour(), None, red, salinity=reading))["salinity"]
     assert sub.provisional is False
     assert "UNCALIBRATED" not in sub.reason and "~" not in sub.reason

@@ -58,16 +58,27 @@ stations:
   water:
     # WACCAMAW RIVER NEAR PAWLEYS ISLAND, SC (33.5066, -79.1270) -- tidal
     # reach (site_tp_cd=ST-TS), live-reporting both params (temp 27.5-30.9
-    # degC, salinity 0.0 ppth over the last 3 days).
+    # degC, salinity 0.0 ppth over the last 3 days). `in_domain: false`
+    # (2026-08-26 review, Important 1): 9,498 m from the nearest in-domain
+    # library cell (see `salinity_fit.py`'s module docstring and the
+    # calibration note below) -- it snaps to the field's own extreme fresh
+    # end, so a real salinity reading here is not a reading of the reach the
+    # scoring layer actually reads. `payload._bay_salinity_reading` will not
+    # label this station's salinity MEASURED because of it; its TEMPERATURE
+    # reading is unaffected -- water_temp has no domain-distance concern.
     - kind: usgs
       station: "021108125"
       params: ["00010", "00480"]
+      in_domain: false
     # WACCAMAW R NR HAGLEY LANDING NR PAWLEYS ISLAND, SC (33.4446, -79.1739)
     # -- tidal reach, live-reporting both params (temp 28.9-29.8 degC,
-    # salinity 0.0-1.0 ppth).
+    # salinity 0.0-1.0 ppth). `in_domain: false` for the same reason as
+    # 021108125 above -- 1,362 m from the nearest in-domain cell, snapping to
+    # the SAME cell that station does.
     - kind: usgs
       station: "02110815"
       params: ["00010", "00480"]
+      in_domain: false
     # SAMPIT RIVER BELOW US 17 NEAR GEORGETOWN, SC (33.3599, -79.2880) --
     # right at Georgetown; only 00010 (temp) reports live, no 00480 data
     # available for this site, so salinity omitted.

@@ -23,13 +23,17 @@ _EVENTS = [(0, 0.2, "L"), (6.2, 4.8, "H"), (12.42, 0.3, "L"),
            (18.6, 4.9, "H"), (24.84, 0.2, "L")]
 
 
-def _day_conditions(cfs: float, bucket: str):
+def _day_conditions(cfs: float, bucket: str, water=None):
     """A full 24-hour day with EVERY factor live.
 
     Verified 2026-08-26 against the real `score_factors`/`combine`: nothing is
     excluded on any hour, and the score varies 68..84 across the day. A fixture
     on which the score never moves would pass most payload assertions while
     testing nothing.
+
+    `water` defaults to the synthetic `WaterSummary` below; a caller wanting
+    to exercise a REAL declared sensor's `source` (see
+    `synthetic_day_out_of_domain_gauge`) passes its own instead.
     """
     from tidescout.engine.conditions import DayConditions, HourlyConditions
     from tidescout.engine.tides import TideEvent, stage_at
@@ -58,8 +62,8 @@ def _day_conditions(cfs: float, bucket: str):
                       set=_MID + timedelta(hours=7), transits=[_MID + timedelta(hours=13)]),
         solunar=[SolunarPeriod(kind="major", start=_MID + timedelta(hours=12.5),
                                end=_MID + timedelta(hours=14.5))],
-        water=WaterSummary(temp_f=84.0, temp_trend_f_3d=0.4,
-                           salinity_ppt=None, source="synthetic"),
+        water=water or WaterSummary(temp_f=84.0, temp_trend_f_3d=0.4,
+                                     salinity_ppt=None, source="synthetic"),
         discharge=DischargeSummary(
             cfs_now=cfs, cfs_lagged=cfs * 0.95, bucket=bucket, sites=["02135200"],
             contributing=["02135200"], stale=[], trend=1.05, limb="steady"),
@@ -78,6 +82,28 @@ def _payload_kwargs(monkeypatch, cfs: float, bucket: str):
 def synthetic_day(monkeypatch):
     """Median flow: 4,200 cfs, inside `calibration_range_cfs` (1232-22996)."""
     return _payload_kwargs(monkeypatch, 4_200.0, "med")
+
+
+@pytest.fixture
+def synthetic_day_out_of_domain_gauge(monkeypatch):
+    """The SAME day `synthetic_day` builds, but `water` names a REAL Winyah
+    Bay sensor declared `in_domain: false` in `fisheries/winyah-bay.yaml` --
+    station 021108125, 9,498 m outside the model domain, snapped to the
+    along-estuary distance field's own extreme fresh end (2026-08-26 review,
+    Important 1). Exists to prove `_bay_salinity_reading` never labels this
+    reading MEASURED just because a real, live-reporting station supplied a
+    real number -- see `test_an_out_of_domain_gauge_is_never_labelled_
+    measured` in `test_payload.py`.
+    """
+    from tidescout.sources import dayloader
+    from tidescout.sources.usgs import WaterSummary
+
+    water = WaterSummary(temp_f=84.0, temp_trend_f_3d=0.4,
+                          salinity_ppt=0.0, source="usgs:021108125")
+    monkeypatch.setattr(
+        dayloader, "load_day", lambda *a, **k: _day_conditions(4_200.0, "med", water=water)
+    )
+    return dict(slug="winyah-bay", day=date(2026, 8, 16), model_label="gfs_seamless", cache=None)
 
 
 @pytest.fixture

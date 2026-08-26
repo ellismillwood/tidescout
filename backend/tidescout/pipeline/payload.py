@@ -184,6 +184,35 @@ def _is_extrapolated(effective_cfs: float, cfg) -> bool:
     return not (lo < effective_cfs < hi)
 
 
+def _measured_salinity_in_domain(source: str, fishery) -> bool:
+    """Whether the sensor named in `WaterSummary.source` is the kind of
+    reading that can stand for the reach the scoring layer actually reads.
+
+    2026-08-26 review, Important 1: `source` alone (e.g. `"usgs:021108125"`)
+    said nothing about WHERE that station sits relative to the model domain,
+    so a sensor 9,498 m outside it -- snapped, by the along-estuary distance
+    field, to the SAME cell as a second station 1,362 m outside it, both at
+    the field's extreme fresh end -- was labelled `MEASURED` unconditionally.
+    That makes `SalinityReading.constrained` True with no caveat, on the one
+    factor this project has spent five PRs learning to disclose honestly.
+
+    `WaterSensor.in_domain` is the authored verdict (see that field's
+    docstring for why it is hand-set rather than computed here): this
+    function only has to find the declared station matching `source` and
+    read it, defaulting True (never disqualify a station this fishery has
+    not explicitly flagged) when `source` names no declared USGS sensor at
+    all -- a non-USGS or synthetic `source` (a test fixture's `"synthetic"`,
+    for instance) is not this check's business.
+    """
+    if not source.startswith("usgs:"):
+        return True
+    station_id = source.removeprefix("usgs:")
+    for w in fishery.stations.water:
+        if w.kind == "usgs" and w.station == station_id:
+            return w.in_domain
+    return True
+
+
 def _bay_salinity_reading(day, fishery, distance_field: np.ndarray, phase: float | None):
     """The fishery-wide (non-feature) salinity reading: a sensor value when
     one exists, else the model evaluated at the domain's median along-estuary
@@ -206,10 +235,31 @@ def _bay_salinity_reading(day, fishery, distance_field: np.ndarray, phase: float
     do not hit that gap today (021108125, tried first, reports both), so it
     is not exercised in practice; closing it fully would mean widening
     `WaterSummary` itself, which is `sources/usgs.py`, not this task's file.
+
+    A second gap closed alongside the first (2026-08-26 review, Important
+    1): `source` naming a real, live-reporting station is not by itself
+    proof that station's number describes the reach being scored --
+    `_measured_salinity_in_domain` also has to agree, or the reading falls
+    through to the MODELLED path below exactly as a climatology fallback
+    does. That path already carries `fitted`/`extrapolated`, the existing
+    provenance machinery this project uses everywhere else to say "included,
+    but not confidently" -- no new flag needed.
     """
     water = getattr(day, "water", None)
-    if water is not None and water.salinity_ppt is not None and water.source != "climatology":
-        return SalinityReading(float(water.salinity_ppt), SalinityProvenance.MEASURED)
+    if (
+        water is not None
+        and water.salinity_ppt is not None
+        and water.source != "climatology"
+        and _measured_salinity_in_domain(water.source, fishery)
+    ):
+        # `fitted` is inert here -- `SalinityReading.constrained` short-
+        # circuits on `provenance is MEASURED` before ever reading it -- but
+        # the field is required (2026-08-26 review, Minor 5), so `True` is
+        # passed explicitly rather than leaving a stale default to fall back
+        # on. A real sensor reading has no model calibration to be unfitted.
+        return SalinityReading(
+            float(water.salinity_ppt), SalinityProvenance.MEASURED, fitted=True
+        )
 
     discharge = getattr(day, "discharge", None)
     if discharge is None or discharge.cfs_now is None or phase is None:
@@ -540,9 +590,20 @@ def build_payload(slug: str, day: date, model_label: str, cache) -> dict:
                             # missing, per-sub provisional) is already on
                             # every FISHERY-WIDE hour instead; duplicating
                             # all of it across 529 features x 24 hours x 3
-                            # species too would roughly double an already
-                            # 13.4 MB payload for fields this trimmed form
-                            # already covers.
+                            # species too was measured, not guessed (2026-08-26
+                            # review, Important 4 -- the previous "roughly
+                            # double an already 13.4 MB payload" was wrong on
+                            # both halves: 13.4 MB is roughly the size with NO
+                            # feature subs at all, i.e. the version this
+                            # trimming exists to move away from, not the
+                            # shipped payload). Measured on the real
+                            # 2026-07-21 payload: shipped (this trimmed form)
+                            # is 50.16 MB compact JSON; the full `SubScore`
+                            # fields on every feature-hour would be 68.83 MB --
+                            # a 1.37x increase, not a doubling. A 50 MB
+                            # single-day JSON is the spec section 3/9 frontend
+                            # contract as it actually ships, not an
+                            # understated number.
                             "subs": [_sub_to_trimmed_dict(s) for s in activation.subs],
                         }
                     )

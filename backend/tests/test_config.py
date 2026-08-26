@@ -173,6 +173,7 @@ def test_a_negative_weight_is_rejected_rather_than_inverting_a_factor():
     good = dict(
         curves={}, salinity=Curve(x=[0.0, 1.0], y=[0.0, 1.0]),
         months=dict.fromkeys(range(1, 13), 1.0), structure_weight=0.2,
+        light_cloud_widen=0.35,
     )
     SpeciesProfile(weights={"flow": 0.0}, **good)          # zero is fine
     with pytest.raises(ValidationError, match="must be >= 0"):
@@ -191,11 +192,34 @@ def test_a_negative_structure_weight_is_rejected_too():
 
     good = dict(
         weights={"flow": 0.0}, curves={}, salinity=Curve(x=[0.0, 1.0], y=[0.0, 1.0]),
-        months=dict.fromkeys(range(1, 13), 1.0),
+        months=dict.fromkeys(range(1, 13), 1.0), light_cloud_widen=0.35,
     )
     SpeciesProfile(structure_weight=0.0, **good)          # zero is fine here too
     with pytest.raises(ValidationError, match="must be >= 0"):
         SpeciesProfile(structure_weight=-0.2, **good)
+
+
+def test_light_cloud_widen_out_of_bounds_is_rejected():
+    """2026-08-26 review, Important 2: `light_cloud_widen` moved out of
+    Python and into this per-species field, so the same "this file's header
+    invites hand-editing, so the typo it invites must fail loudly" argument
+    the weight/structure_weight guards above make applies to it too -- a
+    value outside [0, 1] can flip `effective`'s sign or make heavier cloud
+    read as FARTHER from twilight (see `SpeciesProfile`'s own validator
+    docstring).
+    """
+    from tidescout.models import Curve, SpeciesProfile
+
+    good = dict(
+        weights={"flow": 0.0}, curves={}, salinity=Curve(x=[0.0, 1.0], y=[0.0, 1.0]),
+        months=dict.fromkeys(range(1, 13), 1.0), structure_weight=0.2,
+    )
+    SpeciesProfile(light_cloud_widen=0.0, **good)  # boundary values are fine
+    SpeciesProfile(light_cloud_widen=1.0, **good)
+    with pytest.raises(ValidationError, match="light_cloud_widen must be between 0 and 1"):
+        SpeciesProfile(light_cloud_widen=-0.1, **good)
+    with pytest.raises(ValidationError, match="light_cloud_widen must be between 0 and 1"):
+        SpeciesProfile(light_cloud_widen=1.5, **good)
 
 
 def test_every_month_has_a_season_modifier():

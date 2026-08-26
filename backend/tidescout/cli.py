@@ -174,6 +174,7 @@ def score(
     """
     from datetime import date as date_cls
 
+    from tidescout.config import load_species
     from tidescout.pipeline.payload import build_payload
     from tidescout.sources.cache import default_cache
     from tidescout.sources.weather import WEATHER_MODELS
@@ -185,10 +186,17 @@ def score(
     except ValueError as exc:
         raise typer.BadParameter(f"date must be YYYY-MM-DD, got {date_str!r}") from exc
 
-    payload = build_payload(slug, day, model, default_cache())
-    all_species = sorted(payload["species"])
-    if species_name is not None and species_name not in payload["species"]:
+    # Validated BEFORE `build_payload` runs (2026-08-26 review, Minor 12):
+    # `load_species()` is the same YAML load `build_payload` does internally
+    # to produce `payload["species"]`'s keys, so checking against it here is
+    # not a second source of truth -- it just moves the check ahead of a
+    # real ~70s scoring run a typo'd `--species` would otherwise pay for and
+    # then discard.
+    all_species = sorted(load_species())
+    if species_name is not None and species_name not in all_species:
         raise typer.BadParameter(f"species must be one of {all_species}, got {species_name!r}")
+
+    payload = build_payload(slug, day, model, default_cache())
     names = [species_name] if species_name else all_species
 
     for name in names:
