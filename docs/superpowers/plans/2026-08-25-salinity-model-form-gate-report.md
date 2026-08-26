@@ -490,6 +490,8 @@ Collected in one place, none of them adjusted to agree.
    The `front_width_km` comment rewritten by Task 1 states *"Scaling the width the same way cuts
    that trend spread from 2.96 to 0.55 ppt."* Both numbers are the spec's pre-registration; this
    gate measures **3.0087 → 0.3070** by the recipe in §4. The claim is directionally right and
+> **Superseded — see the Addendum at the end of this report.**
+
    understates the improvement. **Not corrected here** — this task is forbidden to edit the
    `salinity:` block, and the correction is a human decision. Flagged for whoever takes the next
    plan.
@@ -503,6 +505,8 @@ Collected in one place, none of them adjusted to agree.
 * **It did not begin a two-layer model.** Stratification is measured (§7) and deferred, exactly as
   spec §7 requires.
 * **It did not change any authored value.** The only diff to `fisheries/winyah-bay.yaml` on this
+> **Superseded — see the Addendum at the end of this report.**
+
   branch is comment text (20 insertions, 5 deletions, all inside comment lines); every value in
   the `salinity:` block — `ocean_ppt` 35.5, `l0_km` 18.0, `q0_cfs` 4000.0, `k` 0.33,
   `excursion_km` 7.0, `front_width_km` 5.0, `calibration_range_cfs` [1232.0, 22996.0],
@@ -564,6 +568,8 @@ between runs (τ=0 vs τ=7 gave [+0.4512, +0.5611] and [+0.4513, +0.5607] on two
 **`make check`: 702 passed, ruff clean, tree clean.** Test count 681 at plan start → **702** now,
 additive throughout, as required.
 
+> **Superseded — see the Addendum at the end of this report.**
+
 **Status: no code change was needed to produce this report.** `fisheries/winyah-bay.yaml`'s
 `salinity:` block values, `ocean_ppt`, `ocean_boundary_utm_km`, the ANUGA mesh, the flow library,
 `ON_AXIS_MAX_KM`, `engine/salinity.py` and `pipeline/salinity_fit.py` were all left untouched by
@@ -571,7 +577,7 @@ this task. This report is the gate's entire output. Whether width scaling stays,
 adopted and at what band, whether the YAML comment in §9.9 is corrected, and whether a depth axis
 is the next plan are the owner's decisions, not this task's.
 
-## Addendum (added 2026-08-25, after `8079990`)
+## Addendum (added 2026-08-26, after `8079990`)
 
 This report was written and pinned at `c02a04d`, and everything above is left as written — its
 measurements, tables and conclusions are unchanged. Two things happened on this same branch

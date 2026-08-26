@@ -366,12 +366,25 @@ class SalinityConfig(BaseModel):
     # before 2026-08-25 did and remains the default so existing configs are
     # unchanged.
     #
-    # A salt front does not respond to a single day's flow. Measured on the
-    # real record: the residual correlates with discharge averaged over PRIOR
-    # days, strengthening with lag then weakening -- at 1/7/14/60 days,
-    # -0.06/-0.13/-0.22/-0.15 at the surface sensor and -0.23/-0.39/-0.46/-0.37
-    # at the bottom one. The bottom shows it about twice as strongly, which is
-    # what a long-memory salt wedge should look like.
+    # A salt front does not respond to a single day's flow: the residual
+    # correlates with discharge averaged over PRIOR days, strengthening with
+    # lag then weakening, and the bottom sensor shows it about twice as
+    # strongly as the surface -- which is what a long-memory salt wedge should
+    # look like.
+    #
+    # Re-measured 2026-08-26 on the FULL record under the shipped model form
+    # (width-scaling, excluding the day itself), correlation at 1/7/14/60 days:
+    #
+    #   surface (WYSS1)   +0.12 / -0.01 / -0.10 / -0.09
+    #   bottom (NIWWBWQ)  -0.18 / -0.31 / -0.41 / -0.34
+    #
+    # The 2026-08-25 design probe reported -0.06/-0.13/-0.22/-0.15 and
+    # -0.23/-0.39/-0.46/-0.37 for the same eight cells. Those are PRE-CHANGE
+    # figures from the superseded 11,688-row population and do NOT reproduce
+    # on the full record -- every entry is off by 0.02-0.06 and the 1-day
+    # surface value flips sign. Every QUALITATIVE claim above survives in all
+    # four reconstructions that were tried, including the 14-day peak the next
+    # paragraph reasons from, so the conclusion stands; the digits do not.
     #
     # NOTE the correlation peaks at 14 days but the rmse-minimizing candidate
     # on the tau scan is 7. Those are different questions, and neither
