@@ -251,40 +251,6 @@ from zoneinfo import ZoneInfo
 import pytest
 
 from tidescout.engine.phase import library_phase
-
-
-def test_library_phase_deliberately_disagrees_with_the_salinity_models_phase_at():
-    """Both return "tidal phase in [0, 1)" with phase 0 at low water, and they
-    are NOT interchangeable -- see this task's note. Pinned so anyone
-    "unifying" them has to come here and read why. Measured 2026-08-26.
-    """
-    from datetime import datetime, timedelta
-    from zoneinfo import ZoneInfo
-
-    from tidescout.engine.tides import TideEvent, phase_at
-
-    t0 = datetime(2026, 5, 1, 0, 0, tzinfo=ZoneInfo("America/New_York"))
-    events = [
-        TideEvent(time=t0, kind="L", height_ft=0.0),
-        TideEvent(time=t0 + timedelta(hours=6.5), kind="H", height_ft=5.0),
-        TideEvent(time=t0 + timedelta(hours=12.4), kind="L", height_ft=0.2),
-    ]
-
-    for hours, want_event, want_library in (
-        (0.00, 0.0000, 0.0000),
-        (3.25, 0.2500, 0.2621),
-        (6.50, 0.5000, 0.5242),
-        (9.45, 0.7500, 0.7621),
-    ):
-        t = t0 + timedelta(hours=hours)
-        assert phase_at(events, t) == pytest.approx(want_event, abs=1e-4)
-        assert library_phase(events, t) == pytest.approx(want_library, abs=1e-4)
-
-    # The load-bearing assertion: they must actually DIFFER away from low
-    # water. Without it, this test would still pass if someone made
-    # library_phase delegate straight to phase_at.
-    mid = t0 + timedelta(hours=6.5)
-    assert abs(library_phase(events, mid) - phase_at(events, mid)) > 0.02
 from tidescout.engine.tides import TideEvent
 
 TZ = ZoneInfo("America/New_York")
@@ -335,6 +301,42 @@ def test_phase_is_none_before_the_first_low_water():
 def test_phase_is_none_when_there_are_no_lows():
     events = [TideEvent(time=HIGH, height_ft=4.8, kind="H")]
     assert library_phase(events, HIGH) is None
+def test_library_phase_deliberately_disagrees_with_the_salinity_models_phase_at():
+    """Both return "tidal phase in [0, 1)" with phase 0 at low water, and they
+    are NOT interchangeable -- see this task's note above. `phase_at` brackets
+    on EVENTS so high water is pinned at exactly 0.5; this one runs LOW TO LOW
+    so high water floats with the real diurnal inequality.
+
+    Pinned so anyone "unifying" the two has to come here and read why they
+    differ. Measured 2026-08-26 on a 6.5 h flood / 5.9 h ebb -- deliberately
+    NOT `_events()`, which is symmetric and would make the two agree, hiding
+    the whole point.
+    """
+    from tidescout.engine.tides import phase_at
+
+    t0 = datetime(2026, 5, 1, 0, 0, tzinfo=TZ)
+    events = [
+        TideEvent(time=t0, height_ft=0.0, kind="L"),
+        TideEvent(time=t0 + timedelta(hours=6.5), height_ft=5.0, kind="H"),
+        TideEvent(time=t0 + timedelta(hours=12.4), height_ft=0.2, kind="L"),
+    ]
+
+    for hours, want_event, want_library in (
+        (0.00, 0.0000, 0.0000),
+        (3.25, 0.2500, 0.2621),
+        (6.50, 0.5000, 0.5242),
+        (9.45, 0.7500, 0.7621),
+    ):
+        t = t0 + timedelta(hours=hours)
+        assert phase_at(events, t) == pytest.approx(want_event, abs=1e-4)
+        assert library_phase(events, t) == pytest.approx(want_library, abs=1e-4)
+
+    # The load-bearing assertion: they must actually DIFFER away from low
+    # water. Without it this test would still pass if someone made
+    # library_phase delegate straight to phase_at.
+    mid = t0 + timedelta(hours=6.5)
+    assert abs(library_phase(events, mid) - phase_at(events, mid)) > 0.02
+
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
