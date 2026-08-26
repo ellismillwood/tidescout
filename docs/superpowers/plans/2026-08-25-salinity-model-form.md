@@ -219,12 +219,23 @@ def test_a_constant_series_smooths_to_itself():
     """Any weighted mean of a constant is that constant. Catches a
     normalisation bug, which would otherwise show up only as a scale error in
     the fitted parameters."""
-    from datetime import date
+    from datetime import date, timedelta
 
     from tidescout.pipeline.salinity_fit import smooth_discharge
 
-    raw = {date(2026, 5, d): 5000.0 for d in range(1, 61)}
-    out, _ = smooth_discharge(raw, 7.0)
+    # Day index d maps to a sequential calendar day starting May 1, 2026 (not
+    # day-of-month d, which overflows past May's 31 days for d > 31).
+    def day(n: int) -> date:
+        return date(2026, 5, 1) + timedelta(days=n - 1)
+
+    raw = {day(d): 5000.0 for d in range(1, 61)}
+    out, dropped = smooth_discharge(raw, 7.0)
+    # Pin the POPULATION, not only the values: `all()` over an empty iterable
+    # is True, so without these a regression that dropped the whole record
+    # would pass this test in silence. tau=7 -> window 28 -> a day needs 29
+    # days including itself, so days 29-60 survive.
+    assert len(out) == 32
+    assert dropped == 28
     assert all(v == pytest.approx(5000.0) for v in out.values())
 
 
@@ -232,15 +243,20 @@ def test_smoothing_lags_a_step_change():
     """The physical content: a discharge step must reach the model gradually.
     One day after a 10x step, a 7-day memory must have moved well short of
     the new value."""
-    from datetime import date
+    from datetime import date, timedelta
 
     from tidescout.pipeline.salinity_fit import smooth_discharge
 
-    raw = {date(2026, 5, d): (1000.0 if d <= 40 else 10000.0) for d in range(1, 61)}
+    # Day index d maps to a sequential calendar day starting May 1, 2026 (not
+    # day-of-month d, which overflows past May's 31 days for d > 31).
+    def day(n: int) -> date:
+        return date(2026, 5, 1) + timedelta(days=n - 1)
+
+    raw = {day(d): (1000.0 if d <= 40 else 10000.0) for d in range(1, 61)}
     out, _ = smooth_discharge(raw, 7.0)
-    assert out[date(2026, 5, 41)] < 4000.0
-    assert out[date(2026, 5, 41)] > 1000.0
-    assert out[date(2026, 5, 60)] > out[date(2026, 5, 41)]
+    assert out[day(41)] < 4000.0
+    assert out[day(41)] > 1000.0
+    assert out[day(60)] > out[day(41)]
 
 
 def test_days_without_enough_history_are_dropped_and_counted():
@@ -262,14 +278,23 @@ def test_a_gap_in_the_discharge_record_drops_the_days_it_covers():
     """A missing gauge day must not be interpolated across -- the composite
     already refuses to sum short when a gauge is dark, and this must not
     quietly undo that."""
-    from datetime import date
+    from datetime import date, timedelta
 
     from tidescout.pipeline.salinity_fit import smooth_discharge
 
-    raw = {date(2026, 5, d): 5000.0 for d in range(1, 61) if d != 45}
+    # Day index d maps to a sequential calendar day starting May 1, 2026 (not
+    # day-of-month d, which overflows past May's 31 days for d > 31).
+    def day(n: int) -> date:
+        return date(2026, 5, 1) + timedelta(days=n - 1)
+
+    raw = {day(d): 5000.0 for d in range(1, 61) if d != 45}
     out, dropped = smooth_discharge(raw, 7.0)
-    assert date(2026, 5, 46) not in out
-    assert dropped > 0
+    assert day(46) not in out
+    # 59 days present; a day survives when n >= 29 AND its 28-day lookback
+    # clears the hole, i.e. n <= 44. Pinned rather than `> 0` so that a
+    # regression dropping most of the record cannot pass.
+    assert len(out) == 16
+    assert dropped == 43
 ```
 
 - [ ] **Step 2: Run them and watch them fail**
@@ -390,14 +415,24 @@ def test_memory_scan_scores_every_tau_on_the_same_rows():
 
 
 def test_a_longer_memory_drops_more_days_for_insufficient_history():
-    from datetime import date
+    from datetime import date, timedelta
 
     from tidescout.pipeline.salinity_fit import smooth_discharge
 
-    raw = {date(2026, 5, d): 5000.0 for d in range(1, 61)}
+    # Day index d maps to a sequential calendar day starting May 1, 2026 (not
+    # day-of-month d, which overflows past May's 31 days for d > 31).
+    def day(n: int) -> date:
+        return date(2026, 5, 1) + timedelta(days=n - 1)
+
+    raw = {day(d): 5000.0 for d in range(1, 61)}
+    # Both taus must leave SURVIVORS -- tau=21 gives a 84-day window against a
+    # 60-day record, so it drops everything and the assertion would then hold
+    # at saturation rather than because memory length drives exclusions.
+    # tau=3 -> window 12 -> 12 dropped; tau=10 -> window 40 -> 40 dropped.
     _, few = smooth_discharge(raw, 3.0)
-    _, many = smooth_discharge(raw, 21.0)
+    _, many = smooth_discharge(raw, 10.0)
     assert many > few
+    assert few == 12 and many == 40
 
 
 def test_calibration_reports_the_memory_window_and_its_exclusions(monkeypatch):
@@ -453,18 +488,23 @@ def test_the_fit_and_prediction_paths_smooth_discharge_identically():
 
     So the smoothing must have exactly ONE implementation that both paths call.
     """
-    from datetime import date
+    from datetime import date, timedelta
 
     from tidescout.pipeline.salinity_fit import smooth_discharge
 
-    raw = {date(2026, 5, d): 1000.0 + 100.0 * d for d in range(1, 61)}
+    # Day index d maps to a sequential calendar day starting May 1, 2026 (not
+    # day-of-month d, which overflows past May's 31 days for d > 31).
+    def day(n: int) -> date:
+        return date(2026, 5, 1) + timedelta(days=n - 1)
+
+    raw = {day(d): 1000.0 + 100.0 * d for d in range(1, 61)}
     tau = 7.0
 
     fit_side, _ = smooth_discharge(raw, tau)
     prediction_side, _ = smooth_discharge(raw, tau)
 
     assert fit_side == prediction_side
-    target = date(2026, 5, 55)
+    target = day(55)
     assert fit_side[target] != pytest.approx(raw[target]), (
         "if these are equal the smoothing is a no-op and this test proves nothing"
     )
