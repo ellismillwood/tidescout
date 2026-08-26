@@ -4,9 +4,11 @@ and every number in them will move."""
 
 import math
 
+import pytest
+
 from tidescout.config import load_species
 from tidescout.engine.conditions import HourlyConditions
-from tidescout.engine.score import FACTORS, score_factors
+from tidescout.engine.score import FACTORS, SubScore, combine, score_factors
 
 
 def _hour(**kw):
@@ -352,3 +354,95 @@ def test_all_nine_factors_are_always_present():
     subs = score_factors(_hour(), None, p)
     assert len(subs) == 9
     assert len({s.factor for s in subs}) == 9
+
+
+def _subs(**vals):
+    return [SubScore(f, v, 1.0, f"{f} reason", False) for f, v in vals.items()]
+
+
+def test_score_is_bounded_zero_to_one_hundred():
+    for v in (0.0, 0.5, 1.0):
+        s = combine(_subs(a=v, b=v, c=v))
+        assert 0 <= s.score <= 100
+
+
+def test_one_dead_factor_tanks_the_hour():
+    """The whole reason for a geometric mean. Arithmetic would give 0.67 here."""
+    tanked = combine(_subs(a=0.0, b=1.0, c=1.0))
+    assert tanked.score < 20
+
+
+def test_all_good_factors_score_near_one_hundred():
+    assert combine(_subs(a=1.0, b=1.0, c=1.0)).score >= 99
+
+
+def test_missing_factors_are_excluded_and_weights_renormalised():
+    """A dark sensor must not drag the score down -- spec section 8 requires
+    exclusion with renormalisation, never a silent default."""
+    present = combine(_subs(a=0.8, b=0.8))
+    with_missing = combine(
+        _subs(a=0.8, b=0.8) + [SubScore("c", float("nan"), 1.0, "c: no data", True)]
+    )
+    assert with_missing.score == present.score
+    assert with_missing.excluded == ["c"]
+
+
+def test_confidence_falls_as_factors_go_missing():
+    full = combine(_subs(a=0.8, b=0.8, c=0.8))
+    partial = combine(
+        _subs(a=0.8, b=0.8) + [SubScore("c", float("nan"), 1.0, "c: no data", True)]
+    )
+    assert partial.confidence < full.confidence
+    assert full.confidence == pytest.approx(1.0)
+
+
+def test_weights_actually_weight():
+    heavy = [SubScore("a", 0.2, 9.0, "", False), SubScore("b", 1.0, 1.0, "", False)]
+    light = [SubScore("a", 0.2, 1.0, "", False), SubScore("b", 1.0, 9.0, "", False)]
+    assert combine(heavy).score < combine(light).score
+
+
+def test_a_provisional_factor_keeps_confidence_but_lowers_constrained_share():
+    """The two numbers answer different questions. If a regression made
+    `constrained_share` an alias of `confidence`, this is what catches it."""
+    full = combine([
+        SubScore("flow", 0.8, 1.0, "", False),
+        SubScore("salinity", 0.6, 1.0, "", False, provisional=True),
+    ])
+    assert full.confidence == pytest.approx(1.0), "nothing was excluded"
+    assert full.constrained_share == pytest.approx(0.5)
+    assert full.provisional == ["salinity"]
+
+
+def test_constrained_share_is_one_when_nothing_is_provisional():
+    """The discriminating half -- without it, hardcoding constrained_share to
+    0.5 would pass the test above."""
+    s = combine([
+        SubScore("flow", 0.8, 1.0, "", False),
+        SubScore("salinity", 0.6, 1.0, "", False),
+    ])
+    assert s.constrained_share == pytest.approx(1.0)
+    assert s.provisional == []
+
+
+def test_everything_missing_returns_zero_confidence_not_a_crash():
+    s = combine([SubScore("a", float("nan"), 1.0, "a: no data", True)])
+    assert s.confidence == 0.0
+    assert s.score == 0
+
+
+def test_score_is_monotone_in_a_single_factor():
+    """Property test: improving one input can never lower the score."""
+    previous = -1
+    for v in [i / 20 for i in range(21)]:
+        s = combine(_subs(a=v, b=0.7, c=0.7)).score
+        assert s >= previous
+        previous = s
+
+
+def test_zero_is_floored_rather_than_producing_negative_infinity():
+    """log(0) is -inf, which would propagate NaN through the whole payload.
+    The floor must still tank the score -- it is a guard, not a rescue."""
+    s = combine(_subs(a=0.0, b=1.0, c=1.0))
+    assert math.isfinite(s.score)
+    assert s.score < 20

@@ -252,3 +252,70 @@ def score_factors(
                          False))
 
     return subs
+
+
+# Floor applied to a sub-score before taking its log. log(0) is -inf, which
+# would turn the whole day payload into NaN. 1e-3 still tanks the hour -- with
+# nine equal weights it pulls a perfect score to about 46 -- so this is a guard
+# against a numerical edge, not a rescue from a bad factor.
+SCORE_FLOOR = 1e-3
+
+
+@dataclass
+class HourScore:
+    score: int              # 0-100
+    subs: list[SubScore]
+    excluded: list[str]     # factors dropped for missing data
+    confidence: float       # share of total authored weight that survived
+    # Share of SURVIVING weight that is actually constrained by an observation.
+    # Distinct from `confidence`: a provisional factor survives (so it does not
+    # move `confidence`) while contributing nothing trustworthy (so it does
+    # move this). On Winyah Bay today, a full-data hour reads confidence 1.0
+    # and constrained_share well below it, which is the honest pair.
+    constrained_share: float
+    provisional: list[str]
+
+
+def combine(subs: list[SubScore]) -> HourScore:
+    """Weighted geometric mean of the present factors, as 0-100.
+
+    Geometric, not arithmetic, because spec section 8 requires a near-zero
+    critical factor to tank the hour rather than average away: dead slack water
+    or a cold shock should not be rescued by a pleasant sky. Arithmetically,
+    (0 + 1 + 1)/3 is a respectable 0.67; geometrically it is ~0.
+
+    Missing factors are EXCLUDED and the remaining weights renormalised -- never
+    defaulted to a middling value, which would invent data. `confidence` reports
+    how much of the authored weight survived, so the UI can show that an hour
+    scored 82 on six of nine factors.
+
+    `constrained_share` answers the OTHER question: of the weight that did
+    survive, how much rests on something observed. A provisional factor
+    (scored, full weight, but unconstrained -- see `SalinityReading`) counts
+    toward `confidence` and against this. On Winyah Bay today an all-factors
+    hour reads confidence 1.0 with constrained_share well below it, and
+    collapsing the two into one number would hide exactly that.
+    """
+    present = [s for s in subs if not s.missing and math.isfinite(s.value)]
+    excluded = [s.factor for s in subs if s.missing or not math.isfinite(s.value)]
+    total_weight = sum(s.weight for s in subs) or 1.0
+    live_weight = sum(s.weight for s in present)
+
+    if not present or live_weight <= 0:
+        return HourScore(
+            score=0, subs=subs, excluded=excluded, confidence=0.0,
+            constrained_share=0.0, provisional=[],
+        )
+
+    log_sum = sum(s.weight * math.log(max(s.value, SCORE_FLOOR)) for s in present)
+    value = math.exp(log_sum / live_weight)
+    return HourScore(
+        score=int(round(100 * min(max(value, 0.0), 1.0))),
+        subs=subs,
+        excluded=excluded,
+        confidence=live_weight / total_weight,
+        constrained_share=(
+            sum(x.weight for x in present if not x.provisional) / live_weight
+        ),
+        provisional=[x.factor for x in present if x.provisional],
+    )
