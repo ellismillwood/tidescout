@@ -481,37 +481,85 @@ There is no production caller of `salinity_field` yet, so this is a contract tes
 that will exist, and it must fail if that contract is broken:
 
 ```python
-def test_the_fit_and_prediction_paths_smooth_discharge_identically():
-    """The fit calibrates against smoothed discharge. A prediction caller that
-    passes raw same-day discharge is applying those parameters to a different
-    quantity, and nothing would error -- both are floats.
+def test_the_fit_path_routes_its_discharge_through_smooth_discharge(monkeypatch):
+    """If `collect_observations` inlines its own smoothing, or ignores
+    `discharge_memory_days`, every fitted parameter silently describes a
+    different quantity than a prediction caller supplies -- and nothing
+    errors, because both are floats.
 
-    So the smoothing must have exactly ONE implementation that both paths call.
+    This watches the fit path itself. Calling `smooth_discharge` twice and
+    comparing the two results would NOT catch it: that only proves a pure
+    function is deterministic, which is true of any implementation including
+    an inlined duplicate.
     """
+    from datetime import datetime, timedelta
+
+    from tidescout.config import load_fishery
+
+    fishery = load_fishery("winyah-bay")
+    monkeypatch.setattr(fishery.salinity, "discharge_memory_days", 7.0)
+
+    class _Store:
+        def salinity_series(self, station):
+            base = datetime(2026, 5, 1, 4, 0, tzinfo=UTC)
+            return [(base + timedelta(minutes=15 * i), 10.0 + (i % 8)) for i in range(96)]
+
+    monkeypatch.setattr(salinity_fit, "_open_store", lambda slug: _Store())
+    monkeypatch.setattr(
+        salinity_fit, "_store_distances",
+        lambda slug, fishery, sites: {s: (19.03, 5.0) for s in sites},
+    )
+    # A discharge record long enough that a 7-day memory (28-day window) has
+    # full history for the observation days above.
+    by_day = {date(2026, 3, 1) + timedelta(days=i): 4000.0 + 10.0 * i for i in range(70)}
+    monkeypatch.setattr(
+        salinity_fit, "_usgs_inputs", lambda *a, **k: ({}, by_day, [], {}),
+    )
+    from tidescout.sources import noaa
+
+    monkeypatch.setattr(noaa, "tide_events_range", lambda *a, **k: [])
+
+    real = salinity_fit.smooth_discharge
+    seen_taus: list[float] = []
+
+    def spy(by_day, tau_days):
+        seen_taus.append(tau_days)
+        return real(by_day, tau_days)
+
+    monkeypatch.setattr(salinity_fit, "smooth_discharge", spy)
+    salinity_fit.collect_observations("winyah-bay", fishery, cache=None, days=90)
+
+    assert seen_taus, "collect_observations never called smooth_discharge -- the fit path is reading raw discharge, or has inlined its own smoothing"
+    assert seen_taus == [7.0], f"expected the CONFIGURED tau, saw {seen_taus}"
+
+
+def test_smoothing_at_the_configured_tau_is_not_a_no_op():
+    """Guards the test above: if tau were misread as 0 everywhere, the spy
+    would still fire and still see the configured value, while the discharge
+    reaching the fit was unchanged."""
     from datetime import date, timedelta
 
     from tidescout.pipeline.salinity_fit import smooth_discharge
 
-    # Day index d maps to a sequential calendar day starting May 1, 2026 (not
-    # day-of-month d, which overflows past May's 31 days for d > 31).
     def day(n: int) -> date:
         return date(2026, 5, 1) + timedelta(days=n - 1)
 
     raw = {day(d): 1000.0 + 100.0 * d for d in range(1, 61)}
-    tau = 7.0
-
-    fit_side, _ = smooth_discharge(raw, tau)
-    prediction_side, _ = smooth_discharge(raw, tau)
-
-    assert fit_side == prediction_side
+    out, _ = smooth_discharge(raw, 7.0)
     target = day(55)
-    assert fit_side[target] != pytest.approx(raw[target]), (
-        "if these are equal the smoothing is a no-op and this test proves nothing"
-    )
+    assert out[target] != pytest.approx(raw[target])
+    assert out[target] < raw[target], "a backward-weighted mean of a rising series must lag it"
 ```
 
-The second assertion is the important one: without it the test passes trivially when `tau` is
-misread as 0 and both sides return the input unchanged.
+**Why this replaced a tautology.** The first draft of this step asserted
+`smooth_discharge(raw, tau) == smooth_discharge(raw, tau)` and called that a parity check between
+the fit and prediction paths. It is not: the same pure function called twice returns the same
+answer no matter how many duplicate implementations exist elsewhere. It would have passed against
+exactly the defect it was written to catch. The spy above fails if the fit path stops calling
+`smooth_discharge` or passes a tau other than the configured one, which is the part that is
+actually checkable today -- there is still no production caller of `salinity_field`, so the
+prediction half of the contract rests on the module note in Step 4's last paragraph, not on a test
+pretending to cover it.
 
 Then add a module-level note in `engine/salinity.py` stating that `cfs` means the memory-smoothed
 discharge whenever `cfg.discharge_memory_days > 0`, and that a caller passing raw same-day
