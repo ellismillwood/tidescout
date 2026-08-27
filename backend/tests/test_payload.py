@@ -99,6 +99,61 @@ def test_an_out_of_domain_gauge_is_never_labelled_measured(synthetic_day_out_of_
     assert all(h["constrained_share"] < 1.0 for h in flagged)
 
 
+def test_an_in_domain_gauge_is_labelled_measured(synthetic_day_in_domain_gauge):
+    """2026-08-26 re-review: Important 1's fix had no test on its POSITIVE
+    half. Every existing provenance test in this codebase carries both
+    halves (`test_a_measured_salinity_carries_no_caveat` sits beside
+    `test_an_uncalibrated_salinity_reaches_the_payload_as_provisional`;
+    `test_constrained_share_is_one_when_nothing_is_provisional` sits beside
+    the one that proves it moves) -- this one was the exception, and three
+    over-correction mutations (flip the non-USGS default, ignore
+    `w.in_domain` and always exclude a declared station, or make
+    `_measured_salinity_in_domain` return `False` unconditionally) all
+    passed the full suite without it. Station 02136371 (Sampit River) is a
+    real Winyah Bay sensor, declared with no `in_domain: false` override,
+    so a genuine reading from it must still reach the payload confidently:
+    `MEASURED`, no `~` and no caveat in the reason, `constrained_share`
+    exactly 1.00 (nothing else on this fixture's full-data day is
+    provisional or missing).
+    """
+    from tidescout.pipeline.payload import build_payload
+
+    p = build_payload(**synthetic_day_in_domain_gauge)
+
+    assert p["salinity"]["series"], "no bay-wide salinity reading resolved at all"
+    for row in p["salinity"]["series"]:
+        assert row["provenance"] == "measured", row
+
+    for rows in p["species"].values():
+        for h in rows["hours"]:
+            assert "salinity" not in h["provisional"], h
+            assert h["constrained_share"] == 1.0, h
+            sal = next(s for s in h["subs"] if s["factor"] == "salinity")
+            assert sal["provisional"] is False, sal
+            assert "~" not in sal["reason"] and "UNCALIBRATED" not in sal["reason"], sal
+
+
+def test_a_non_usgs_salinity_source_still_defaults_to_measured(
+    synthetic_day_non_usgs_salinity_source,
+):
+    """2026-08-26 re-review: `_measured_salinity_in_domain` has TWO
+    default-True branches -- one for a `source` that names no declared USGS
+    sensor, one for a `source` that is not USGS-shaped at all
+    (`not source.startswith("usgs:")`). `test_an_in_domain_gauge_is_
+    labelled_measured`'s `"usgs:02136371"` source cannot exercise this
+    second branch -- it starts with `"usgs:"` and IS declared, so a mutation
+    that flips ONLY the non-USGS default would leave that test green. This
+    fixture's `"coops:8661070"` source is what closes that gap.
+    """
+    from tidescout.pipeline.payload import build_payload
+
+    p = build_payload(**synthetic_day_non_usgs_salinity_source)
+
+    assert p["salinity"]["series"], "no bay-wide salinity reading resolved at all"
+    for row in p["salinity"]["series"]:
+        assert row["provenance"] == "measured", row
+
+
 def test_payload_flags_an_extrapolated_salinity(synthetic_day_freshet):
     """Spec section 10: degraded inputs surface, they do not hide."""
     from tidescout.pipeline.payload import build_payload

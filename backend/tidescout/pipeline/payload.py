@@ -203,6 +203,22 @@ def _measured_salinity_in_domain(source: str, fishery) -> bool:
     not explicitly flagged) when `source` names no declared USGS sensor at
     all -- a non-USGS or synthetic `source` (a test fixture's `"synthetic"`,
     for instance) is not this check's business.
+
+    INHERITED GAP (2026-08-26 re-review, not introduced or closed by this
+    function): `source` names whichever sensor supplied TEMPERATURE, not
+    necessarily the one that supplied SALINITY -- see `_bay_salinity_
+    reading`'s own docstring for the full explanation. This function can
+    therefore only gate on the temperature station's `in_domain` verdict,
+    which is the right answer whenever one station reports both parameters
+    (true of every water sensor Winyah declares today) but would be the
+    WRONG one on a fishery whose temperature- and salinity-reporting
+    stations disagree and only the temperature one is `in_domain`: a
+    climatology-fallback salinity value would then read as `MEASURED`
+    because the station named in `source` passed this gate, even though
+    that station never actually supplied the salinity number being checked.
+    Closing this fully needs `WaterSummary` to carry the salinity station's
+    identity separately from `source`, which is a `WaterSummary`/
+    `WaterSensor` shape change, not a fix to this function.
     """
     if not source.startswith("usgs:"):
         return True

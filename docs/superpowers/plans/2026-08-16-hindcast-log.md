@@ -61,28 +61,68 @@ rests on `engine.salinity`'s uncalibrated model (`fitted: false` in
 an observation. **All nine rows below now read `constrained_share < 1.0`**
 -- unlike the previous generation, where all nine read exactly `1.00`
 because station 021108125's out-of-domain reading was wrongly accepted as
-`MEASURED` (see Important 1 above). With that fixed, no station Winyah
-Bay has ever configured can make `constrained_share` read 1.00 on this
-fishery: every declared USGS salinity sensor is either climatology-graded
-or, now, correctly excluded as out-of-domain, so the bay-wide salinity
-reading always falls through to the uncalibrated spatial model, and
-`fitted: false` keeps it provisional every time. `constrained_share`
-differs slightly BY SPECIES, not by date, because it is a function of each
-species' own relative factor weights (`(total_weight - salinity_weight) /
-total_weight`) and salinity is the only factor provisional on any of these
-rows: 0.92 for redfish (salinity weight 0.5 of 6.3), 0.87 for speckled
-trout (0.9 of 6.4 -- trout weights salinity heaviest of the three, so
-losing it to "provisional" costs the most confidence), 0.91 for southern
-flounder (0.6 of 6.4). `test_an_uncalibrated_salinity_reaches_the_payload_
-as_provisional` (`backend/tests/test_payload.py`) exercises this path with
-a synthetic day; `test_an_out_of_domain_gauge_is_never_labelled_measured`
-(same file) is the test added for Important 1 specifically, proving this
-against a REAL declared Winyah Bay station rather than only a synthetic
-one. The per-FEATURE numbers behind "top-ranked features" are unaffected
+`MEASURED` (see Important 1 above). With that fixed, no station Winyah Bay
+currently declares can make `constrained_share` read 1.00 on a row
+generated the way these nine were: every declared USGS salinity sensor is
+either climatology-graded or now correctly excluded as out-of-domain, so
+the bay-wide salinity reading falls through to the uncalibrated spatial
+model, and `fitted: false` keeps it provisional. **This is not a
+structural guarantee, and this file already documents the gap that breaks
+it 60 lines below ("Every input below is now date-faithful"):**
+`_measured_salinity_in_domain` gates on `WaterSummary.source`, which names
+whichever sensor supplied TEMPERATURE, not necessarily the one that
+supplied SALINITY. If both of Winyah's salinity-capable USGS stations ever
+went dark on TEMPERATURE specifically while the in-domain, temperature-only
+02136371 kept reporting, `source` would read `"usgs:02136371"` -- correctly
+`in_domain` -- while `salinity_ppt` itself had silently fallen to
+climatology, and the reading would be labelled `MEASURED` on a guess.
+Closing that fully needs `WaterSummary` to carry the salinity station's
+own identity, not just the temperature one's (see `_measured_salinity_
+in_domain`'s docstring). `constrained_share` differs slightly BY SPECIES,
+not by date, because it is a function of each species' own relative factor
+weights (`(total_weight - salinity_weight) / total_weight`) and salinity
+is the only factor provisional on any of these rows: 0.92 for redfish
+(salinity weight 0.5 of 6.3), 0.87 for speckled trout (0.9 of **7.1** --
+trout weights salinity heaviest of the three, so losing it to
+"provisional" costs `constrained_share` the most, NOT `confidence`, which
+reads 1.00 on all nine rows regardless -- `confidence` and
+`constrained_share` answer different questions and this pair of columns is
+the entire reason both are carried), 0.91 for southern flounder (0.6 of
+6.4). `test_an_uncalibrated_salinity_reaches_the_payload_as_provisional`
+(`backend/tests/test_payload.py`) exercises the negative path with a
+synthetic day; `test_an_out_of_domain_gauge_is_never_labelled_measured`
+(same file) proves it against a REAL declared Winyah Bay station rather
+than only a synthetic one; `test_an_in_domain_gauge_is_labelled_measured`
+and `test_a_non_usgs_salinity_source_still_defaults_to_measured` prove the
+POSITIVE half -- a genuinely in-domain or unrecognised-source reading is
+still `MEASURED` -- which an earlier version of this fix had no test for.
+The per-FEATURE numbers behind "top-ranked features" are unaffected
 either way and always were: `score_feature` always uses the spatial model
 at the feature's own along-estuary distance, never the bay-wide sensor
 value, so every map marker's activation rested on the unfitted model
 regardless of what the gauge said, in every generation of this log.
+
+**`constrained_share` (and `confidence`) are a SNAPSHOT of this run, not a
+property of the date or species.** Both are computed from whichever
+factors actually resolved that hour, and `combine` renormalises over
+whatever survives -- so a source going dark between one regeneration and
+the next moves the number even for the identical date and species.
+Measured directly: one run of this exact table read southern_flounder /
+2026-07-28's `constrained_share` at 0.9063 with `missing: []` (every
+source live); a second run, with `missing: ['weather']` (pressure and wind
+both excluded that day), read 0.8868 for the SAME species and date --
+`(5.3 - 0.6) / 5.3` instead of `(6.4 - 0.6) / 6.4`, because losing two more
+factors to `missing` shrinks the denominator `constrained_share` divides
+by. Both numbers are correct for the run that produced them; neither is
+"the" constrained_share for southern_flounder on 2026-07-28. This is spec
+section 10 working as designed -- a source going dark is supposed to move
+the disclosure, not hide behind a number that looks fixed -- and it is the
+best evidence on this branch that the renormalisation machinery is real
+end-to-end rather than only exercised by a fixture. All nine rows in the
+table below were regenerated together in one `build_payload` pass per
+date, each with `missing: []`; a future regeneration during a source
+outage will legitimately read different `constrained_share` values on the
+same dates without either version being wrong.
 
 ## Salinity is now the model, not the gauge
 

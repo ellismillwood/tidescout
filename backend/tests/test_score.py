@@ -118,6 +118,48 @@ def test_the_same_printed_flow_speed_never_carries_two_labels():
     assert "slack" not in sub.reason, sub.reason
 
 
+def test_the_same_printed_pressure_trend_never_carries_two_labels():
+    """2026-08-26 re-review: Minor 7's fix touched flow, pressure, wind and
+    salinity, but only flow had a regression test -- reverting pressure's
+    rounding alone left all 791 tests green. -0.501 mb/3h is genuinely below
+    the -0.5 "falling" threshold but displays as "-0.5" at `:+.1f` -- the
+    same string a genuinely steady -0.499 also displays, which raw
+    comparison would label "pre-frontal feeding window" while a reader sees
+    the identical "-0.5 mb/3h" a steady reading also shows.
+    """
+    p = load_species()["redfish"]
+    sub = _by_factor(score_factors(_hour(pressure_trend_mb_3h=-0.501), None, p))["pressure"]
+    assert "-0.5" in sub.reason, sub.reason
+    assert "steady" in sub.reason, sub.reason
+    assert "pre-frontal feeding window" not in sub.reason, sub.reason
+
+
+def test_the_same_printed_wind_speed_never_carries_two_labels():
+    """2026-08-26 re-review: see the pressure test above -- wind is the
+    second of the three unpinned factors. 4.6 kn is genuinely below the
+    "calm" threshold of 5 but rounds to "5" at `:.0f`, the same string a
+    genuine 5.0 kn ("light", 5 is not < 5) also displays.
+    """
+    p = load_species()["redfish"]
+    sub = _by_factor(score_factors(_hour(wind_speed_kn=4.6), None, p))["wind"]
+    assert "5 kn" in sub.reason, sub.reason
+    assert "light" in sub.reason, sub.reason
+    assert "calm" not in sub.reason, sub.reason
+
+
+def test_the_same_printed_salinity_never_carries_two_labels():
+    """2026-08-26 re-review: see the pressure test above -- salinity is the
+    third of the three unpinned factors. 4.96 ppt is genuinely below the
+    "near-fresh" threshold of 5 but rounds to "5.0" at `:.1f`, the same
+    string a genuine 5.0 ppt ("brackish", 5.0 is not < 5) also displays.
+    """
+    p = load_species()["redfish"]
+    sub = _by_factor(score_factors(_hour(), None, p, salinity=_sal(4.96, fitted=True)))["salinity"]
+    assert "5.0 ppt" in sub.reason, sub.reason
+    assert "brackish" in sub.reason, sub.reason
+    assert "near-fresh" not in sub.reason, sub.reason
+
+
 def test_stage_factor_converts_the_half_cycle_frac_to_a_full_cycle_and_labels_it_right():
     """2026-08-26 review, Important 1: `stage_at`'s `frac` resets to 0 at
     every hi/lo turn -- a HALF-cycle fraction -- but the YAML curves are

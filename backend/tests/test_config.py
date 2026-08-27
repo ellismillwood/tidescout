@@ -101,7 +101,7 @@ def test_cdmo_water_sensors_are_declarable():
     reads that list to decide what to look for in the store."""
     from tidescout.models import WaterSensor
 
-    w = WaterSensor(kind="cdmo", station="NIWTAWQ", params=["SAL"])
+    w = WaterSensor(kind="cdmo", station="NIWTAWQ", params=["SAL"], in_domain=True)
     assert w.kind == "cdmo"
     assert w.off_axis is False
 
@@ -109,8 +109,22 @@ def test_cdmo_water_sensors_are_declarable():
 def test_off_axis_marks_a_station_on_a_different_branch():
     from tidescout.models import WaterSensor
 
-    w = WaterSensor(kind="cdmo", station="NIWCBWQ", params=["SAL"], off_axis=True)
+    w = WaterSensor(
+        kind="cdmo", station="NIWCBWQ", params=["SAL"], off_axis=True, in_domain=True
+    )
     assert w.off_axis is True
+
+
+def test_in_domain_has_no_default_and_must_be_declared():
+    """2026-08-26 re-review: `WaterSensor.in_domain` was made required, not
+    defaulted, for the same reason `SalinityReading.fitted` (Minor 5, same
+    review) was -- a `True` default on this field would silently reproduce
+    Important 1's original bug for the next station a human declares.
+    """
+    from tidescout.models import WaterSensor
+
+    with pytest.raises(ValidationError):
+        WaterSensor(kind="usgs", station="00000000", params=["00480"])
 
 
 def test_winyah_declares_all_six_nerrs_water_quality_stations():

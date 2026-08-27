@@ -67,17 +67,24 @@ class WaterSensor(BaseModel):
     # `off_axis` is: a human reads `pipeline.salinity_fit.site_distances_km`'s
     # `snap_gap_m` for the station and records the verdict here, rather than
     # `pipeline.payload`'s per-hour scoring path reaching for the network or
-    # re-deriving the distance field on every call. Default `True` because
-    # most declared stations ARE in or near the domain; set `False` only for
-    # a station independently confirmed to snap to a cell kilometres away
-    # (2026-08-26 review, Important 1: Winyah's own `021108125`, at 9,498 m,
-    # and `02110815`, at 1,362 m, both snap to the SAME cell -- the distance
-    # field's extreme fresh end -- so a real reading from either one is not a
-    # reading of the reach the scoring layer actually reads). Unlike
-    # `off_axis`, this is not a branch-identity question and has no computed
-    # per-payload-run screen behind it yet; treat it exactly as hand-set as
-    # `off_axis` was before Task 5 computed a screen for that one.
-    in_domain: bool = True
+    # re-deriving the distance field on every call (2026-08-26 review,
+    # Important 1: Winyah's own `021108125`, at 9,498 m, and `02110815`, at
+    # 1,362 m, both snap to the SAME cell -- the distance field's extreme
+    # fresh end -- so a real reading from either one is not a reading of the
+    # reach the scoring layer actually reads).
+    #
+    # REQUIRED, no default (2026-08-26 re-review): a `True` default here
+    # would be exactly the bug `SalinityReading.fitted` (Minor 5, same
+    # review) was made required to stop -- an optimistic default on a
+    # disclosure-relevant field, one layer up. `off_axis` is allowed to
+    # default `False` because its wrong-default failure mode is contained
+    # (one extra station silently pollutes a calibration fit's diagnostics,
+    # visible in `n_distinct_distances`/rmse the next time anyone runs it);
+    # this field's wrong-default failure mode is silently reproducing the
+    # ORIGINAL Important 1 bug for the next station a human declares, with
+    # no diagnostic anywhere that would surface it. A required field forces
+    # that human to make the call instead of inheriting a guess.
+    in_domain: bool
 
 
 class Stations(BaseModel):

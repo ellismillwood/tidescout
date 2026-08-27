@@ -107,6 +107,51 @@ def synthetic_day_out_of_domain_gauge(monkeypatch):
 
 
 @pytest.fixture
+def synthetic_day_in_domain_gauge(monkeypatch):
+    """The mirror image of `synthetic_day_out_of_domain_gauge`: `water` names
+    a REAL Winyah Bay sensor declared `in_domain: true` (the default) in
+    `fisheries/winyah-bay.yaml` -- station 02136371 (Sampit River), the one
+    USGS site `pipeline.salinity_fit`'s own module docstring calls "the only
+    in-domain candidate". Without this, Important 1's fix has no test
+    proving the POSITIVE half: that a genuinely in-domain gauge is STILL
+    labelled MEASURED, not that every gauge got swept into MODELLED
+    (2026-08-26 re-review). See `test_an_in_domain_gauge_is_labelled_
+    measured` in `test_payload.py`.
+    """
+    from tidescout.sources import dayloader
+    from tidescout.sources.usgs import WaterSummary
+
+    water = WaterSummary(temp_f=84.0, temp_trend_f_3d=0.4,
+                          salinity_ppt=12.0, source="usgs:02136371")
+    monkeypatch.setattr(
+        dayloader, "load_day", lambda *a, **k: _day_conditions(4_200.0, "med", water=water)
+    )
+    return dict(slug="winyah-bay", day=date(2026, 8, 16), model_label="gfs_seamless", cache=None)
+
+
+@pytest.fixture
+def synthetic_day_non_usgs_salinity_source(monkeypatch):
+    """A `source` that names no declared USGS sensor at all -- `payload.
+    _measured_salinity_in_domain`'s OTHER default-True branch, distinct from
+    `synthetic_day_in_domain_gauge`'s (which exercises a declared, found
+    station). 2026-08-26 re-review: an over-correction mutation that flips
+    ONLY this branch's default (`if not source.startswith("usgs:"): return
+    True` -> `return False`) leaves `synthetic_day_in_domain_gauge`
+    untouched, because that fixture's source DOES start with `"usgs:"` --
+    this fixture is what closes that specific gap.
+    """
+    from tidescout.sources import dayloader
+    from tidescout.sources.usgs import WaterSummary
+
+    water = WaterSummary(temp_f=84.0, temp_trend_f_3d=0.4,
+                          salinity_ppt=12.0, source="coops:8661070")
+    monkeypatch.setattr(
+        dayloader, "load_day", lambda *a, **k: _day_conditions(4_200.0, "med", water=water)
+    )
+    return dict(slug="winyah-bay", day=date(2026, 8, 16), model_label="gfs_seamless", cache=None)
+
+
+@pytest.fixture
 def synthetic_day_freshet(monkeypatch):
     """22,996 cfs -- the TOP of the calibrated range, so this is the fixture
     that must surface both an extrapolated salinity and a clamped regime
