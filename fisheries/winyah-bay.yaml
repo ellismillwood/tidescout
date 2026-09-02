@@ -58,22 +58,37 @@ stations:
   water:
     # WACCAMAW RIVER NEAR PAWLEYS ISLAND, SC (33.5066, -79.1270) -- tidal
     # reach (site_tp_cd=ST-TS), live-reporting both params (temp 27.5-30.9
-    # degC, salinity 0.0 ppth over the last 3 days).
+    # degC, salinity 0.0 ppth over the last 3 days). `in_domain: false`
+    # (2026-08-26 review, Important 1): 9,498 m from the nearest in-domain
+    # library cell (see `salinity_fit.py`'s module docstring and the
+    # calibration note below) -- it snaps to the field's own extreme fresh
+    # end, so a real salinity reading here is not a reading of the reach the
+    # scoring layer actually reads. `payload._bay_salinity_reading` will not
+    # label this station's salinity MEASURED because of it; its TEMPERATURE
+    # reading is unaffected -- water_temp has no domain-distance concern.
     - kind: usgs
       station: "021108125"
       params: ["00010", "00480"]
+      in_domain: false
     # WACCAMAW R NR HAGLEY LANDING NR PAWLEYS ISLAND, SC (33.4446, -79.1739)
     # -- tidal reach, live-reporting both params (temp 28.9-29.8 degC,
-    # salinity 0.0-1.0 ppth).
+    # salinity 0.0-1.0 ppth). `in_domain: false` for the same reason as
+    # 021108125 above -- 1,362 m from the nearest in-domain cell, snapping to
+    # the SAME cell that station does.
     - kind: usgs
       station: "02110815"
       params: ["00010", "00480"]
+      in_domain: false
     # SAMPIT RIVER BELOW US 17 NEAR GEORGETOWN, SC (33.3599, -79.2880) --
     # right at Georgetown; only 00010 (temp) reports live, no 00480 data
-    # available for this site, so salinity omitted.
+    # available for this site, so salinity omitted. `in_domain: true`:
+    # `pipeline.salinity_fit`'s own module docstring calls this "the only
+    # in-domain candidate" among Winyah's USGS 00480 sites (it just has no
+    # salinity history to use that standing for).
     - kind: usgs
       station: "02136371"
       params: ["00010"]
+      in_domain: true
     # ---- NERRS North Inlet-Winyah Bay reserve, six water-quality stations ----
     # All six are STORED (data/winyah-bay/ndbc.sqlite, 2.05 M salinity
     # readings over 2016-01-01..2026-08-23) and all six are covered by the
@@ -97,19 +112,25 @@ stations:
     # measured along a route that exited through North Inlet, understating
     # the bay by 27-43%). Format: along-estuary km, snap gap m.
     #
-    # WINYAH BAY PROPER -- on the salt-intrusion axis, fitted:
+    # WINYAH BAY PROPER -- on the salt-intrusion axis, fitted. All three
+    # snap within double-digit metres of an in-domain cell (12.1/5.0/3.2 m
+    # -- see the per-station snap gaps in each comment), so `in_domain:
+    # true` on all three.
     - kind: cdmo                       # Thousand Acre    16.68 km, snap 12.1 m
       station: "NIWTAWQ"               # mean salinity  7.12 ppt
       params: ["SAL"]
       off_axis: false
+      in_domain: true
     - kind: ndbc                       # Winyah Bay SURFACE 19.03 km, snap 5.0 m
       station: "WYSS1"                 # mean salinity  5.96 ppt
       params: ["DEPTH", "OTMP", "COND", "SAL", "O2%", "O2PPM", "CLCON", "TURB", "PH", "EH"]
       off_axis: false
+      in_domain: true
     - kind: cdmo                       # Winyah Bay BOTTOM  19.03 km, snap 3.2 m
       station: "NIWWBWQ"               # mean salinity  9.60 ppt
       params: ["SAL"]
       off_axis: false
+      in_domain: true
     # The WS/WB pair share one piling and one along-estuary distance, and
     # differ only in depth. Bottom is saltier than surface by a median
     # +3.30 ppt (Task 11, 337,891 paired instants; bottom saltier 86.8% of
@@ -130,18 +151,26 @@ stations:
     # Their distances also MOVE with the seed polygon's northern cut, while
     # the bay's do not -- they route to the seed's EDGE rather than to a
     # mouth, which is further evidence they are off this axis.
+    # All three North Inlet stations also snap within single-digit metres
+    # (4.3/5.6/8.0 m) of an in-domain cell -- `off_axis` excludes them from
+    # the salt-intrusion FIT because they are the wrong BRANCH, which is a
+    # different question from whether their coordinates land in the domain
+    # at all. `in_domain: true` on all three accordingly.
     - kind: cdmo                       # Clambank Landing 12.88 km, snap  4.3 m
       station: "NIWCBWQ"               # mean salinity 31.91 ppt
       params: ["SAL"]
       off_axis: true
+      in_domain: true
     - kind: cdmo                       # Oyster Landing  13.76 km, snap  5.6 m
       station: "NIWOLWQ"               # mean salinity 32.04 ppt
       params: ["SAL"]
       off_axis: true
+      in_domain: true
     - kind: cdmo                       # Debidue Creek   14.18 km, snap  8.0 m
       station: "NIWDCWQ"               # mean salinity 31.38 ppt
       params: ["SAL"]
       off_axis: true
+      in_domain: true
     # The reserve runs exactly ONE weather station system-wide, at Oyster
     # Landing (niwolmet). It is not a water sensor and is not declared here;
     # `import-cdmo` routes MET files into the sibling met_observations table

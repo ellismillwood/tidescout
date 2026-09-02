@@ -2,9 +2,14 @@ import pytest
 import yaml
 from pydantic import ValidationError
 
-from tidescout.config import load_fishery
+from tidescout.config import load_fishery, load_species
 from tidescout.models import Fishery
 from tidescout.paths import FISHERIES_DIR
+
+FACTORS = {
+    "flow", "stage", "light", "solunar", "pressure", "wind", "water_temp",
+    "salinity", "season",
+}
 
 
 def test_load_winyah_bay():
@@ -80,6 +85,8 @@ def test_real_fishery_document_has_no_unknown_top_level_keys():
     for path in FISHERIES_DIR.glob("*.yaml"):
         if path.name.endswith((".known-spots.yaml", ".tiles.yaml")):
             continue  # parsed by different models, never reach Fishery
+        if path.name == "species_weights.yaml":
+            continue  # per-species SpeciesProfile map, not a Fishery document
         raw = yaml.safe_load(path.read_text())
         Fishery.model_validate(raw)  # raises ValidationError on any extra key
 
@@ -94,7 +101,7 @@ def test_cdmo_water_sensors_are_declarable():
     reads that list to decide what to look for in the store."""
     from tidescout.models import WaterSensor
 
-    w = WaterSensor(kind="cdmo", station="NIWTAWQ", params=["SAL"])
+    w = WaterSensor(kind="cdmo", station="NIWTAWQ", params=["SAL"], in_domain=True)
     assert w.kind == "cdmo"
     assert w.off_axis is False
 
@@ -102,8 +109,22 @@ def test_cdmo_water_sensors_are_declarable():
 def test_off_axis_marks_a_station_on_a_different_branch():
     from tidescout.models import WaterSensor
 
-    w = WaterSensor(kind="cdmo", station="NIWCBWQ", params=["SAL"], off_axis=True)
+    w = WaterSensor(
+        kind="cdmo", station="NIWCBWQ", params=["SAL"], off_axis=True, in_domain=True
+    )
     assert w.off_axis is True
+
+
+def test_in_domain_has_no_default_and_must_be_declared():
+    """2026-08-26 re-review: `WaterSensor.in_domain` was made required, not
+    defaulted, for the same reason `SalinityReading.fitted` (Minor 5, same
+    review) was -- a `True` default on this field would silently reproduce
+    Important 1's original bug for the next station a human declares.
+    """
+    from tidescout.models import WaterSensor
+
+    with pytest.raises(ValidationError):
+        WaterSensor(kind="usgs", station="00000000", params=["00480"])
 
 
 def test_winyah_declares_all_six_nerrs_water_quality_stations():
@@ -135,3 +156,110 @@ def test_north_inlet_stations_are_marked_off_axis_and_bay_stations_are_not():
         assert by_station[station].off_axis is True, f"{station} is on North Inlet"
     for station in ("WYSS1", "NIWWBWQ", "NIWTAWQ"):
         assert by_station[station].off_axis is False, f"{station} is on the bay"
+
+
+# -- Species profiles: weights and response curves ----------------------------
+
+
+def test_all_three_species_load():
+    species = load_species()
+    assert set(species) == {"redfish", "speckled_trout", "southern_flounder"}
+
+
+def test_every_species_covers_every_factor():
+    """A factor with a weight but no curve silently scores NaN and gets
+    excluded, which looks like a dark sensor rather than a config gap."""
+    for name, profile in load_species().items():
+        assert set(profile.weights) == FACTORS, f"{name} weights"
+        assert FACTORS - {"season"} <= set(profile.curves) | {"salinity"}, f"{name} curves"
+
+
+def test_a_negative_weight_is_rejected_rather_than_inverting_a_factor():
+    """`combine` takes a weighted geometric MEAN, so a negative weight makes a
+    factor push the score the wrong way and nothing raises -- the log-sum
+    absorbs it and returns a plausible number. This file's header invites
+    hand-editing, so the typo it invites must fail loudly.
+
+    Zero stays legal: spec section 8 calls solunar "zeroable".
+    """
+    from tidescout.models import Curve, SpeciesProfile
+
+    good = dict(
+        curves={}, salinity=Curve(x=[0.0, 1.0], y=[0.0, 1.0]),
+        months=dict.fromkeys(range(1, 13), 1.0), structure_weight=0.2,
+        light_cloud_widen=0.35,
+    )
+    SpeciesProfile(weights={"flow": 0.0}, **good)          # zero is fine
+    with pytest.raises(ValidationError, match="must be >= 0"):
+        SpeciesProfile(weights={"flow": -0.5}, **good)
+
+
+def test_a_negative_structure_weight_is_rejected_too():
+    """`structure_weight` lives OUTSIDE `weights` (2026-08-26 review,
+    Important 2: it cannot join `weights` without breaking `FACTORS`'s
+    nine-factor pin), so it needs its own guard rather than inheriting the
+    one above by accident. Without this, a validator that only ever looked
+    at `self.weights` would silently let a negative `structure_weight`
+    through -- the discriminating half of the check just above.
+    """
+    from tidescout.models import Curve, SpeciesProfile
+
+    good = dict(
+        weights={"flow": 0.0}, curves={}, salinity=Curve(x=[0.0, 1.0], y=[0.0, 1.0]),
+        months=dict.fromkeys(range(1, 13), 1.0), light_cloud_widen=0.35,
+    )
+    SpeciesProfile(structure_weight=0.0, **good)          # zero is fine here too
+    with pytest.raises(ValidationError, match="must be >= 0"):
+        SpeciesProfile(structure_weight=-0.2, **good)
+
+
+def test_light_cloud_widen_out_of_bounds_is_rejected():
+    """2026-08-26 review, Important 2: `light_cloud_widen` moved out of
+    Python and into this per-species field, so the same "this file's header
+    invites hand-editing, so the typo it invites must fail loudly" argument
+    the weight/structure_weight guards above make applies to it too -- a
+    value outside [0, 1] can flip `effective`'s sign or make heavier cloud
+    read as FARTHER from twilight (see `SpeciesProfile`'s own validator
+    docstring).
+    """
+    from tidescout.models import Curve, SpeciesProfile
+
+    good = dict(
+        weights={"flow": 0.0}, curves={}, salinity=Curve(x=[0.0, 1.0], y=[0.0, 1.0]),
+        months=dict.fromkeys(range(1, 13), 1.0), structure_weight=0.2,
+    )
+    SpeciesProfile(light_cloud_widen=0.0, **good)  # boundary values are fine
+    SpeciesProfile(light_cloud_widen=1.0, **good)
+    with pytest.raises(ValidationError, match="light_cloud_widen must be between 0 and 1"):
+        SpeciesProfile(light_cloud_widen=-0.1, **good)
+    with pytest.raises(ValidationError, match="light_cloud_widen must be between 0 and 1"):
+        SpeciesProfile(light_cloud_widen=1.5, **good)
+
+
+def test_every_month_has_a_season_modifier():
+    for name, profile in load_species().items():
+        assert sorted(profile.months) == list(range(1, 13)), name
+
+
+def test_species_differ_from_one_another():
+    """Three identical profiles would mean the species lens does nothing."""
+    species = load_species()
+    trout = species["speckled_trout"].salinity
+    red = species["redfish"].salinity
+    assert trout.y != red.y, "trout should be far less salinity-tolerant than redfish"
+
+
+def test_trout_salinity_curve_penalises_near_fresh_water():
+    """Spec section 7: trout ~10-30 ppt, avoid near-fresh."""
+    from tidescout.engine.curves import evaluate
+
+    trout = load_species()["speckled_trout"].salinity
+    assert evaluate(trout, 2.0) < 0.3
+    assert evaluate(trout, 20.0) > 0.85
+
+
+def test_redfish_tolerate_the_whole_range():
+    from tidescout.engine.curves import evaluate
+
+    red = load_species()["redfish"].salinity
+    assert all(evaluate(red, s) > 0.4 for s in (2.0, 12.0, 30.0))

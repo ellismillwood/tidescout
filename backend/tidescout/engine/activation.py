@@ -37,7 +37,7 @@ class FeatureMetrics:
     `mean_med` library, all 26 phases, on the shipped sampling anchors: of
     13,614 finite per-feature `okubo_w` samples, 54 are negative -- but 52 of
     those are floating-point residue at or below 1e-20, and the only two of any
-    size at all are -8.2e-7 and -4.5e-9, both more than ten times inside the
+    size at all are -8.8e-7 and -4.5e-9, both more than ten times inside the
     `quiet_w = 1e-5` dead band. NOT ONE SAMPLE IN THE CYCLE CROSSES -quiet_w.
     (At the pre-anchor-fix anchors the same measurement read 13,588 finite and
     2 negative; the shipped numbers make the conclusion stronger, not weaker --

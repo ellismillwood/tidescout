@@ -82,6 +82,17 @@ class WaterSummary:
     temp_trend_f_3d: float | None
     salinity_ppt: float | None
     source: str
+    # Which sensor supplied SALINITY -- not necessarily the one `source`
+    # names, which is whichever supplied TEMPERATURE. The two are resolved by
+    # independent per-parameter fallbacks below, so on Winyah Bay they
+    # routinely differ: the only in-domain USGS gauge (02136371) declares
+    # `params: ["00010"]`, temperature alone. Without this field, a
+    # climatology salinity paired with a real in-domain temperature station
+    # was published as MEASURED with `constrained_share` 1.0 and no caveat
+    # (2026-09-02 review, Finding 5) -- the one factor this project has spent
+    # five PRs learning to disclose honestly. `"climatology"` when it fell
+    # back; None only for a summary built before this field existed.
+    salinity_source: str | None = None
 
 
 def fetch_series(
@@ -181,7 +192,48 @@ def fetch_daily(
     return out
 
 
-def discharge_summary(fishery: Fishery, cache: Cache) -> DischargeSummary:
+def _bucket_for(basis: float | None, fishery: Fishery) -> str:
+    """low/med/high from a single discharge number -- the ONE place both the
+    live and historical paths below decide this, so they cannot drift apart
+    on what counts as which bucket."""
+    if basis is None:
+        return "med"
+    if basis < fishery.discharge_buckets.low_below_cfs:
+        return "low"
+    if basis > fishery.discharge_buckets.high_above_cfs:
+        return "high"
+    return "med"
+
+
+def discharge_summary(fishery: Fishery, cache: Cache, day: date | None = None) -> DischargeSummary:
+    """Composite river discharge -- LIVE by default, a past date's own daily
+    mean when `day` names one.
+
+    `day=None`, `day` == today, or `day` in the future all take the ORIGINAL
+    live path (`_live_discharge_summary`): the instantaneous-values (`iv`)
+    feed, read as of `datetime.now(UTC)` regardless of what `day` asked for.
+    That is unchanged from every version of this function before this
+    parameter existed, and a future date has no daily mean to read yet
+    anyway -- USGS has not measured it -- so falling back to a live "now"
+    reading is more honest than fabricating one.
+
+    A `day` STRICTLY BEFORE today takes `_historical_discharge_summary`
+    instead: `fetch_daily`'s NWIS `dv` (daily-mean) service, the SAME one
+    `pipeline.salinity_fit._usgs_inputs` already uses for calibration, keyed
+    by `day` itself rather than "now". Before this, `dayloader.load_day`
+    called the live path unconditionally regardless of which date it was
+    assembling -- every date's `DayConditions.discharge` reflected whatever
+    the gauge read at CALL TIME, not the date being scored. That is a wiring
+    gap in `load_day`, not a missing capability in this module: the daily
+    endpoint this closes it with (`fetch_daily`) already existed and was
+    already relied on elsewhere.
+    """
+    if day is not None and day < datetime.now(UTC).date():
+        return _historical_discharge_summary(fishery, cache, day)
+    return _live_discharge_summary(fishery, cache)
+
+
+def _live_discharge_summary(fishery: Fishery, cache: Cache) -> DischargeSummary:
     sites = [r.usgs_site for r in fishery.rivers if r.usgs_site]
     weights = {r.usgs_site: r.weight for r in fishery.rivers if r.usgs_site}
     series = fetch_series(sites, [PARAM_DISCHARGE], 4, cache)
@@ -211,14 +263,59 @@ def discharge_summary(fishery: Fishery, cache: Cache) -> DischargeSummary:
     cfs_now = total_now if got_now else None
     cfs_lagged = total_lagged if got_lagged else None
     basis = cfs_lagged if cfs_lagged is not None else cfs_now
-    if basis is None:
-        bucket = "med"
-    elif basis < fishery.discharge_buckets.low_below_cfs:
-        bucket = "low"
-    elif basis > fishery.discharge_buckets.high_above_cfs:
-        bucket = "high"
-    else:
-        bucket = "med"
+    bucket = _bucket_for(basis, fishery)
+    summary = DischargeSummary(cfs_now, cfs_lagged, bucket, sites, contributing, stale)
+    summary.trend = (
+        cfs_now / cfs_lagged if cfs_now is not None and cfs_lagged not in (None, 0.0) else None
+    )
+    summary.limb = classify_limb(summary)
+    return summary
+
+
+def _composite_daily_discharge(fishery: Fishery, daily: dict[str, list[tuple[date, float]]]):
+    """Weighted composite discharge per calendar day, over days EVERY
+    weighted gauge reports.
+
+    The SAME logic as `pipeline.salinity_fit.composite_discharge_by_day`
+    (weight = "include this gauge", not `inflow_share`; days any gauge is
+    dark are dropped rather than summed short), duplicated here rather than
+    imported: `sources/usgs.py` sits BELOW `pipeline/` in this codebase's
+    layering (`salinity_fit.py` already imports `usgs.fetch_daily`), so
+    importing the other direction would be a cycle. Two independent readers
+    of the same NWIS `dv` response computing this identically is a smaller
+    risk than a sources module depending on a pipeline one.
+    """
+    weights = {r.usgs_site: r.weight for r in fishery.rivers if r.usgs_site}
+    if not weights or any(s not in daily for s in weights):
+        return {}
+    by_site = {s: dict(daily[s]) for s in weights}
+    days = set.intersection(*(set(by_site[s]) for s in weights))
+    return {d: sum(by_site[s][d] * w for s, w in weights.items()) for d in sorted(days)}
+
+
+def _historical_discharge_summary(fishery: Fishery, cache: Cache, day: date) -> DischargeSummary:
+    """`day`'s own USGS daily mean (NWIS `dv`, statCd 00003) rather than
+    whatever the live gauge reads right now -- see `discharge_summary`'s
+    docstring for when this path is taken.
+
+    `cfs_lagged` reads the composite 1-2 CALENDAR days before `day`, mirroring
+    the live path's 24-48h-before-now window but expressed in days since a
+    historical query has no "now" to be hours behind -- the salt front lags
+    discharge by days regardless of which path supplied the number, so a
+    caller reading `trend`/`limb` gets the same shape of answer either way.
+    """
+    sites = [r.usgs_site for r in fishery.rivers if r.usgs_site]
+    start = day - timedelta(days=3)
+    daily = fetch_daily(sites, PARAM_DISCHARGE, str(start), str(day), cache)
+    composite = _composite_daily_discharge(fishery, daily)
+    cfs_now = composite.get(day)
+    lag_days = [d for d in composite if timedelta(days=1) <= (day - d) <= timedelta(days=2)]
+    cfs_lagged = fmean(composite[d] for d in lag_days) if lag_days else None
+    reporting = {site for site in sites if site in daily and day in dict(daily[site])}
+    contributing = [s for s in sites if s in reporting]
+    stale = [s for s in sites if s not in reporting]
+    basis = cfs_lagged if cfs_lagged is not None else cfs_now
+    bucket = _bucket_for(basis, fishery)
     summary = DischargeSummary(cfs_now, cfs_lagged, bucket, sites, contributing, stale)
     summary.trend = (
         cfs_now / cfs_lagged if cfs_now is not None and cfs_lagged not in (None, 0.0) else None
@@ -234,10 +331,49 @@ def _daily_means(points: list[tuple[datetime, float]]) -> dict:
     return {d: fmean(vs) for d, vs in days.items()}
 
 
-def water_summary(fishery: Fishery, cache: Cache, month: int) -> WaterSummary:
+def water_summary(
+    fishery: Fishery, cache: Cache, month: int, day: date | None = None
+) -> WaterSummary:
+    """Water temperature and (bay-wide) salinity -- LIVE by default, a past
+    date's own daily mean when `day` names one.
+
+    The SAME split `discharge_summary` uses, for the SAME reason: `day=None`,
+    `day` == today, or `day` in the future all take `_live_water_summary`
+    (the original, unconditional behaviour); a `day` strictly before today
+    takes `_historical_water_summary` instead, reading that date's own USGS
+    daily mean via `fetch_daily` rather than whatever the live 7-day window
+    happens to read right now. `month` still selects the climatology
+    fallback either way -- callers pass `day.month` today (see `dayloader.
+    load_day`) and could pass `day.month` derived from `day` itself once
+    both are threaded through, but keeping them as two separate parameters
+    matches `discharge_summary`'s shape and does not force every existing
+    caller (three in `test_usgs.py` alone) to change.
+
+    This was the last day-blind input `dayloader.load_day` still had after
+    `discharge_summary` was fixed (2026-08-26 review): `water_temp` carries
+    weight 1.0 for speckled trout and southern flounder (joint-highest of
+    the nine factors) and 0.8 for redfish, so scoring a July day on today's
+    live August water was a larger error than the discharge blindness this
+    mirrors.
+
+    `source` names whichever sensor supplied TEMPERATURE (or `"climatology"`
+    if none did). It is NOT necessarily the one that supplied SALINITY --
+    the two are resolved by independent per-parameter fallbacks below. That
+    used to be an open gap, since `payload._bay_salinity_reading` gated
+    salinity provenance on `source`; `salinity_source` (2026-09-02 review,
+    Finding 5) now carries the salinity answer separately, and that is what
+    the payload reads.
+    """
+    if day is not None and day < datetime.now(UTC).date():
+        return _historical_water_summary(fishery, cache, month, day)
+    return _live_water_summary(fishery, cache, month)
+
+
+def _live_water_summary(fishery: Fishery, cache: Cache, month: int) -> WaterSummary:
     usgs_sensors = [w for w in fishery.stations.water if w.kind == "usgs"]
     temp_f = trend = salinity = None
     source = "climatology"
+    salinity_source = "climatology"
     if usgs_sensors:
         sites = [w.station for w in usgs_sensors]
         series = fetch_series(sites, [PARAM_TEMP_C, PARAM_SALINITY], 7, cache)
@@ -254,9 +390,54 @@ def water_summary(fishery: Fishery, cache: Cache, month: int) -> WaterSummary:
             sal_points = series.get((w.station, PARAM_SALINITY), [])
             if sal_points and salinity is None:
                 salinity = sal_points[-1][1]
+                salinity_source = f"usgs:{w.station}"
     if temp_f is None:
         temp_f = fishery.climatology.water_temp_f_by_month[month]
         source = "climatology"
     if salinity is None:
         salinity = fishery.climatology.salinity_ppt_by_month[month]
-    return WaterSummary(temp_f, trend, salinity, source)
+        salinity_source = "climatology"
+    return WaterSummary(temp_f, trend, salinity, source, salinity_source)
+
+
+def _historical_water_summary(
+    fishery: Fishery, cache: Cache, month: int, day: date
+) -> WaterSummary:
+    """`day`'s own USGS daily means (NWIS `dv`, statCd 00003) for temperature
+    and salinity, each independently -- mirrors `_live_water_summary`'s
+    per-parameter fallback and its exact trend shape (latest vs the mean of
+    the 3 most recent PRIOR days with data, not necessarily calendar-
+    consecutive), just evaluated at a fixed `day` instead of "now". `fetch_
+    daily` already returns one value per calendar day, so there is no
+    `_daily_means`-style collapse step to run first, unlike the live path's
+    `fetch_series` (instantaneous values, many per day).
+    """
+    usgs_sensors = [w for w in fishery.stations.water if w.kind == "usgs"]
+    temp_f = trend = salinity = None
+    source = "climatology"
+    salinity_source = "climatology"
+    if usgs_sensors:
+        sites = [w.station for w in usgs_sensors]
+        start = day - timedelta(days=7)
+        temp_daily = fetch_daily(sites, PARAM_TEMP_C, str(start), str(day), cache)
+        sal_daily = fetch_daily(sites, PARAM_SALINITY, str(start), str(day), cache)
+        for w in usgs_sensors:
+            temp_by_day = dict(temp_daily.get(w.station, []))
+            if day in temp_by_day and temp_f is None:
+                temp_f = temp_by_day[day] * 9 / 5 + 32
+                days = sorted(temp_by_day)
+                if len(days) >= 4:
+                    latest, prior = days[-1], days[-4:-1]
+                    trend = (temp_by_day[latest] - fmean([temp_by_day[d] for d in prior])) * 9 / 5
+                source = f"usgs:{w.station}"
+            sal_by_day = dict(sal_daily.get(w.station, []))
+            if day in sal_by_day and salinity is None:
+                salinity = sal_by_day[day]
+                salinity_source = f"usgs:{w.station}"
+    if temp_f is None:
+        temp_f = fishery.climatology.water_temp_f_by_month[month]
+        source = "climatology"
+    if salinity is None:
+        salinity = fishery.climatology.salinity_ppt_by_month[month]
+        salinity_source = "climatology"
+    return WaterSummary(temp_f, trend, salinity, source, salinity_source)

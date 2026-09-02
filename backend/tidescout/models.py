@@ -1,6 +1,6 @@
 from typing import Literal
 
-from pydantic import BaseModel, ConfigDict, Field, field_validator
+from pydantic import BaseModel, ConfigDict, Field, field_validator, model_validator
 
 
 class RiverGauge(BaseModel):
@@ -61,6 +61,30 @@ class WaterSensor(BaseModel):
     # main stem -- the computed screen will still catch it if the geometry
     # agrees, and will report it excluded either way.
     off_axis: bool = False
+    # True when this station's coordinates actually snap to an in-domain
+    # library cell close enough to trust its reading as describing the reach
+    # it snaps to -- the SAME style of computed-then-authored override
+    # `off_axis` is: a human reads `pipeline.salinity_fit.site_distances_km`'s
+    # `snap_gap_m` for the station and records the verdict here, rather than
+    # `pipeline.payload`'s per-hour scoring path reaching for the network or
+    # re-deriving the distance field on every call (2026-08-26 review,
+    # Important 1: Winyah's own `021108125`, at 9,498 m, and `02110815`, at
+    # 1,362 m, both snap to the SAME cell -- the distance field's extreme
+    # fresh end -- so a real reading from either one is not a reading of the
+    # reach the scoring layer actually reads).
+    #
+    # REQUIRED, no default (2026-08-26 re-review): a `True` default here
+    # would be exactly the bug `SalinityReading.fitted` (Minor 5, same
+    # review) was made required to stop -- an optimistic default on a
+    # disclosure-relevant field, one layer up. `off_axis` is allowed to
+    # default `False` because its wrong-default failure mode is contained
+    # (one extra station silently pollutes a calibration fit's diagnostics,
+    # visible in `n_distinct_distances`/rmse the next time anyone runs it);
+    # this field's wrong-default failure mode is silently reproducing the
+    # ORIGINAL Important 1 bug for the next station a human declares, with
+    # no diagnostic anywhere that would surface it. A required field forces
+    # that human to make the call instead of inheriting a guess.
+    in_domain: bool
 
 
 class Stations(BaseModel):
@@ -475,3 +499,124 @@ class Fishery(BaseModel):
                 "renormalising silently would hide an authoring mistake"
             )
         return shares
+
+
+class Curve(BaseModel):
+    """A piecewise-linear response curve, authored as breakpoints.
+
+    Deliberately not a parameterised shape ("bell(centre, width)"): the point of
+    keeping these in YAML is that Ellis can read what the model believes about
+    wind or water temperature and edit it directly, and a list of (x, y) pairs
+    is legible in a way a formula is not. It is also exhaustively testable --
+    every claim about a curve reduces to an assertion about a number.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    x: list[float]
+    y: list[float]
+
+    @model_validator(mode="after")
+    def _check(self):
+        if len(self.x) != len(self.y):
+            raise ValueError("curve x and y must be the same length")
+        if len(self.x) < 2:
+            raise ValueError("a curve needs at least two points to interpolate")
+        if any(b <= a for a, b in zip(self.x, self.x[1:], strict=False)):
+            raise ValueError("curve x values must be in strictly ascending order")
+        if any(v < 0.0 or v > 1.0 for v in self.y):
+            raise ValueError("curve y values must be between 0 and 1")
+        return self
+
+
+class SpeciesProfile(BaseModel):
+    """One species' lens on the same factor pipeline.
+
+    Weights are relative, not normalised -- the combiner renormalises whatever
+    survives after missing factors are dropped, so authoring them as "flow
+    matters about twice as much as wind" is the intended style.
+
+    `salinity` is a separate field, not a member of `curves`, because it is
+    evaluated against a modelled/observed ppt reading rather than an
+    `HourlyConditions` attribute -- Task 4 reads it on its own path. `season`
+    has no curve at all: months are discrete, so its response lives entirely
+    in `months`.
+
+    `structure_weight` is a SIBLING of `weights`, not a member of it.
+    `test_every_species_covers_every_factor` requires `weights` to equal
+    `FACTORS` exactly, and `FACTORS` is pinned to the nine hourly factors --
+    putting "structure" inside `weights` would need a matching `FACTORS`
+    entry, which would make `score_factors` emit a TENTH sub-score for every
+    fishery-wide hour and break `test_all_nine_factors_are_always_present`.
+    `structure` only ever applies at the per-FEATURE boundary
+    (`engine.score.score_feature`), never the hourly one, so it gets its own
+    field instead -- still authored per species, in YAML, exactly like every
+    other weight, just outside the set that has to sum to nine (2026-08-26
+    review, Important 2).
+
+    `light_cloud_widen` is a second SIBLING, added for the same reason:
+    `score_factors`'s light factor used to widen the low-light window by a
+    hard-coded Python `0.35`, species-independent, even though `light`'s
+    weight (0.5-0.9 across the three species) and its curve are both
+    authored per species right here. That is the same class of bug the
+    `structure_*` curves were pulled out of Python for (2026-08-26 review,
+    Important 2). It is not a member of `curves` because it is a single
+    coefficient, not a piecewise response shape, and not a member of
+    `weights` because it does not multiply the factor's contribution to the
+    geometric mean -- it reshapes the INPUT the light curve is evaluated at,
+    before `_scored` ever runs.
+    """
+
+    model_config = ConfigDict(extra="forbid")
+
+    weights: dict[str, float]
+    curves: dict[str, Curve]
+    salinity: Curve
+    months: dict[int, float]
+    structure_weight: float
+    light_cloud_widen: float
+
+    @model_validator(mode="after")
+    def _weights_are_non_negative(self):
+        """A negative weight is not a low weight -- it is an incoherent one.
+
+        `combine` takes a weighted geometric mean, so a negative weight makes
+        a factor's contribution move the score the WRONG WAY, and nothing
+        raises: the log-sum absorbs it and returns a plausible-looking number.
+        `Curve.y` is already validated into [0, 1] for the same reason. This
+        file's header tells the reader to edit these numbers freely, so the
+        typo it invites has to fail loudly rather than silently invert a
+        factor.
+
+        Zero is allowed: spec section 8 calls solunar "zeroable", and a zero
+        weight correctly drops a factor out of the mean. `structure_weight`
+        is checked alongside `weights` for the same reason even though it
+        lives outside that dict: it feeds the exact same geometric mean,
+        inside `score_feature` rather than `score_factors`, and a negative
+        value would push a feature's structure signal the wrong way exactly
+        as a negative `weights` entry would push an hourly one.
+        """
+        bad = {k: v for k, v in self.weights.items() if v < 0.0}
+        if self.structure_weight < 0.0:
+            bad["structure_weight"] = self.structure_weight
+        if bad:
+            raise ValueError(f"species weights must be >= 0, got {bad}")
+        return self
+
+    @model_validator(mode="after")
+    def _light_cloud_widen_is_a_fraction(self):
+        """`score_factors` computes `effective = hours_off * (1.0 -
+        light_cloud_widen * cloud / 100.0)`. Outside [0, 1] this can flip
+        `effective`'s sign (a value > 1.0, at cloud=100) or make heavier
+        cloud read as FARTHER from twilight instead of nearer (a negative
+        value) -- both incoherent for a quantity the file header documents
+        as hours from twilight. `Curve.y` and `structure_weight`'s own
+        non-negative check exist for the identical reason: a typo this
+        file's header invites editing should fail loudly, not silently
+        invert a factor.
+        """
+        if not 0.0 <= self.light_cloud_widen <= 1.0:
+            raise ValueError(
+                f"light_cloud_widen must be between 0 and 1, got {self.light_cloud_widen}"
+            )
+        return self

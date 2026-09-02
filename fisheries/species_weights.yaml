@@ -1,0 +1,227 @@
+# EVERY NUMBER HERE IS A STARTING POINT, NOT A MEASUREMENT. These curves encode
+# conventional SC inshore wisdom and are meant to be tuned against hindcasts of
+# days Ellis remembers (Task 7). Edit freely -- nothing in Python hard-codes a
+# response shape, so changing a number here changes the answer immediately.
+#
+# Curves are piecewise-linear breakpoints: `x` is the real-world quantity, `y`
+# the 0-1 sub-score. Values outside the authored x range CLAMP to the end y.
+#
+# Units: flow m/s | stage tide_frac (0 = low water, 0.5 = high) | light hours
+# from the nearest of sunrise/sunset | solunar minutes from the nearest
+# major/minor | pressure mb change over 3 h | wind knots | water_temp degF |
+# salinity ppt.
+#
+# Weights are RELATIVE, not normalised -- the combiner renormalises whatever
+# survives after missing factors are dropped.
+#
+# `structure_weight` and the four `structure_*` curves (ambush/seam/eddy/
+# convergence) are a SIBLING set, outside the nine-factor `weights`/`curves`
+# contract -- see SpeciesProfile's docstring. They score a single FEATURE's
+# Phase 1 derived-structure fields (engine/activation.py's FeatureMetrics),
+# not an hourly HourlyConditions attribute, and only
+# engine/score.py:score_feature reads them; `score_factors`, `FACTORS` and
+# `test_all_nine_factors_are_always_present` are untouched by their presence
+# here. Units: structure_ambush m/s (speed contrast, `ambush_contrast`) |
+# structure_seam okubo_w s^-2 (Okubo-Weiss; SEAM-only, W > 0 -- see
+# FeatureMetrics's docstring for why a MAX-reduced okubo_w structurally
+# cannot report an eddy) | structure_eddy eddy_share, 0-1 (fraction of the
+# feature's WET disc classified rotation-dominated -- the channel that DOES
+# carry the eddy signal `structure_seam` cannot) | structure_convergence
+# s^-1 (closing speed, `structure.convergence`). All four are byte-identical
+# across the three species below, deliberately, for the same reason solunar
+# is: no species-specific evidence yet distinguishes "how much a redfish
+# cares about an ambush pocket" from a trout's, so inventing three different
+# shapes would fabricate a distinction nobody has measured. Breakpoints are
+# anchored to the REAL winyah-bay mean_med library, not guessed: 26 phases,
+# every feature, 13,614-13,742 finite per-feature samples, measured
+# 2026-08-26 (percentiles recorded in engine/score.py's `_structure_subscore`
+# docstring, reproducible via the same `tidescout flow-structure` sampling
+# path `cli.py` already uses).
+#
+# `light_cloud_widen` is a second SIBLING of `weights`, same reasoning:
+# how much heavy cloud widens the light factor's low-light window
+# (`effective = hours_off * (1.0 - light_cloud_widen * cloud_pct / 100.0)`,
+# `engine/score.py`'s factor 3) used to be a hard-coded Python `0.35`,
+# species-independent, even though `light`'s own weight and curve are both
+# authored per species right here (2026-08-26 review, Important 2).
+# Byte-identical 0.35 across all three species below, deliberately, for the
+# same reason `structure_*` and solunar are: this move only relocates the
+# number from Python to YAML, it does not claim any species-specific
+# evidence for a DIFFERENT cloud response -- that is Task 7 hindcast
+# territory, same as everything else in this file.
+
+redfish:
+  weights:
+    flow: 1.0
+    stage: 0.9
+    light: 0.7
+    # Spec section 8: "small default weight, zeroable". DELIBERATELY the same
+    # 0.3 for all three species, and redfish and speckled trout deliberately
+    # share a byte-identical curve -- solunar is the one factor with no
+    # species-specific evidence behind it, so inventing three different shapes
+    # would be fabricating a distinction this project has not measured. Task 7's
+    # hindcast is what earns the right to differentiate these; until then they
+    # are honestly identical rather than decoratively different.
+    solunar: 0.3
+    pressure: 0.6
+    wind: 0.7
+    water_temp: 0.8
+    salinity: 0.5       # broadly euryhaline -- salinity moves them, rarely stops them
+    season: 0.8
+  # See the file header: sibling of `weights`, not a member of it.
+  structure_weight: 0.2
+  light_cloud_widen: 0.35
+  curves:
+    flow:
+      x: [0.0, 0.10, 0.25, 0.50, 0.90, 1.50]
+      y: [0.10, 0.45, 0.85, 1.00, 0.85, 0.45]
+    stage:              # peaks late flood: bait pushed onto flooded flats
+      x: [0.00, 0.20, 0.40, 0.55, 0.75, 1.00]
+      y: [0.45, 0.80, 1.00, 0.90, 0.65, 0.45]
+    light:
+      x: [0.0, 1.0, 2.0, 4.0, 8.0]
+      y: [1.00, 0.85, 0.65, 0.45, 0.35]
+    solunar:
+      x: [0.0, 30.0, 60.0, 120.0, 360.0]
+      y: [1.00, 0.85, 0.72, 0.58, 0.50]
+    pressure:
+      x: [-4.0, -2.0, -0.5, 0.5, 2.0, 4.0]
+      y: [0.90, 1.00, 0.82, 0.68, 0.42, 0.25]
+    wind:
+      x: [0.0, 5.0, 12.0, 18.0, 25.0, 35.0]
+      y: [0.75, 1.00, 0.90, 0.60, 0.25, 0.05]
+    water_temp:
+      x: [45.0, 55.0, 65.0, 78.0, 88.0, 95.0]
+      y: [0.30, 0.60, 0.95, 1.00, 0.70, 0.30]
+    # Structure curves: byte-identical across all three species -- see the
+    # file header for why, and engine/score.py's `_structure_subscore` for
+    # the measured percentile table each breakpoint is anchored to.
+    structure_ambush:            # m/s speed contrast; real max measured 0.832
+      x: [0.00, 0.04, 0.10, 0.23, 0.53, 0.83]
+      y: [0.00, 0.20, 0.40, 0.60, 0.85, 1.00]
+    structure_seam:               # okubo_w s^-2; SEAM only (W > 0)
+      x: [0.0, 1.0e-5, 2.6e-5, 7.9e-5, 3.1e-4]
+      y: [0.00, 0.15, 0.40, 0.75, 1.00]
+    structure_eddy:                # eddy_share, 0-1; the ONLY eddy channel
+      x: [0.00, 0.03, 0.09, 0.14, 0.25]
+      y: [0.00, 0.35, 0.70, 0.90, 1.00]
+    structure_convergence:        # s^-1; real median measured 3.29e-4
+      x: [0.0, 3.3e-4, 9.5e-4, 2.4e-3, 7.0e-3, 1.47e-2]
+      y: [0.00, 0.20, 0.40, 0.65, 0.90, 1.00]
+  salinity:             # tolerant across the whole estuary
+    x: [0.0, 2.0, 5.0, 15.0, 30.0, 36.0]
+    y: [0.45, 0.60, 0.80, 1.00, 0.90, 0.70]
+  months:               # fall bull-red run at the jetties
+    {1: 0.55, 2: 0.55, 3: 0.70, 4: 0.85, 5: 0.95, 6: 0.90,
+     7: 0.85, 8: 0.90, 9: 1.00, 10: 1.00, 11: 0.90, 12: 0.65}
+
+speckled_trout:
+  weights:
+    flow: 1.0
+    stage: 0.8
+    light: 0.9          # markedly more dawn/dusk-driven than redfish
+    solunar: 0.3
+    pressure: 0.7
+    wind: 0.7
+    water_temp: 1.0     # cold snaps flip them to winter-hole behaviour
+    salinity: 0.9       # spec section 7: ~10-30 ppt, avoid near-fresh
+    season: 0.8
+  structure_weight: 0.2
+  light_cloud_widen: 0.35
+  curves:
+    flow:
+      x: [0.0, 0.10, 0.25, 0.50, 0.90, 1.50]
+      y: [0.12, 0.50, 0.95, 1.00, 0.70, 0.30]
+    stage:
+      x: [0.00, 0.25, 0.50, 0.70, 1.00]
+      y: [0.55, 0.95, 1.00, 0.85, 0.55]
+    light:
+      x: [0.0, 1.0, 2.0, 4.0, 8.0]
+      y: [1.00, 0.80, 0.55, 0.35, 0.25]
+    solunar:
+      x: [0.0, 30.0, 60.0, 120.0, 360.0]
+      y: [1.00, 0.85, 0.72, 0.58, 0.50]
+    pressure:
+      x: [-4.0, -2.0, -0.5, 0.5, 2.0, 4.0]
+      y: [0.85, 1.00, 0.80, 0.62, 0.35, 0.20]
+    wind:
+      x: [0.0, 5.0, 12.0, 18.0, 25.0, 35.0]
+      y: [0.80, 1.00, 0.85, 0.50, 0.20, 0.05]
+    water_temp:
+      x: [40.0, 50.0, 60.0, 75.0, 85.0, 92.0]
+      y: [0.15, 0.50, 0.90, 1.00, 0.60, 0.20]
+    structure_ambush:
+      x: [0.00, 0.04, 0.10, 0.23, 0.53, 0.83]
+      y: [0.00, 0.20, 0.40, 0.60, 0.85, 1.00]
+    structure_seam:
+      x: [0.0, 1.0e-5, 2.6e-5, 7.9e-5, 3.1e-4]
+      y: [0.00, 0.15, 0.40, 0.75, 1.00]
+    structure_eddy:
+      x: [0.00, 0.03, 0.09, 0.14, 0.25]
+      y: [0.00, 0.35, 0.70, 0.90, 1.00]
+    structure_convergence:
+      x: [0.0, 3.3e-4, 9.5e-4, 2.4e-3, 7.0e-3, 1.47e-2]
+      y: [0.00, 0.20, 0.40, 0.65, 0.90, 1.00]
+  salinity:             # the sharpest lens of the three -- near-fresh is close to a stop
+    x: [0.0, 2.0, 6.0, 10.0, 20.0, 30.0, 36.0]
+    y: [0.05, 0.10, 0.45, 0.85, 1.00, 0.90, 0.60]
+  months:               # spring and fall aggregations
+    {1: 0.50, 2: 0.55, 3: 0.75, 4: 0.95, 5: 1.00, 6: 0.85,
+     7: 0.75, 8: 0.75, 9: 0.95, 10: 1.00, 11: 0.90, 12: 0.60}
+
+southern_flounder:
+  weights:
+    flow: 0.9           # ambush predator: wants moving water, not fast water
+    stage: 1.0          # the strongest stage bias of the three
+    light: 0.5
+    solunar: 0.3
+    pressure: 0.5
+    wind: 0.6
+    water_temp: 1.0     # falling through the low 60s triggers the run
+    salinity: 0.6
+    season: 1.0
+  structure_weight: 0.2
+  light_cloud_widen: 0.35
+  curves:
+    flow:
+      x: [0.0, 0.08, 0.20, 0.45, 0.80, 1.50]
+      y: [0.15, 0.60, 1.00, 0.80, 0.45, 0.15]
+    stage:              # spec section 8: "flounder bias to ebb" -- peaks on the falling half
+      # x runs a full tidal cycle, so x=0.0 and x=1.0 are the same physical
+      # instant (low water) and y must match at both ends -- 0.50, closed,
+      # not the 0.60 an earlier draft left at the wrap (2026-08-26 review).
+      x: [0.00, 0.30, 0.55, 0.75, 0.90, 1.00]
+      y: [0.50, 0.60, 0.85, 1.00, 0.90, 0.50]
+    light:
+      x: [0.0, 1.0, 2.0, 4.0, 8.0]
+      y: [1.00, 0.90, 0.75, 0.60, 0.50]
+    solunar:
+      x: [0.0, 30.0, 60.0, 120.0, 360.0]
+      y: [1.00, 0.88, 0.78, 0.65, 0.58]
+    pressure:
+      x: [-4.0, -2.0, -0.5, 0.5, 2.0, 4.0]
+      y: [0.85, 0.95, 0.85, 0.75, 0.55, 0.40]
+    wind:
+      x: [0.0, 5.0, 12.0, 18.0, 25.0, 35.0]
+      y: [0.85, 1.00, 0.88, 0.55, 0.22, 0.05]
+    water_temp:
+      x: [50.0, 58.0, 65.0, 78.0, 86.0, 92.0]
+      y: [0.20, 0.70, 1.00, 0.90, 0.50, 0.15]
+    structure_ambush:
+      x: [0.00, 0.04, 0.10, 0.23, 0.53, 0.83]
+      y: [0.00, 0.20, 0.40, 0.60, 0.85, 1.00]
+    structure_seam:
+      x: [0.0, 1.0e-5, 2.6e-5, 7.9e-5, 3.1e-4]
+      y: [0.00, 0.15, 0.40, 0.75, 1.00]
+    structure_eddy:
+      x: [0.00, 0.03, 0.09, 0.14, 0.25]
+      y: [0.00, 0.35, 0.70, 0.90, 1.00]
+    structure_convergence:
+      x: [0.0, 3.3e-4, 9.5e-4, 2.4e-3, 7.0e-3, 1.47e-2]
+      y: [0.00, 0.20, 0.40, 0.65, 0.90, 1.00]
+  salinity:
+    x: [0.0, 3.0, 8.0, 18.0, 32.0, 36.0]
+    y: [0.20, 0.40, 0.80, 1.00, 0.90, 0.75]
+  months:               # the fall run out of the estuary
+    {1: 0.35, 2: 0.35, 3: 0.55, 4: 0.75, 5: 0.90, 6: 0.90,
+     7: 0.85, 8: 0.90, 9: 1.00, 10: 1.00, 11: 0.70, 12: 0.40}

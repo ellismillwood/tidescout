@@ -146,3 +146,60 @@ def test_cell_schedule_reads_a_regime_off_disk_in_phase_order(tmp_path, monkeypa
 
     expected = sched_mod.schedule_from_depths(_series(depths), phases)
     assert np.array_equal(s.wet_fraction, expected.wet_fraction)
+
+
+def test_cell_schedule_drops_the_librarys_closing_duplicate_snapshot():
+    """2026-09-02 review, Finding 8. Every regime on disk stores a closing
+    snapshot at phase 1.0 recorded as 0.0 and bit-identical to index 0, so
+    that consecutive PAIRS of snapshots span the cycle-closing gap.
+    `build_payload` already strips it before using the phase axis;
+    `cell_schedule` did not, and fed all 26 rows to `schedule_from_depths`.
+
+    That function treats the series as a ring already (`np.roll`), so the
+    duplicate is a 26th slot holding a copy of the 1st, and `wet_fraction` --
+    a plain `wet.mean(axis=0)` -- counts phase 0 twice out of 26 rather than
+    once out of 25.
+
+    This is not a diagnostic number: `wet_fraction` is the wet-window LENGTH
+    in `score._flat_wet_multiplier`'s hard 0/1 gate and the flat activation
+    multiplier itself.
+    """
+    import numpy as np
+
+    from tidescout.pipeline.schedule import schedule_from_depths
+
+    phases = [i / 25.0 for i in range(25)]
+    # Wet only at phase 0 -- the worst case, since that is the row the
+    # closing duplicate copies.
+    depths = [np.array([2.0]) if i == 0 else np.array([0.0]) for i in range(25)]
+    clean = schedule_from_depths(depths, phases)
+    assert clean.wet_fraction[0] == pytest.approx(1 / 25)
+
+    with_duplicate = schedule_from_depths(
+        [*depths, depths[0]], [*phases, 0.0]
+    )
+    assert with_duplicate.wet_fraction[0] == pytest.approx(2 / 26)
+    # The bug was worth nearly 2x on this cell; `cell_schedule` now strips
+    # the duplicate so the clean answer is the one that reaches the map.
+    assert with_duplicate.wet_fraction[0] > 1.9 * clean.wet_fraction[0]
+
+
+def test_flood_phase_is_the_first_wet_snapshot_not_the_last_dry_one():
+    """Pins the convention Finding 8 mis-stated, so the next reader does not
+    "fix" `flood_phase` toward the last-dry phase.
+
+    A cell first wet at index 6 reports `ph[6]`, not `ph[5]`. It follows that
+    a cell dry at 0.96 and wet at 0.0 correctly reports 0.0 -- there is no
+    wrap-specific error in `flood_phase`, with or without the closing
+    duplicate.
+    """
+    import numpy as np
+
+    from tidescout.pipeline.schedule import schedule_from_depths
+
+    phases = [i / 25.0 for i in range(25)]
+    mid = [np.array([2.0]) if 6 <= i <= 9 else np.array([0.0]) for i in range(25)]
+    assert schedule_from_depths(mid, phases).flood_phase[0] == pytest.approx(phases[6])
+
+    wrap = [np.array([2.0]) if i == 0 else np.array([0.0]) for i in range(25)]
+    assert schedule_from_depths(wrap, phases).flood_phase[0] == pytest.approx(0.0)

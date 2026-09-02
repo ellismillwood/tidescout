@@ -247,7 +247,7 @@ def test_eddy_share_reports_the_rotation_that_max_reduced_okubo_w_hides():
     not a hypothetical: over the shipped winyah-bay `mean_med` library, all 26
     phases, 54 of 13,614 finite per-feature `okubo_w` samples are negative --
     52 of them floating-point residue at or below 1e-20, and the only two of
-    any size (-8.2e-7 and -4.5e-9) more than ten times inside the
+    any size (-8.8e-7 and -4.5e-9) more than ten times inside the
     `quiet_w = 1e-5` dead band. Not one crosses -quiet_w. The feature-level
     eddy channel was dead by construction.
 

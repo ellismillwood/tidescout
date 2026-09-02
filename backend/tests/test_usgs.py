@@ -159,6 +159,75 @@ def test_discharge_excludes_stale_sites(monkeypatch, fishery, cache):
     assert "02110500" in s.stale
 
 
+def test_discharge_summary_reads_the_days_own_daily_mean_for_a_past_date(
+    monkeypatch, fishery, cache
+):
+    """The wiring gap Task 7's review closed: before this, `day` was accepted
+    but ignored -- `discharge_summary` always read the LIVE gauge regardless
+    of which date was being scored, so every hindcast date got today's
+    discharge. A `day` strictly before today must now read THAT day's own
+    USGS daily mean (`fetch_daily`, NWIS `dv`) instead.
+
+    `fetch_daily` is monkeypatched, not mocked over HTTP: this test pins the
+    SELECTION logic (which day's composite becomes `cfs_now`/`cfs_lagged`),
+    not the response parsing `test_fetch_daily_parses_and_sorts` below
+    already covers.
+    """
+    target = date(2020, 1, 15)
+    daily = {
+        "02131000": [
+            (target - timedelta(days=2), 1000.0),
+            (target - timedelta(days=1), 1100.0),
+            (target, 1200.0),
+        ],
+        "02110500": [
+            (target - timedelta(days=2), 200.0),
+            (target - timedelta(days=1), 220.0),
+            (target, 240.0),
+        ],
+        "02136000": [
+            (target - timedelta(days=2), 100.0),
+            (target - timedelta(days=1), 110.0),
+            (target, 120.0),
+        ],
+    }
+
+    def fake_fetch_daily(sites, param, start, end, cache):
+        assert param == usgs.PARAM_DISCHARGE
+        return {s: daily[s] for s in sites if s in daily}
+
+    monkeypatch.setattr(usgs, "fetch_daily", fake_fetch_daily)
+    summary = usgs.discharge_summary(fishery, cache, day=target)
+
+    # cfs_now: the composite AT `target` (1200 + 240 + 120), not at "now".
+    assert summary.cfs_now == pytest.approx(1560.0)
+    # cfs_lagged: the composite 1-2 days BEFORE `target`, averaged -- the
+    # same 24-48h-before-"now" shape the live path uses, expressed in days.
+    assert summary.cfs_lagged == pytest.approx((1300.0 + 1430.0) / 2)
+    assert summary.bucket == "low"  # basis (cfs_lagged) 1365 < 2774 threshold
+    assert summary.contributing == ["02131000", "02110500", "02136000"]
+    assert summary.stale == []
+
+
+def test_discharge_summary_ignores_day_for_today_and_the_future(monkeypatch, fishery, cache):
+    """`day` == today or in the future must still take the ORIGINAL live
+    path -- a future date has no daily mean to read (USGS has not measured
+    it yet), and `day` == today must not change existing callers'
+    behaviour."""
+    calls = []
+    monkeypatch.setattr(usgs, "_live_discharge_summary", lambda f, c: calls.append("live") or None)
+    monkeypatch.setattr(
+        usgs,
+        "_historical_discharge_summary",
+        lambda f, c, d: calls.append("historical") or None,
+    )
+    today = datetime.now(UTC).date()
+    usgs.discharge_summary(fishery, cache, day=None)
+    usgs.discharge_summary(fishery, cache, day=today)
+    usgs.discharge_summary(fishery, cache, day=today + timedelta(days=3))
+    assert calls == ["live", "live", "live"]
+
+
 @respx.mock
 def test_fetch_daily_parses_and_sorts(cache):
     payload = {"value": {"timeSeries": [{
@@ -228,6 +297,59 @@ def test_water_summary_mixed_live_temp_climatology_salinity(tmp_path):
     assert summary.temp_f == 77.0  # 25.0 C -> F, from the live sensor
     assert summary.temp_trend_f_3d is None  # only 1 day of history
     assert summary.salinity_ppt == fishery.climatology.salinity_ppt_by_month[8]
+
+
+def test_water_summary_reads_the_days_own_daily_mean_for_a_past_date(monkeypatch, fishery, cache):
+    """The last day-blind input `dayloader.load_day` had (2026-08-26
+    review): before this, `water_summary` always read the live 7-day
+    window regardless of `day`, so a July date scored on today's live
+    August water was wrong by up to half a sub-score on `water_temp`
+    (weight 1.0 for speckled trout/southern flounder). Proven here by
+    reading a DIFFERENT temperature from the live path and the historical
+    path in the SAME test, on the SAME station.
+    """
+    station = fishery.stations.water[0].station
+    target = date(2020, 1, 15)
+
+    def fake_fetch_series(sites, params, period_days, cache):
+        # LIVE path: "today", 30.0 C.
+        return {(station, usgs.PARAM_TEMP_C): [(datetime.now(UTC), 30.0)]}
+
+    def fake_fetch_daily(sites, param, start, end, cache):
+        # HISTORICAL path: `target`, a different value (18.0 C) -- and no
+        # salinity at all, so that half falls to climatology, exactly as
+        # the live path's own per-parameter fallback already allows.
+        if param == usgs.PARAM_TEMP_C:
+            return {station: [(target, 18.0)]}
+        return {}
+
+    monkeypatch.setattr(usgs, "fetch_series", fake_fetch_series)
+    monkeypatch.setattr(usgs, "fetch_daily", fake_fetch_daily)
+
+    live = usgs.water_summary(fishery, cache, month=1)
+    historical = usgs.water_summary(fishery, cache, month=1, day=target)
+
+    assert live.temp_f == pytest.approx(30.0 * 9 / 5 + 32)
+    assert historical.temp_f == pytest.approx(18.0 * 9 / 5 + 32)
+    assert live.temp_f != historical.temp_f
+    assert historical.source == f"usgs:{station}"
+    assert historical.salinity_ppt == fishery.climatology.salinity_ppt_by_month[1]
+
+
+def test_water_summary_ignores_day_for_today_and_the_future(monkeypatch, fishery, cache):
+    """Mirrors `test_discharge_summary_ignores_day_for_today_and_the_future`:
+    a future date has no daily mean to read (USGS has not measured it yet),
+    and `day` == today must not change existing callers' behaviour."""
+    calls = []
+    monkeypatch.setattr(usgs, "_live_water_summary", lambda f, c, m: calls.append("live") or None)
+    monkeypatch.setattr(
+        usgs, "_historical_water_summary", lambda f, c, m, d: calls.append("historical") or None
+    )
+    today = datetime.now(UTC).date()
+    usgs.water_summary(fishery, cache, month=8, day=None)
+    usgs.water_summary(fishery, cache, month=8, day=today)
+    usgs.water_summary(fishery, cache, month=8, day=today + timedelta(days=3))
+    assert calls == ["live", "live", "live"]
 
 
 def _summary(now, lagged):
