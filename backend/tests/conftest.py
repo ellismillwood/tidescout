@@ -121,8 +121,13 @@ def synthetic_day_in_domain_gauge(monkeypatch):
     from tidescout.sources import dayloader
     from tidescout.sources.usgs import WaterSummary
 
+    # `salinity_source` is set EXPLICITLY, not left to default: `source`
+    # names the TEMPERATURE station, and since the 2026-09-02 review the
+    # provenance gate reads the salinity one. This fixture's whole point is a
+    # station that genuinely supplied the salinity, so it has to say so.
     water = WaterSummary(temp_f=84.0, temp_trend_f_3d=0.4,
-                          salinity_ppt=12.0, source="usgs:02136371")
+                          salinity_ppt=12.0, source="usgs:02136371",
+                          salinity_source="usgs:02136371")
     monkeypatch.setattr(
         dayloader, "load_day", lambda *a, **k: _day_conditions(4_200.0, "med", water=water)
     )
@@ -144,7 +149,38 @@ def synthetic_day_non_usgs_salinity_source(monkeypatch):
     from tidescout.sources.usgs import WaterSummary
 
     water = WaterSummary(temp_f=84.0, temp_trend_f_3d=0.4,
-                          salinity_ppt=12.0, source="coops:8661070")
+                          salinity_ppt=12.0, source="coops:8661070",
+                          salinity_source="coops:8661070")
+    monkeypatch.setattr(
+        dayloader, "load_day", lambda *a, **k: _day_conditions(4_200.0, "med", water=water)
+    )
+    return dict(slug="winyah-bay", day=date(2026, 8, 16), model_label="gfs_seamless", cache=None)
+
+
+@pytest.fixture
+def synthetic_day_climatology_salinity_in_domain_temp(monkeypatch):
+    """The exact shape of 2026-09-02 review Finding 5: a real, in-domain
+    TEMPERATURE station paired with a salinity that silently fell back to
+    monthly climatology.
+
+    This is reachable on the shipped `fisheries/winyah-bay.yaml`, not a
+    contrivance. Both salinity-capable USGS gauges (021108125, 02110815) are
+    `in_domain: false`; the one in-domain gauge, 02136371, declares
+    `params: ["00010"]` -- temperature only. So whenever those two have no
+    data for the day (and `_historical_water_summary` requires that specific
+    calendar day per station), `source` becomes `usgs:02136371` while
+    `salinity_ppt` comes from `climatology.salinity_ppt_by_month`.
+
+    Gated on `source`, that shipped as `MEASURED`, `provisional=False`,
+    `constrained_share` 1.0, with no caveat anywhere in the reason -- a
+    climatology guess wearing a sensor's credibility.
+    """
+    from tidescout.sources import dayloader
+    from tidescout.sources.usgs import WaterSummary
+
+    water = WaterSummary(temp_f=84.0, temp_trend_f_3d=0.4,
+                          salinity_ppt=12.0, source="usgs:02136371",
+                          salinity_source="climatology")
     monkeypatch.setattr(
         dayloader, "load_day", lambda *a, **k: _day_conditions(4_200.0, "med", water=water)
     )

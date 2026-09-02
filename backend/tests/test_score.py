@@ -4,6 +4,7 @@ and every number in them will move."""
 
 import dataclasses
 import math
+from datetime import timedelta
 
 import pytest
 import yaml
@@ -99,6 +100,81 @@ def test_flow_reason_labels_the_regime_the_code_actually_computed():
     assert "slack" not in moving.reason and "ripping" not in moving.reason
     assert "ripping" in ripping.reason
     assert "slack" not in ripping.reason and "moving" not in ripping.reason
+
+
+def test_the_current_fallback_scores_ebb_and_flood_alike():
+    """`CurrentHour.speed_kn` is SIGNED (`tides.py`: "+ flood, - ebb"), and
+    the flow factor wants a magnitude -- the library path it falls back FROM
+    builds its speed with `np.hypot`, which cannot be negative.
+
+    Without `abs()` the conversion carries the sign straight into the curve,
+    which clamps to its first breakpoint at x=0. Measured on the shipped
+    redfish curve: -1.5 kn scored 0.100 (the curve floor) against +1.5 kn's
+    0.898, and printed "flow -0.77 m/s — slack". That is max EBB -- half of
+    every tidal day -- rated the worst possible water, on exactly the
+    degraded path (no flow library) this fallback exists to serve.
+
+    Asserting the pair is equal, not merely that ebb is "good", is what
+    pins the magnitude: a fix that special-cased negatives to some other
+    value would still leave the two halves of the tide on different scales.
+    """
+    p = load_species()["redfish"]
+    flood = _by_factor(score_factors(_hour(current_speed_kn=1.5), None, p))["flow"]
+    ebb = _by_factor(score_factors(_hour(current_speed_kn=-1.5), None, p))["flow"]
+    assert ebb.value == pytest.approx(flood.value)
+    assert ebb.value > 0.5, ebb.value
+    # The reason must not print a negative speed either -- a "-0.77 m/s"
+    # in the payload is not a speed any reader or hindcast row can use.
+    assert "-" not in ebb.reason, ebb.reason
+    assert "0.77" in ebb.reason, ebb.reason
+
+
+def test_solunar_peaks_at_the_period_centre_not_its_leading_edge():
+    """`solunar_periods` builds a major as transit +/- 1 h and a minor as
+    rise/set +/- 30 min, so a period's CENTRE is the astronomical event and
+    its `start` is merely the window's leading edge.
+
+    Measuring `abs(t - p.start)` therefore reported 0 minutes one hour
+    BEFORE the transit and 60 minutes AT it. Measured on the shipped redfish
+    curve for a major centred at 12:00: 11:00 scored 1.00 ("0 min from a
+    solunar period") and the transit itself scored 0.72 -- the factor's
+    maximum landing an hour off the actual solunar peak, and the reason
+    text asserting a distance for an hour that is INSIDE the period.
+
+    Centre, not "0 inside the window": the authored curve is
+    `x: [0, 30, 60, 120, 360]` and decays across the first 60 -- i.e. WITHIN
+    a major's own +/-60 min half-width. Zeroing the whole window would make
+    the 30 and 60 breakpoints unreachable for every major and flatten the
+    factor the curve was written to shape.
+    """
+    from datetime import datetime
+    from types import SimpleNamespace
+    from zoneinfo import ZoneInfo
+
+    from tidescout.sources.astronomy import SolunarPeriod
+
+    tz = ZoneInfo("America/New_York")
+    transit = datetime(2026, 10, 15, 12, 0, tzinfo=tz)
+    day = SimpleNamespace(
+        sun=None,
+        solunar=[SolunarPeriod(kind="major", start=transit - timedelta(hours=1),
+                               end=transit + timedelta(hours=1))],
+        water=None,
+    )
+    p = load_species()["redfish"]
+
+    def at(hour):
+        h = _hour(time=datetime(2026, 10, 15, hour, 0, tzinfo=tz))
+        return _by_factor(score_factors(h, day, p))["solunar"]
+
+    peak, edge, outside = at(12), at(11), at(10)
+    assert peak.value > edge.value, (peak.value, edge.value)
+    assert peak.value == pytest.approx(1.0, abs=1e-6)
+    assert "0 min" in peak.reason, peak.reason
+    # Symmetric about the centre: the two window edges are equidistant.
+    assert at(11).value == pytest.approx(at(13).value)
+    # And still decaying outside the window.
+    assert outside.value < edge.value
 
 
 def test_the_same_printed_flow_speed_never_carries_two_labels():
@@ -1017,3 +1093,39 @@ def test_single_rounding_not_double_on_a_worked_example(monkeypatch):
     metrics = _metrics(type="flat", wet_fraction=0.579, flood_phase=0.1)
     got = score_feature(metrics, _hour(), None, red, salinity=_sal(18.0), thresholds=_T)
     assert got.activation == single == 29
+
+
+def test_the_flat_gate_uses_the_library_phase_when_it_is_given_one():
+    """2026-09-02 review, Finding 6. `FeatureMetrics.flood_phase` is indexed
+    on the FLOW LIBRARY's phase axis -- uniform in simulated time, low to low
+    -- while `_recombine_tide_frac` pins high water at exactly 0.5.
+    `engine/phase.py`'s module docstring measures the two at up to 0.024 of a
+    cycle apart (~18 min) and says in terms that they are not
+    interchangeable.
+
+    Everywhere else that gap is a rounding concern. Here it is not:
+    `wet_now = since_flood < wet_fraction` is a hard 0/1 boundary, so a flat
+    sitting within ~18 min of its window edge flips between zero activation
+    and full credit purely from which convention was used. `build_payload`
+    has the library phase for the same hour and now passes it.
+
+    The flat below has a wet window starting at phase 0.50 and 0.10 of a
+    cycle long, and an hour whose two conventions land either side of the
+    edge: the stage-derived 0.605 reads DRY, the library's 0.55 reads WET.
+    """
+    from tidescout.engine.score import _flat_wet_multiplier
+
+    metrics = FeatureMetrics(
+        key="flat-1", type="flat", speed=0.2, ambush=0.5, strain=0.1,
+        okubo_w=0.0, convergence=0.0, eddy_share=0.0,
+        wet_fraction=0.10, flood_phase=0.50, n_cells=12,
+    )
+    hour = _hour(tide_phase="falling", tide_frac=0.21)  # -> 0.5 + 0.105 = 0.605
+    stage_mult, stage_reason = _flat_wet_multiplier(metrics, hour)
+    lib_mult, lib_reason = _flat_wet_multiplier(metrics, hour, 0.55)
+
+    assert stage_mult == 0.0, stage_reason
+    assert lib_mult == 1.0, lib_reason
+    # And with no library phase available it must still fall back rather
+    # than refuse -- the no-flow-state path has no lib_phase to give.
+    assert _flat_wet_multiplier(metrics, hour, None) == (stage_mult, stage_reason)

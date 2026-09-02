@@ -29,9 +29,9 @@ in `tests/test_phase.py`. Do not make this function delegate to `phase_at`,
 and do not adjust either to make them agree.
 """
 
-from datetime import datetime
+from datetime import UTC, datetime
 
-from tidescout.engine.tides import TideEvent
+from tidescout.engine.tides import MAX_HALF_CYCLE_H, TideEvent
 
 
 def library_phase(events: list[TideEvent], t: datetime) -> float | None:
@@ -56,10 +56,31 @@ def library_phase(events: list[TideEvent], t: datetime) -> float | None:
     # is ever changed to wrap or extrapolate. No test can distinguish it.
     if t < lows[0] or t > lows[-1]:
         return None
+    t_utc = t.astimezone(UTC)
     for a, b in zip(lows, lows[1:], strict=False):
         if a <= t <= b:
-            span = (b - a).total_seconds()
+            # Differenced in UTC, not in the (almost certainly shared) local
+            # ZoneInfo, for the same reason `tides.py:phase_at` does it --
+            # see its comment. Subtracting two aware datetimes carrying the
+            # SAME tzinfo object is documented to resolve as naive wall-clock
+            # arithmetic, dropping any DST offset change between them, and
+            # `ZoneInfo` interns by key so every station-local event shares
+            # one instance. Measured on spring-forward 2026-03-08 (lows
+            # 00:30 EST -> 13:55 EDT, t = 07:00): the wall-clock reading was
+            # 0.4845 against a true 0.4430 -- a 0.042-cycle error, wider
+            # than one snapshot spacing (0.0385) on the 26-snapshot library.
+            a_utc, b_utc = a.astimezone(UTC), b.astimezone(UTC)
+            span = (b_utc - a_utc).total_seconds()
             if span <= 0:
                 return None
-            return ((t - a).total_seconds() / span) % 1.0
+            # A low-to-low span is one FULL cycle, so the ceiling is twice
+            # `phase_at`'s half-cycle bound. `tides.py` documents that CO-OPS
+            # year-seam chunking drops the extremum nearest midnight and that
+            # the resulting >9 h gaps are all L -> L pairs -- stretched over a
+            # dropped low, such a pair used to yield a confident wrong phase
+            # for every hour in it. The docstring's "None -- never a guess"
+            # is only true with this check.
+            if span > MAX_HALF_CYCLE_H * 2 * 3600.0:
+                return None
+            return ((t_utc - a_utc).total_seconds() / span) % 1.0
     return None

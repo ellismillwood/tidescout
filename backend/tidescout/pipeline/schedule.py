@@ -134,5 +134,28 @@ def cell_schedule(slug: str, regime: str) -> CellSchedule:
         (fishery_data_dir(slug) / "flow" / regime / "grid" / "grid.json").read_text()
     )
     phases = grid_meta["phases"]
+    # Drop the library's CLOSING DUPLICATE before building the schedule.
+    # Every regime stores a final snapshot at phase 1.0 recorded as 0.0,
+    # bit-identical to index 0 (confirmed on every shipped `grid.json`:
+    # `phases[-1] == phases[0] == 0.0`), so that consecutive PAIRS of
+    # snapshots span the cycle-closing gap. `schedule_from_depths` does not
+    # want it: it treats the series as a RING already (`np.roll`), so the
+    # duplicate is a 26th slot holding a copy of the 1st.
+    #
+    # Left in, it corrupts `wet_fraction`, which is a plain `wet.mean(axis=0)`
+    # over the rows -- phase 0 is counted twice out of 26 instead of once out
+    # of 25. Measured on a synthetic cell wet only across the wrap: 0.0769
+    # against a true 0.0400, nearly double. `wet_fraction` is not a
+    # diagnostic here; it is the wet-window LENGTH in
+    # `score._flat_wet_multiplier`'s hard 0/1 gate and the flat activation
+    # multiplier itself, so the error lands straight on the map.
+    # (2026-09-02 review, Finding 8. That finding also claimed the duplicate
+    # mis-records `flood_phase` for a wrap-flooding cell as 0.0 rather than
+    # ~0.966; it does not. `flood_phase` is by construction the phase of the
+    # FIRST WET snapshot -- a mid-cycle cell wet from index 6 reports ph[6],
+    # not ph[5] -- so 0.0 is the correct answer for a cell that is dry at
+    # 0.96 and wet at 0.0, with or without the duplicate.)
+    if len(phases) > 1 and phases[-1] == phases[0]:
+        phases = phases[:-1]
     depths = [load_state(slug, regime, i)["depth"] for i in range(len(phases))]
     return schedule_from_depths(depths, phases)

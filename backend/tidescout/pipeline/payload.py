@@ -204,21 +204,17 @@ def _measured_salinity_in_domain(source: str, fishery) -> bool:
     all -- a non-USGS or synthetic `source` (a test fixture's `"synthetic"`,
     for instance) is not this check's business.
 
-    INHERITED GAP (2026-08-26 re-review, not introduced or closed by this
-    function): `source` names whichever sensor supplied TEMPERATURE, not
-    necessarily the one that supplied SALINITY -- see `_bay_salinity_
-    reading`'s own docstring for the full explanation. This function can
-    therefore only gate on the temperature station's `in_domain` verdict,
-    which is the right answer whenever one station reports both parameters
-    (true of every water sensor Winyah declares today) but would be the
-    WRONG one on a fishery whose temperature- and salinity-reporting
-    stations disagree and only the temperature one is `in_domain`: a
-    climatology-fallback salinity value would then read as `MEASURED`
-    because the station named in `source` passed this gate, even though
-    that station never actually supplied the salinity number being checked.
-    Closing this fully needs `WaterSummary` to carry the salinity station's
-    identity separately from `source`, which is a `WaterSummary`/
-    `WaterSensor` shape change, not a fix to this function.
+    CALLERS MUST PASS THE SALINITY STATION, not `WaterSummary.source`.
+    `source` names whichever sensor supplied TEMPERATURE, and this function
+    cannot tell the difference -- it only looks a station id up. Gating on
+    `source` was 2026-09-02 review Finding 5: on the shipped Winyah config
+    the one in-domain USGS gauge (02136371) declares `params: ["00010"]`,
+    temperature only, while both salinity-capable gauges are
+    `in_domain: false`. A climatology-fallback salinity therefore passed
+    this gate on the temperature station's credentials and shipped as
+    `MEASURED` with no caveat. `WaterSummary.salinity_source` now carries
+    the salinity station's own identity and is what `_bay_salinity_reading`
+    hands in.
     """
     if not source.startswith("usgs:"):
         return True
@@ -229,7 +225,33 @@ def _measured_salinity_in_domain(source: str, fishery) -> bool:
     return True
 
 
-def _bay_salinity_reading(day, fishery, distance_field: np.ndarray, phase: float | None):
+def _bay_flow_speed(state) -> float | None:
+    """The bay-representative current speed for one hour, over WET cells only.
+
+    ANUGA reports a dry cell as u = v = 0, which is numerically
+    indistinguishable from genuine slack water --
+    `activation.structure_fields` masks exactly this case and its docstring
+    says why. Averaged over the whole domain instead, the 17-19% of cells
+    that are dry at any given phase drag the bay-wide speed down by the same
+    fraction: measured on the real winyah-bay/mean_med library, phase 0 reads
+    0.1127 m/s unmasked against 0.1355 wet-only. That is worth ~0.09 of the
+    redfish flow sub-score, and enough to move the reason string across the
+    0.1 m/s "slack" label boundary.
+
+    Factored out of `build_payload` so the masking is testable without
+    building a whole day (the same reason `_recombine_tide_frac` is its own
+    function).
+    """
+    if state is None:
+        return None
+    sp, _ = flow.speed_direction(state["u"], state["v"])
+    sp = np.where(flow.wet_mask(state["depth"]), sp, np.nan)
+    if not np.isfinite(sp).any():
+        return None
+    return float(np.nanmean(sp))
+
+
+def _bay_salinity_reading(day, fishery, distance_field: np.ndarray | None, phase: float | None):
     """The fishery-wide (non-feature) salinity reading: a sensor value when
     one exists, else the model evaluated at the domain's median along-estuary
     distance -- "bay-representative", per `score_factors`'s own module
@@ -262,11 +284,26 @@ def _bay_salinity_reading(day, fishery, distance_field: np.ndarray, phase: float
     but not confidently" -- no new flag needed.
     """
     water = getattr(day, "water", None)
+    # `salinity_source`, NOT `source`: the latter names whichever sensor
+    # supplied TEMPERATURE, and the two are resolved by independent
+    # per-parameter fallbacks in `usgs.water_summary`. On the shipped Winyah
+    # config they routinely differ -- the only in-domain USGS gauge
+    # (02136371) declares `params: ["00010"]`, so it can supply temperature
+    # and never salinity, while both salinity-capable gauges are
+    # `in_domain: false`. Gating on `source` therefore published a
+    # CLIMATOLOGY salinity as MEASURED, `provisional=False`,
+    # `constrained_share` 1.0, with no caveat in the reason, whenever the
+    # two out-of-domain gauges had no data for the day and 02136371 did
+    # (2026-09-02 review, Finding 5). `_historical_water_summary` requires
+    # that specific calendar day per station, so one gauge gap on a hindcast
+    # date was enough to reach it.
+    salinity_source = getattr(water, "salinity_source", None) if water is not None else None
     if (
         water is not None
         and water.salinity_ppt is not None
-        and water.source != "climatology"
-        and _measured_salinity_in_domain(water.source, fishery)
+        and salinity_source is not None
+        and salinity_source != "climatology"
+        and _measured_salinity_in_domain(salinity_source, fishery)
     ):
         # `fitted` is inert here -- `SalinityReading.constrained` short-
         # circuits on `provenance is MEASURED` before ever reading it -- but
@@ -279,6 +316,11 @@ def _bay_salinity_reading(day, fishery, distance_field: np.ndarray, phase: float
 
     discharge = getattr(day, "discharge", None)
     if discharge is None or discharge.cfs_now is None or phase is None:
+        return None
+    # Only THIS branch needs the distance field, which is why the caller no
+    # longer gates the whole function on it -- a MEASURED in-domain sensor
+    # above is answerable without one.
+    if distance_field is None:
         return None
     representative_km = float(np.nanmedian(distance_field))
     if not math.isfinite(representative_km):
@@ -539,15 +581,15 @@ def build_payload(slug: str, day: date, model_label: str, cache) -> dict:
         if mix and lib_phase is not None:
             state = _blended_state(slug, regime_phases, mix, lib_phase)
 
-        bay_flow_speed = None
-        if state is not None:
-            sp, _ = flow.speed_direction(state["u"], state["v"])
-            if np.isfinite(sp).any():
-                bay_flow_speed = float(np.nanmean(sp))
+        bay_flow_speed = _bay_flow_speed(state)
 
-        bay_reading = None
-        if distance_field is not None:
-            bay_reading = _bay_salinity_reading(day_conditions, fishery, distance_field, sal_phase)
+        # NOT gated on `distance_field`: only the MODELLED branch of
+        # `_bay_salinity_reading` needs it (for `np.nanmedian`), and that
+        # branch returns None on its own when it cannot run. Gating the whole
+        # call dropped the salinity factor for all 24 hours x every species
+        # whenever `estuary_km.npy` was absent, even with a live in-domain
+        # sensor whose reading needs no distance field at all.
+        bay_reading = _bay_salinity_reading(day_conditions, fishery, distance_field, sal_phase)
         if bay_reading is not None:
             bay_salinity_series.append({
                 "time": hour.time.isoformat(),
@@ -580,7 +622,8 @@ def build_payload(slug: str, day: date, model_label: str, cache) -> dict:
                     continue
                 for name, profile in species.items():
                     activation = score_feature(
-                        metrics, hour, day_conditions, profile, f_reading, fishery.structure
+                        metrics, hour, day_conditions, profile, f_reading,
+                        fishery.structure, lib_phase,
                     )
                     bucket = species_features[name].setdefault(
                         metrics.key, {"type": metrics.type, "hours": []}

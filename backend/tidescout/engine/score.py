@@ -133,10 +133,26 @@ def _hours_from_twilight(t: datetime, sun) -> float | None:
 
 
 def _minutes_from_solunar(t: datetime, periods) -> float | None:
-    """Minutes to the nearest solunar major or minor."""
+    """Minutes to the nearest solunar major or minor, measured to its CENTRE.
+
+    `sources/astronomy.py:solunar_periods` centres a major on the moon's
+    transit (+/- 1 h) and a minor on moonrise/set (+/- 30 min), so the
+    astronomical event -- the thing the factor is about -- is the period's
+    midpoint, not its `start`. Measuring to `start` put the factor's maximum
+    a full hour before the transit: on the shipped redfish curve a major
+    centred at 12:00 scored 1.00 at 11:00 and 0.72 at the transit itself,
+    while calling the transit "60 min from a solunar period" -- a distance
+    asserted for an hour that is inside the window.
+
+    Not "0 anywhere inside the period": the authored curve
+    (`x: [0, 30, 60, 120, 360]`) decays across the first 60 minutes, which is
+    a major's own half-width, so flattening the window to 0 would make the
+    30 and 60 breakpoints unreachable for every major.
+    """
     if not periods:
         return None
-    return min(abs((t - p.start).total_seconds()) for p in periods) / 60.0
+    centres = (p.start + (p.end - p.start) / 2 for p in periods)
+    return min(abs((t - c).total_seconds()) for c in centres) / 60.0
 
 
 def _recombine_tide_frac(hour) -> float:
@@ -175,7 +191,14 @@ def score_factors(
     # bay, but beats nothing.
     speed = flow_speed
     if speed is None and hour.current_speed_kn is not None:
-        speed = hour.current_speed_kn * 0.514444
+        # `abs`, because `CurrentHour.speed_kn` is SIGNED (+ flood, - ebb)
+        # and this factor scores a MAGNITUDE -- the flow-library path above
+        # builds its speed with `np.hypot`, which has no sign to lose. Left
+        # signed, the curve clamped every ebb hour to its x=0 breakpoint:
+        # measured on redfish, -1.5 kn scored 0.100 against +1.5 kn's 0.898
+        # and printed "flow -0.77 m/s — slack". Max ebb is not slack water,
+        # and half of every tidal day was landing there.
+        speed = abs(hour.current_speed_kn) * 0.514444
     if speed is None:
         subs.append(_missing("flow", profile, "no flow state or current station"))
     else:
@@ -534,7 +557,9 @@ def _structure_subscore(
     )
 
 
-def _flat_wet_multiplier(metrics: FeatureMetrics, hour) -> tuple[float, str]:
+def _flat_wet_multiplier(
+    metrics: FeatureMetrics, hour, lib_phase: float | None = None
+) -> tuple[float, str]:
     """Is THIS flat holding water at THIS hour's tide -- not merely for its
     average share of the whole cycle.
 
@@ -613,7 +638,19 @@ def _flat_wet_multiplier(metrics: FeatureMetrics, hour) -> tuple[float, str]:
         # but the cycle average is the honest fallback if it ever does.
         return wf, f"no flood phase on record -- using the {wf:.2f} cycle average"
 
-    full = _recombine_tide_frac(hour)
+    # `lib_phase` when the caller has it, because `metrics.flood_phase` is
+    # indexed on the FLOW LIBRARY's phase axis (uniform in simulated time,
+    # low-to-low) and `_recombine_tide_frac` is not -- it pins high water at
+    # exactly 0.5. `engine/phase.py`'s module docstring measures the
+    # disagreement at up to 0.024 of a cycle (~18 min) and warns explicitly
+    # against conflating the two. That matters here and nowhere else in this
+    # file, because `wet_now` below is a hard 0/1 boundary: a flat within
+    # ~18 min of its window edge flipped between zero and full activation
+    # purely from the convention mismatch (2026-09-02 review, Finding 6).
+    # `build_payload` computes the right number for this same hour already.
+    # Falling back to the stage-derived value keeps callers without a library
+    # (tests, the no-flow-state path) working, at the accuracy they had.
+    full = _recombine_tide_frac(hour) if lib_phase is None else lib_phase
     since_flood = (full - metrics.flood_phase) % 1.0
     wet_now = since_flood < wf
     return (
@@ -654,6 +691,7 @@ def score_feature(
     profile: SpeciesProfile,
     salinity: SalinityReading | None,
     thresholds: StructureThresholds,
+    lib_phase: float | None = None,
 ) -> FeatureActivation:
     """Score one feature at one hour: the map half of the pipeline.
 
@@ -733,7 +771,7 @@ def score_feature(
     raw = combined.raw
     flat_note = ""
     if metrics.type == "flat":
-        mult, flat_note = _flat_wet_multiplier(metrics, hour)
+        mult, flat_note = _flat_wet_multiplier(metrics, hour, lib_phase)
         raw = raw * mult
     activation = int(round(100 * raw))
 

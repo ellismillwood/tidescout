@@ -9,8 +9,45 @@ Filling `actual` with plausible-looking guesses would mean every future
 weight is tuned against fiction while the tuning looks rigorous -- do not
 do this, ever, to this file.
 
-**This is the fourth generation of this log (2026-08-26, whole-branch
-review).** The first had two problems: its three dates were in the future
+**This is the FIFTH generation of this log (2026-09-02, whole-branch
+review of PR #10).** That review found nine defects, all nine verified
+against the code before any fix was written. Two of them move the numbers
+in this table, so every row below was regenerated against the corrected
+engine. What moved, and why:
+
+- **Bay flow speed was averaging DRY cells (Finding 3).** ANUGA writes a
+  dry cell as u = v = 0, indistinguishable from genuine slack water, and
+  the bay-wide hourly mean included all of them -- 16.8-18.9% of the
+  domain depending on phase. Every row in the fourth generation read
+  `flow 0.10 m/s` or `0.14 m/s`; the same hours now read 0.12-0.13 and
+  0.17. That is the single largest change to this table.
+- **Solunar distance was measured to a period's leading EDGE, not its
+  centre (Finding 2).** A major is the moon's transit +/- 1 h, so the
+  factor peaked a full hour before the transit and called the transit
+  itself "60 min from a solunar period". 2026-07-21 / redfish moves from
+  "180 min" to "169 min".
+
+- **Exactly ONE peak hour moved:** southern_flounder / 2026-07-28, from
+  13:00 to 01:00. The other eight rows kept the hour they had. That single
+  shift is the combined effect of the two fixes above on a day whose top
+  hours were already within a few points of each other -- not a separately
+  diagnosed change, and not a strong claim about that date.
+- **A climatology salinity could ship as MEASURED (Finding 5).** Not
+  triggered on these three dates -- all nine rows resolve salinity through
+  the spatial model, as the section below describes -- but the gate that
+  let it happen is closed, so `provenance` on a future regeneration means
+  what it says.
+- Findings 1, 4, 6, 8 (signed ebb current, DST phase arithmetic, the flat
+  gate's phase convention, and the library's duplicate closing snapshot)
+  do not move these particular rows: none of these dates crosses a DST
+  boundary, the flow library resolved for every hour so the CO-OPS
+  fallback never ran, and the last two affect per-FEATURE activation
+  rather than the fishery-wide hourly score tabulated here.
+
+The `actual` column is still empty, and still Ellis's to fill.
+
+**The fourth generation (2026-08-26, whole-branch review) said:**
+The first had two problems: its three dates were in the future
 (Ellis cannot report `actual` for a day that has not happened), and its
 discharge was day-blind (every row read today's live gauge regardless of
 the date named). The second fixed both, on real past dates with genuinely
@@ -189,7 +226,8 @@ tidescout score winyah-bay 2026-08-05   # med discharge, neap tide
 tidescout score winyah-bay 2026-07-28   # high discharge, spring tide
 ```
 
-All three are real past dates (today is 2026-08-26). Each command scores
+All three are real past dates (regenerated 2026-09-02; they were already
+past when this log was first written on 2026-08-26). Each command scores
 all three species from one `build_payload` call; the table below pulls the
 day's score range, its single highest hour, the THREE LOWEST-VALUE
 sub-scores that hour (under `combine`'s weighted geometric mean, a low
@@ -202,15 +240,15 @@ that hour's own `water_temp` reason string.
 
 | date | tide regime | discharge (cfs) | bucket | water temp | species | score range (day) | peak hour | peak score | limiting factors at peak (value — reason) | confidence | constrained_share | actual | notes |
 |---|---|---|---|---|---|---|---|---|---|---|---|---|---|
-| 2026-07-21 | neap | 2,317.94 | low (clamped to `neap_low`) | 87°F (87.44°F) | redfish | 59-73 | 03:00 | 73 | flow 0.46 — "flow 0.10 m/s — moving"; solunar 0.56 — "180 min from a solunar period"; light 0.63 — "2.2 h from twilight, 96% cloud widened it from 3.4 h" | 1.00 | 0.92 | | |
-| 2026-07-21 | neap | 2,317.94 | low | 87°F (87.44°F) | speckled_trout | 54-67 | 07:00 | 67 | water_temp 0.46 — "water 87F"; flow 0.48 — "flow 0.10 m/s — moving"; pressure 0.58 — "pressure +0.7 mb/3h — steady" | 1.00 | 0.87 | | |
-| 2026-07-21 | neap | 2,317.94 | low | 87°F (87.44°F) | southern_flounder | 60-75 | 07:00 | 75 | water_temp 0.42 — "water 87F"; flow 0.65 — "flow 0.10 m/s — moving"; pressure 0.72 — "pressure +0.7 mb/3h — steady" | 1.00 | 0.91 | | |
-| 2026-08-05 | neap | 4,037.80 | med (`neap_low`/`neap_med` blend) | 83°F (82.76°F) | redfish | 61-75 | 19:00 | 75 | flow 0.46 — "flow 0.10 m/s — moving"; stage 0.59 — "tide 0.83 of cycle — ebbing"; solunar 0.69 — "71 min from a solunar period" | 1.00 | 0.92 | | |
-| 2026-08-05 | neap | 4,037.80 | med | 83°F (82.76°F) | speckled_trout | 58-75 | 19:00 | 75 | flow 0.51 — "flow 0.10 m/s — moving"; water_temp 0.69 — "water 83F"; solunar 0.69 — "71 min from a solunar period" | 1.00 | 0.87 | | |
-| 2026-08-05 | neap | 4,037.80 | med | 83°F (82.76°F) | southern_flounder | 64-83 | 19:00 | 83 | water_temp 0.66 — "water 83F"; flow 0.68 — "flow 0.10 m/s — moving"; solunar 0.76 — "71 min from a solunar period" | 1.00 | 0.91 | | |
-| 2026-07-28 | spring | 8,853.80 | high (`spring_high`/`spring_freshet` blend) | 87°F (86.54°F) | redfish | 64-81 | 20:00 | 81 | flow 0.57 — "flow 0.14 m/s — moving"; salinity 0.74 — "salinity ~34.9 ppt — salty (UNCALIBRATED model estimate, no observation constrains it)"; water_temp 0.74 — "water 87F" | 1.00 | 0.92 | | |
-| 2026-07-28 | spring | 8,853.80 | high | 87°F (86.54°F) | speckled_trout | 50-74 | 20:00 | 74 | water_temp 0.51 — "water 87F"; flow 0.63 — "flow 0.14 m/s — moving"; salinity 0.66 — "salinity ~34.9 ppt — salty (UNCALIBRATED model estimate, no observation constrains it)" | 1.00 | 0.87 | | |
-| 2026-07-28 | spring | 8,853.80 | high | 87°F (86.54°F) | southern_flounder | 64-77 | 13:00 | 77 | water_temp 0.47 — "water 87F"; light 0.58 — "4.6 h from twilight, 84% cloud widened it from 6.5 h"; solunar 0.74 — "76 min from a solunar period" | 1.00 | 0.91 | | |
+| 2026-07-21 | neap | 2,317.94 | low (clamped to `neap_low`) | 87°F (87.44°F) | redfish | 60-74 | 03:00 | 74 | flow 0.53 — "flow 0.13 m/s — moving"; solunar 0.56 — "169 min from a solunar period"; light 0.63 — "2.2 h from twilight, 96% cloud widened it from 3.4 h" | 1.00 | 0.92 |  |  |
+| 2026-07-21 | neap | 2,317.94 | low | 87°F (87.44°F) | speckled_trout | 55-69 | 07:00 | 69 | water_temp 0.46 — "water 87F"; flow 0.55 — "flow 0.12 m/s — moving"; pressure 0.58 — "pressure +0.7 mb/3h — steady" | 1.00 | 0.87 |  |  |
+| 2026-07-21 | neap | 2,317.94 | low | 87°F (87.44°F) | southern_flounder | 61-77 | 07:00 | 77 | water_temp 0.42 — "water 87F"; pressure 0.72 — "pressure +0.7 mb/3h — steady"; flow 0.72 — "flow 0.12 m/s — moving" | 1.00 | 0.91 |  |  |
+| 2026-08-05 | neap | 4,037.80 | med (`neap_low`/`neap_med` blend) | 83°F (82.76°F) | redfish | 62-77 | 19:00 | 77 | flow 0.53 — "flow 0.13 m/s — moving"; stage 0.59 — "tide 0.83 of cycle — ebbing"; light 0.85 — "1.0 h from twilight, 47% cloud widened it from 1.2 h" | 1.00 | 0.92 |  |  |
+| 2026-08-05 | neap | 4,037.80 | med | 83°F (82.76°F) | speckled_trout | 60-77 | 19:00 | 77 | flow 0.58 — "flow 0.13 m/s — moving"; water_temp 0.69 — "water 83F"; stage 0.72 — "tide 0.83 of cycle — ebbing" | 1.00 | 0.87 |  |  |
+| 2026-08-05 | neap | 4,037.80 | med | 83°F (82.76°F) | southern_flounder | 66-85 | 19:00 | 85 | water_temp 0.66 — "water 83F"; flow 0.76 — "flow 0.13 m/s — moving"; pressure 0.88 — "pressure -0.9 mb/3h — falling — pre-frontal feeding window" | 1.00 | 0.91 |  |  |
+| 2026-07-28 | spring | 8,853.80 | high (`spring_high`/`spring_freshet` blend) | 87°F (86.54°F) | redfish | 64-82 | 20:00 | 82 | flow 0.63 — "flow 0.17 m/s — moving"; salinity 0.74 — "salinity ~34.9 ppt — salty (UNCALIBRATED model estimate, no observation constrains it)"; water_temp 0.74 — "water 87F" | 1.00 | 0.92 |  |  |
+| 2026-07-28 | spring | 8,853.80 | high | 87°F (86.54°F) | speckled_trout | 51-76 | 20:00 | 76 | water_temp 0.51 — "water 87F"; salinity 0.66 — "salinity ~34.9 ppt — salty (UNCALIBRATED model estimate, no observation constrains it)"; flow 0.70 — "flow 0.17 m/s — moving" | 1.00 | 0.87 |  |  |
+| 2026-07-28 | spring | 8,853.80 | high | 87°F (86.54°F) | southern_flounder | 65-78 | 01:00 | 78 | water_temp 0.47 — "water 87F"; light 0.58 — "4.8 h from twilight, 33% cloud widened it from 5.5 h"; pressure 0.83 — "pressure -0.3 mb/3h — steady" | 1.00 | 0.91 |  |  |
 
 `flow.clamped` was `True` on 2026-07-21 (2,317.94 cfs sits genuinely below
 `neap_low`'s own simulated flow, 2,774 cfs -- a real single-regime pin, not

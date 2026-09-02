@@ -95,3 +95,55 @@ def test_library_phase_deliberately_disagrees_with_the_salinity_models_phase_at(
     # library_phase delegate straight to phase_at.
     mid = t0 + timedelta(hours=6.5)
     assert abs(library_phase(events, mid) - phase_at(events, mid)) > 0.02
+
+
+def test_library_phase_differences_in_utc_across_a_dst_change():
+    """Subtracting two aware datetimes that share a tzinfo OBJECT is
+    documented Python behaviour to resolve as naive wall-clock arithmetic,
+    silently dropping any DST offset change between them. `ZoneInfo` interns
+    by key, so the station-local events `noaa._parse_t` builds all share one
+    instance -- exactly the pair at risk.
+
+    `engine/tides.py:phase_at` converts to UTC first and says why at length.
+    This function is its twin and did not, so on a spring-forward day it
+    stretched a 12.42 h cycle into a 13.42 h wall-clock one: measured
+    0.4845 where true elapsed time gives 0.4430. That 0.042-cycle error is
+    larger than the 0.024 this module's own docstring calls "enough to
+    select the wrong library snapshot", and wider than one snapshot spacing
+    (1/26 = 0.0385) on the shipped library.
+    """
+    lows = ZoneInfo("America/New_York")
+    a = datetime(2026, 3, 8, 0, 30, tzinfo=lows)    # EST
+    b = datetime(2026, 3, 8, 13, 55, tzinfo=lows)   # EDT -- 12.42 h later in REAL time
+    events = [
+        TideEvent(time=a, height_ft=0.2, kind="L"),
+        TideEvent(time=a + timedelta(hours=6, minutes=13), height_ft=4.8, kind="H"),
+        TideEvent(time=b, height_ft=0.3, kind="L"),
+    ]
+    t = datetime(2026, 3, 8, 7, 0, tzinfo=lows)
+    assert library_phase(events, t) == pytest.approx(0.4430, abs=1e-3)
+
+
+def test_library_phase_refuses_a_gap_wider_than_a_whole_cycle():
+    """The docstring promises "None -- never a guess". Between two `L`
+    events it kept that promise only for spans it could bracket, not for
+    spans that are physically impossible as one cycle.
+
+    `tides.py` documents that CO-OPS year-seam chunking drops the extremum
+    nearest midnight, and that every resulting >9 h gap is an L -> L pair --
+    `phase_at` rejects those via `MAX_HALF_CYCLE_H`. Stretched across a
+    dropped low, a ~24.8 h L -> L span here returned a confident, plausible,
+    wrong fraction for every hour in it, and nothing was added to `missing`.
+    """
+    t0 = datetime(2026, 5, 1, 0, 0, tzinfo=TZ)
+    two_cycles = [
+        TideEvent(time=t0, height_ft=0.2, kind="L"),
+        TideEvent(time=t0 + timedelta(hours=24, minutes=50), height_ft=0.3, kind="L"),
+    ]
+    assert library_phase(two_cycles, t0 + timedelta(hours=12)) is None
+    # A genuine single cycle in the same shape still resolves.
+    one_cycle = [
+        TideEvent(time=t0, height_ft=0.2, kind="L"),
+        TideEvent(time=t0 + timedelta(hours=12, minutes=25), height_ft=0.3, kind="L"),
+    ]
+    assert library_phase(one_cycle, t0 + timedelta(hours=6)) == pytest.approx(0.4832, abs=1e-3)

@@ -259,3 +259,109 @@ def test_the_feature_path_runs_against_the_real_flow_library(synthetic_day_with_
         assert isinstance(h["excluded"], list)
         assert h["subs"], "no sub-score detail on this feature-hour"
         assert all(s["reason"] for s in h["subs"])
+
+
+def test_bay_flow_speed_ignores_dry_cells():
+    """ANUGA writes a dry cell as u = v = 0, which the flow curve cannot tell
+    from genuine slack water. `activation.structure_fields` already masks
+    this; the bay-wide hourly speed did not, so every dry marsh cell voted
+    "slack" in the average that feeds the flow factor.
+
+    Measured on the real winyah-bay/mean_med library: 16.8-18.9% of cells are
+    dry across phases, and phase 0 reads 0.1127 m/s unmasked against 0.1355
+    wet-only -- a 17% understatement, worth about 0.09 of the redfish flow
+    sub-score and enough to cross the 0.1 m/s "slack" label boundary.
+
+    The synthetic state below is that situation in miniature: half the cells
+    genuinely moving, half bone dry. The wet answer is 0.3; the unmasked
+    average is 0.15, which the redfish curve would call "moving" instead of
+    the truth.
+    """
+    import numpy as np
+
+    from tidescout.pipeline.payload import _bay_flow_speed
+
+    state = {
+        "u": np.array([0.3, 0.3, 0.0, 0.0]),
+        "v": np.array([0.0, 0.0, 0.0, 0.0]),
+        "depth": np.array([2.0, 2.0, 0.0, 0.0]),
+    }
+    assert _bay_flow_speed(state) == 0.3
+    # An all-dry state has no representative speed at all -- None, not 0.0,
+    # so the factor goes MISSING and renormalises rather than scoring a
+    # confident "dead slack" the model never observed.
+    assert _bay_flow_speed({k: v * 0 for k, v in state.items()}) is None
+
+
+def test_a_measured_in_domain_sensor_survives_a_missing_distance_field():
+    """`_bay_salinity_reading`'s MEASURED branch returns before it ever
+    touches the distance field -- only the MODELLED branch needs one, for
+    `np.nanmedian`. `build_payload` used to gate the whole call on the field
+    being present, so a missing `estuary_km.npy` dropped the salinity factor
+    for all 24 hours x every species even with a live in-domain gauge
+    reporting.
+    """
+    from types import SimpleNamespace
+
+    from tidescout.config import load_fishery
+    from tidescout.engine.score import SalinityProvenance
+    from tidescout.pipeline.payload import _bay_salinity_reading
+
+    fishery = load_fishery("winyah-bay")
+    # A source naming no declared USGS sensor is in-domain by default (see
+    # `_measured_salinity_in_domain`), so this exercises the MEASURED branch
+    # unconditionally rather than depending on which of Winyah's stations
+    # happens to be flagged in_domain today -- both of its salinity-capable
+    # USGS gauges are currently `in_domain: false`.
+    day = SimpleNamespace(
+        water=SimpleNamespace(salinity_ppt=18.0, source="nerrs:northinlet",
+                              salinity_source="nerrs:northinlet"),
+        discharge=SimpleNamespace(cfs_now=5000.0),
+    )
+    reading = _bay_salinity_reading(day, fishery, None, 0.25)
+    assert reading is not None, "a measured in-domain reading needs no distance field"
+    assert reading.provenance is SalinityProvenance.MEASURED
+    assert reading.ppt == 18.0
+    # Without a distance field the MODELLED branch must decline rather than
+    # crash on np.nanmedian(None).
+    modelled_only = SimpleNamespace(
+        water=None, discharge=SimpleNamespace(cfs_now=5000.0)
+    )
+    assert _bay_salinity_reading(modelled_only, fishery, None, 0.25) is None
+
+
+def test_a_climatology_salinity_is_never_published_as_measured(
+    synthetic_day_climatology_salinity_in_domain_temp,
+):
+    """2026-09-02 review, Finding 5. `WaterSummary.source` names whichever
+    sensor supplied TEMPERATURE; salinity is resolved by a separate
+    per-parameter fallback and can be monthly climatology while `source`
+    still names a real, in-domain gauge.
+
+    Gated on `source`, the payload published that climatology guess as
+    `MEASURED` with `provisional=False` and `constrained_share` 1.00 -- no
+    `~`, no caveat, indistinguishable from a live sensor. That is reachable
+    on the shipped Winyah config (see the fixture), where the only in-domain
+    USGS gauge reports temperature and no salinity at all.
+
+    The gate now reads `salinity_source`, so this falls through to the
+    MODELLED path and picks up the existing `fitted`/`extrapolated`
+    disclosure machinery instead.
+    """
+    from tidescout.pipeline.payload import build_payload
+
+    p = build_payload(**synthetic_day_climatology_salinity_in_domain_temp)
+
+    for row in p["salinity"]["series"]:
+        assert row["provenance"] != "measured", row
+
+    # Winyah's salinity model is unfitted, so the honest label downstream is
+    # provisional -- the point is that SOMETHING discloses, not silence.
+    saw_hour = False
+    for rows in p["species"].values():
+        for h in rows["hours"]:
+            saw_hour = True
+            assert h["constrained_share"] < 1.0, h
+            sal = next(s for s in h["subs"] if s["factor"] == "salinity")
+            assert sal["provisional"] is True, sal
+    assert saw_hour, "fixture produced no hours to check"

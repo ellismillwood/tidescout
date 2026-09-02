@@ -82,6 +82,17 @@ class WaterSummary:
     temp_trend_f_3d: float | None
     salinity_ppt: float | None
     source: str
+    # Which sensor supplied SALINITY -- not necessarily the one `source`
+    # names, which is whichever supplied TEMPERATURE. The two are resolved by
+    # independent per-parameter fallbacks below, so on Winyah Bay they
+    # routinely differ: the only in-domain USGS gauge (02136371) declares
+    # `params: ["00010"]`, temperature alone. Without this field, a
+    # climatology salinity paired with a real in-domain temperature station
+    # was published as MEASURED with `constrained_share` 1.0 and no caveat
+    # (2026-09-02 review, Finding 5) -- the one factor this project has spent
+    # five PRs learning to disclose honestly. `"climatology"` when it fell
+    # back; None only for a summary built before this field existed.
+    salinity_source: str | None = None
 
 
 def fetch_series(
@@ -345,12 +356,13 @@ def water_summary(
     live August water was a larger error than the discharge blindness this
     mirrors.
 
-    `source` stays exactly as honest (and exactly as limited) as the live
-    path already was: it names whichever sensor supplied TEMPERATURE (or
-    `"climatology"` if none did), never necessarily the one that supplied
-    SALINITY -- see `payload._bay_salinity_reading`'s docstring for the
-    concrete gap that leaves. Closing THAT is a `WaterSensor`/`WaterSummary`
-    shape change, not a `day`-threading one, and stays out of scope here.
+    `source` names whichever sensor supplied TEMPERATURE (or `"climatology"`
+    if none did). It is NOT necessarily the one that supplied SALINITY --
+    the two are resolved by independent per-parameter fallbacks below. That
+    used to be an open gap, since `payload._bay_salinity_reading` gated
+    salinity provenance on `source`; `salinity_source` (2026-09-02 review,
+    Finding 5) now carries the salinity answer separately, and that is what
+    the payload reads.
     """
     if day is not None and day < datetime.now(UTC).date():
         return _historical_water_summary(fishery, cache, month, day)
@@ -361,6 +373,7 @@ def _live_water_summary(fishery: Fishery, cache: Cache, month: int) -> WaterSumm
     usgs_sensors = [w for w in fishery.stations.water if w.kind == "usgs"]
     temp_f = trend = salinity = None
     source = "climatology"
+    salinity_source = "climatology"
     if usgs_sensors:
         sites = [w.station for w in usgs_sensors]
         series = fetch_series(sites, [PARAM_TEMP_C, PARAM_SALINITY], 7, cache)
@@ -377,12 +390,14 @@ def _live_water_summary(fishery: Fishery, cache: Cache, month: int) -> WaterSumm
             sal_points = series.get((w.station, PARAM_SALINITY), [])
             if sal_points and salinity is None:
                 salinity = sal_points[-1][1]
+                salinity_source = f"usgs:{w.station}"
     if temp_f is None:
         temp_f = fishery.climatology.water_temp_f_by_month[month]
         source = "climatology"
     if salinity is None:
         salinity = fishery.climatology.salinity_ppt_by_month[month]
-    return WaterSummary(temp_f, trend, salinity, source)
+        salinity_source = "climatology"
+    return WaterSummary(temp_f, trend, salinity, source, salinity_source)
 
 
 def _historical_water_summary(
@@ -400,6 +415,7 @@ def _historical_water_summary(
     usgs_sensors = [w for w in fishery.stations.water if w.kind == "usgs"]
     temp_f = trend = salinity = None
     source = "climatology"
+    salinity_source = "climatology"
     if usgs_sensors:
         sites = [w.station for w in usgs_sensors]
         start = day - timedelta(days=7)
@@ -417,9 +433,11 @@ def _historical_water_summary(
             sal_by_day = dict(sal_daily.get(w.station, []))
             if day in sal_by_day and salinity is None:
                 salinity = sal_by_day[day]
+                salinity_source = f"usgs:{w.station}"
     if temp_f is None:
         temp_f = fishery.climatology.water_temp_f_by_month[month]
         source = "climatology"
     if salinity is None:
         salinity = fishery.climatology.salinity_ppt_by_month[month]
-    return WaterSummary(temp_f, trend, salinity, source)
+        salinity_source = "climatology"
+    return WaterSummary(temp_f, trend, salinity, source, salinity_source)
