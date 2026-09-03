@@ -10,6 +10,12 @@ def test_concurrent_callers_start_exactly_one_build(tmp_path, monkeypatch):
     """A double-clicked date picker, or ten status polls, must not start ten
     70-second builds. The second caller JOINS the first.
 
+    Ten real OS threads, released together by a `Barrier`, all call `ensure`
+    for the same key at once -- a sequential loop of calls could never
+    interleave with itself inside `ensure`'s critical section, so it cannot
+    expose a TOCTOU race between the "is one running?" check and the submit.
+    Real concurrent callers can.
+
     Asserts the pair: one build ran, AND every caller got a state back. A
     coordinator that dropped the extra callers on the floor would also see
     `calls == 1`.
@@ -24,8 +30,21 @@ def test_concurrent_callers_start_exactly_one_build(tmp_path, monkeypatch):
         return {"slug": slug, "freshness": {"generated_at": "2026-09-03T03:00:00+00:00"}}
 
     c = builds.BuildCoordinator(build_fn=slow_build)
-    states = [c.ensure("winyah-bay", date(2026, 9, 3), "best") for _ in range(10)]
-    assert all(s.status == "building" for s in states), states
+    barrier = threading.Barrier(10, timeout=5)
+    results: list = [None] * 10
+
+    def caller(i):
+        barrier.wait()  # release all ten together so they genuinely overlap
+        results[i] = c.ensure("winyah-bay", date(2026, 9, 3), "best")
+
+    threads = [threading.Thread(target=caller, args=(i,)) for i in range(10)]
+    for t in threads:
+        t.start()
+    for t in threads:
+        t.join(timeout=5)
+        assert not t.is_alive(), "caller thread did not finish within timeout"
+
+    assert all(s is not None and s.status == "building" for s in results), results
     gate.set()
     c.wait_all(timeout=10)
     assert len(calls) == 1, calls

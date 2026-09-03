@@ -76,7 +76,10 @@ class BuildCoordinator:
         try:
             payload = self._build(slug, day, model)
             store.write_payload(slug, day, model, payload)
-        except BaseException as exc:  # noqa: BLE001 -- recorded, then re-raised to the future
+        except BaseException as exc:
+            # Recorded, not re-raised: the future must resolve cleanly, or
+            # wait_all()'s fut.result() would raise on a failed build instead
+            # of letting callers observe the "failed" state.
             with self._lock:
                 self._states[key] = BuildState("failed", started, f"{type(exc).__name__}: {exc}")
             return
