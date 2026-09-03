@@ -71,6 +71,7 @@ from tidescout.engine.activation import FeatureMetrics, _sampling_anchors, sampl
 from tidescout.engine.activation import structure_fields as compute_structure_fields
 from tidescout.engine.phase import library_phase
 from tidescout.engine.score import (
+    FACTORS,
     SalinityProvenance,
     SalinityReading,
     SubScore,
@@ -417,7 +418,17 @@ def _sub_to_dict(s: SubScore) -> dict:
 HOUR_SCOPE_SUBS = frozenset(
     {"stage", "light", "solunar", "pressure", "wind", "water_temp", "season"}
 )
-FEATURE_SCOPE_SUBS = frozenset({"flow", "salinity", "structure"})
+# DERIVED, never hand-listed. `_feature_scope_subs` filters with the
+# denylist above, so writing the allowlist out separately would let the two
+# disagree: a newly added factor in neither set would be SHIPPED on every
+# feature-hour (the filter keeps it, deliberately -- see that function) while
+# `sub_scope` failed to declare it, and the payload would violate the very
+# contract it publishes. Deriving both from one rule makes that unreachable.
+#
+# `structure` is not in `FACTORS`: it is the feature-only sibling scored by
+# `score_feature`, not one of the nine hourly factors -- see
+# `SpeciesProfile`'s docstring.
+FEATURE_SCOPE_SUBS = frozenset({*FACTORS, "structure"}) - HOUR_SCOPE_SUBS
 
 
 def _sub_to_trimmed_dict(s: SubScore) -> dict:
