@@ -32,6 +32,8 @@ export interface DayContextValue {
   slug: string;
   date: string;
   setDate: (date: string) => void;
+  model: string;
+  setModel: (model: string) => void;
 }
 
 const DayContext = createContext<DayContextValue | null>(null);
@@ -39,17 +41,18 @@ const DayContext = createContext<DayContextValue | null>(null);
 export interface DayProviderProps {
   slug: string;
   initialDate: string;
-  model?: string;
+  initialModel?: string;
   children: ReactNode;
 }
 
 export function DayProvider({
   slug,
   initialDate,
-  model = DEFAULT_MODEL,
+  initialModel = DEFAULT_MODEL,
   children,
 }: DayProviderProps) {
   const [date, setDate] = useState(initialDate);
+  const [model, setModel] = useState(initialModel);
   const [state, setState] = useState<DayState>("loading");
   const [payload, setPayload] = useState<DayPayload | null>(null);
   const [error, setError] = useState<string | null>(null);
@@ -170,8 +173,10 @@ export function DayProvider({
       slug,
       date,
       setDate,
+      model,
+      setModel,
     }),
-    [state, payload, error, species, hour, slug, date],
+    [state, payload, error, species, hour, slug, date, model],
   );
 
   return <DayContext.Provider value={value}>{children}</DayContext.Provider>;

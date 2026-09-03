@@ -1,8 +1,9 @@
-import { render, screen, waitFor } from "@testing-library/react";
+import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import fixture from "../fixtures/day-payload.json";
 import { DayProvider, useDay } from "../src/state/DayContext";
+import type { DayContextValue } from "../src/state/DayContext";
 
 afterEach(() => vi.restoreAllMocks());
 
@@ -80,5 +81,46 @@ describe("DayProvider", () => {
     await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("ready"));
     expect(screen.getByTestId("hour")).toHaveTextContent("0");
     expect(screen.getByTestId("species")).toHaveTextContent("redfish");
+  });
+
+  it("does not refetch on hour/species scrubs, but does refetch on a model change", async () => {
+    // The contrast is the point: a context that never fetched at all would
+    // pass a test asserting only the first two, and one that refetches on
+    // every state change would pass a test asserting only the third. Call
+    // count (not a boolean) also tells "fetched once more" apart from
+    // "fetched five more times", which a boolean would blur together.
+    const client = await import("../src/api/client");
+    const fetchDaySpy = vi.spyOn(client, "fetchDay").mockResolvedValue({
+      kind: "ready", payload: fixture as never,
+    });
+    vi.spyOn(client, "fetchStatus").mockResolvedValue({
+      status: "ready", generated_at: "x", stale: false,
+    });
+
+    let ctx: DayContextValue | null = null;
+    function Capture() {
+      ctx = useDay();
+      return null;
+    }
+
+    render(
+      <DayProvider slug="winyah-bay" initialDate="2026-09-01">
+        <Capture />
+      </DayProvider>,
+    );
+
+    await waitFor(() => expect(ctx?.state).toBe("ready"));
+    const callsAfterLoad = fetchDaySpy.mock.calls.length;
+
+    act(() => ctx?.setHour(5));
+    expect(fetchDaySpy.mock.calls.length).toBe(callsAfterLoad);
+
+    act(() => ctx?.setSpecies("speckled_trout"));
+    expect(fetchDaySpy.mock.calls.length).toBe(callsAfterLoad);
+
+    act(() => ctx?.setModel("fallback"));
+    await waitFor(() =>
+      expect(fetchDaySpy.mock.calls.length).toBeGreaterThan(callsAfterLoad),
+    );
   });
 });
