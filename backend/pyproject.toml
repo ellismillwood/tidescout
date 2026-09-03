@@ -17,6 +17,8 @@ dependencies = [
     "shapely>=2.0",
     "scikit-image>=0.22",
     "anuga>=3.3.10",
+    "fastapi>=0.115",
+    "uvicorn[standard]>=0.30",
 ]
 
 [project.optional-dependencies]
