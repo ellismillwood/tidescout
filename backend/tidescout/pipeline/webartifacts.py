@@ -143,7 +143,13 @@ def depth_tint_png(src: Path, png: Path) -> dict:
     stops = np.array(DEPTH_STOPS_M, dtype="float32")
     cols = np.array(DEPTH_COLOURS, dtype="float32")
     flat = depth.ravel()
-    valid = np.isfinite(flat)
+    # `bathy_utm.tif` is a topobathy DEM, not a water-only grid: on the real
+    # source, 70.2% of non-nodata cells are positive elevation -- dry land
+    # and marsh, not water. Only cells AT OR BELOW datum (<= 0) are water;
+    # painting land as opaque pale "shallow water" would draw fake water
+    # over dry ground across most of the survey, actively misinforming
+    # rather than just being blank. Land gets alpha 0 alongside true nodata.
+    water = np.isfinite(flat) & (flat <= 0)
     # `np.interp` REQUIRES ascending xp and returns garbage silently -- no
     # error -- when given a descending one. DEPTH_STOPS_M is negative and
     # descending (-0.5 .. -20), so negating it gives 0.5 .. 20, already
@@ -152,8 +158,8 @@ def depth_tint_png(src: Path, png: Path) -> dict:
     xs = -stops
     rgba = np.zeros((flat.size, 4), dtype="uint8")
     for band in range(3):
-        rgba[valid, band] = np.interp(-flat[valid], xs, cols[:, band]).astype("uint8")
-    rgba[valid, 3] = 255
+        rgba[water, band] = np.interp(-flat[water], xs, cols[:, band]).astype("uint8")
+    rgba[water, 3] = 255
 
     out = rgba.reshape(height, width, 4).transpose(2, 0, 1)
     with rasterio.open(

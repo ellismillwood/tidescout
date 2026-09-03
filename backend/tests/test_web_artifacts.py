@@ -147,3 +147,43 @@ def test_depth_tint_is_registered_as_a_servable_layer():
     from tidescout.api.layers import LAYERS
 
     assert LAYERS["depth-tint"] == "depth_tint.png"
+
+
+def test_depth_tint_treats_land_as_transparent_not_shallow_water(tmp_path):
+    """`bathy_utm.tif` is a topobathy DEM, not a water-only grid: cells above
+    datum are dry land, not water. Measured on the real raster, 70.2% of its
+    non-nodata cells are positive elevation. Painting that as opaque pale
+    "shallow water" would draw fake water over dry ground across most of the
+    bay -- worse than shipping no depth layer at all, because it actively
+    misinforms. Only elevation <= 0 (at or below datum) may render; a cell
+    above datum must be as transparent as true nodata.
+
+    All three cases live in one test so the relationship is visible: a fix
+    that made EVERYTHING transparent would pass a land-only assertion.
+    """
+    rasterio = pytest.importorskip("rasterio")
+    from rasterio.transform import from_origin
+
+    src = tmp_path / "bathy.tif"
+    data = np.full((64, 64), -9999.0, dtype="float32")
+    data[:21, :] = -9999.0   # nodata: outside the survey
+    data[21:42, :] = 5.0     # land: above datum, inside the survey
+    data[42:, :] = -8.0      # water: below datum
+    with rasterio.open(
+        src, "w", driver="GTiff", height=64, width=64, count=1, dtype="float32",
+        crs="EPSG:26917", transform=from_origin(600000, 3700000, 30, 30),
+        nodata=-9999.0,
+    ) as ds:
+        ds.write(data, 1)
+
+    png = tmp_path / "depth_tint.png"
+    webartifacts.depth_tint_png(src, png)
+
+    with rasterio.open(png) as out:
+        alpha = out.read(4)
+        rgb = out.read([1, 2, 3])
+
+    assert alpha[10, 8] == 0, "true nodata must be transparent"
+    assert alpha[30, 8] == 0, "land above datum must be transparent, not shallow water"
+    assert alpha[55, 8] == 255, "water at or below datum must be opaque"
+    assert tuple(rgb[:, 55, 8]) != (0, 0, 0), "water must get a real ramp colour"
