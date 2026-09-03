@@ -101,6 +101,37 @@ def test_an_unknown_fishery_is_404(client):
     assert r.status_code == 404
 
 
+def test_a_known_but_unprocessed_fishery_is_409_naming_what_is_missing(client, monkeypatch):
+    """Spec §2: 'one predicate, two callers' -- the same `readiness.readiness`
+    backs both the `ready` flag in `/api/fisheries` and this 409, so the list
+    and the error can never disagree. The repo's one fixture fishery is
+    always fully processed on disk, so this branch is unreachable without a
+    monkeypatch. `fake_readiness` still branches on slug (real not-ready vs.
+    real unknown) rather than returning one canned result, so this test also
+    asserts the 404 sibling below -- catching `_require_ready`'s two `if`
+    branches being swapped, which a 409-only check would miss entirely.
+    """
+    from tidescout.api import readiness as readiness_module
+    from tidescout.api.readiness import Readiness
+
+    def fake_readiness(slug):
+        if slug == "winyah-bay":
+            return Readiness(False, ("flow library", "feature inventory"))
+        return Readiness(False, ("unknown fishery",))
+
+    monkeypatch.setattr(readiness_module, "readiness", fake_readiness)
+    c, _ = client
+    day = datetime.now(UTC).date() + timedelta(days=1)
+
+    r = c.get(f"/api/fisheries/winyah-bay/day/{day.isoformat()}")
+    assert r.status_code == 409
+    assert "flow library" in r.json()["detail"]
+    assert "feature inventory" in r.json()["detail"]
+
+    r2 = c.get(f"/api/fisheries/no-such-bay/day/{day.isoformat()}")
+    assert r2.status_code == 404
+
+
 def test_a_far_future_date_is_422_and_says_the_range(client):
     c, _ = client
     day = datetime.now(UTC).date() + timedelta(days=40)
