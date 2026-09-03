@@ -3,13 +3,24 @@
 from datetime import date, datetime, timedelta
 from pathlib import Path
 
+import numpy as np
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
 
 from tidescout.api import layers as layers_mod
 from tidescout.api import readiness, store
 from tidescout.api.builds import BuildCoordinator
-from tidescout.config import fishery_now
+from tidescout.config import fishery_now, load_fishery
+from tidescout.engine import flow as flow_engine
+from tidescout.engine import salinity as salinity_engine
+from tidescout.engine import structure
+from tidescout.engine.phase import library_phase
+from tidescout.paths import DATA_DIR
+from tidescout.pipeline import flowlib
+from tidescout.pipeline import payload as payload_mod
+from tidescout.pipeline.estuary import load_distance_field
+from tidescout.sources import dayloader
+from tidescout.sources.cache import Cache
 from tidescout.sources.weather import FORECAST_HORIZON_DAYS, WEATHER_MODELS
 
 
@@ -199,5 +210,126 @@ def create_app(
                 if exc.status_code != 404:
                     raise
                 return FileResponse(index)
+
+    def _check_hour(hour: int) -> int:
+        if not 0 <= hour <= 23:
+            raise HTTPException(422, f"hour must be 0-23, got {hour}")
+        return hour
+
+    def _regime_mix(slug: str, day, model: str):
+        """The regime blend and phase axis for a day, without scoring it.
+
+        Reuses `build_payload`'s own helpers so the overlay cannot drift from
+        what the markers were scored against -- an arrow field derived from a
+        different regime blend than the activations would be quietly wrong.
+        """
+        fishery = load_fishery(slug)
+        # A FRESH Cache, never `sources.cache.default_cache()`. That is a
+        # module-level singleton wrapping one sqlite3 connection, and FastAPI
+        # runs sync `def` routes in a threadpool -- so the singleton would
+        # cross threads and raise ProgrammingError on the first request. No
+        # existing route touches it; these would be the first.
+        day_conditions = dayloader.load_day(
+            fishery, day, model, Cache(DATA_DIR / "cache.sqlite")
+        )
+        rb = payload_mod._range_bucket_for_day(getattr(day_conditions, "moon", None))
+        available = payload_mod._available_regimes(slug)
+        disch = getattr(day_conditions, "discharge", None)
+        if disch is None or disch.cfs_now is None or not available:
+            raise HTTPException(404, "no regime resolves for this day")
+        mix, _ = flow_engine.blend_regimes(
+            rb, disch.cfs_now, fishery.discharge_buckets, available
+        )
+        return fishery, day_conditions, mix
+
+    @app.get("/api/fisheries/{slug}/flow-vectors/{raw_day}")
+    def get_flow_vectors(slug: str, raw_day: str, hour: int, model: str = "best"):
+        _check_model(model)
+        _check_hour(hour)
+        day = _parse_day(raw_day)
+        _require_ready(slug)
+
+        fishery, day_conditions, mix = _regime_mix(slug, day, model)
+        events, ok = payload_mod._flow_events(fishery, day, Cache(DATA_DIR / "cache.sqlite"))
+        if not ok:
+            raise HTTPException(404, "no tide events for this day")
+        hour_obj = day_conditions.hours[hour]
+        lib_phase = library_phase(events, hour_obj.time)
+        if lib_phase is None:
+            raise HTTPException(404, "no library phase for this hour")
+
+        regime_phases = payload_mod._regime_phase_axes(slug, mix)
+        state = payload_mod._blended_state(slug, regime_phases, mix, lib_phase)
+        spec = flowlib.grid_spec(slug, fishery)
+
+        # Decimate to a drawable arrow density. 587,325 cells would be both
+        # unreadable and larger than the day payload this exists to stay out of.
+        step = max(1, int((spec.shape[0] * spec.shape[1] / 2500) ** 0.5))
+        ug = structure.to_grid(state["u"], spec.flat_index, spec.shape)
+        vg = structure.to_grid(state["v"], spec.flat_index, spec.shape)
+        wet = flow_engine.wet_mask(state["depth"])
+        wg = structure.to_grid(wet.astype("float64"), spec.flat_index, spec.shape, fill=0.0)
+        ug = np.where(wg > 0.5, ug, 0.0)[::step, ::step]
+        vg = np.where(wg > 0.5, vg, 0.0)[::step, ::step]
+
+        # `GridSpec` has NO `bbox` attribute -- it carries `xs`/`ys` (in-domain
+        # cell centres) and a `crs` that is EPSG:26917 for this fishery, i.e.
+        # UTM metres. MapLibre needs WGS84 degrees, so derive the extent from
+        # xs/ys and reproject it, the same way `webartifacts.hillshade_png`
+        # converts its bounds.
+        from rasterio.warp import transform_bounds
+
+        west, south, east, north = transform_bounds(
+            spec.crs or "EPSG:26917",
+            "EPSG:4326",
+            float(spec.xs.min()), float(spec.ys.min()),
+            float(spec.xs.max()), float(spec.ys.max()),
+        )
+        return {
+            "hour": hour,
+            "rows": int(ug.shape[0]),
+            "cols": int(ug.shape[1]),
+            "bbox": [west, south, east, north],
+            "u": [float(x) for x in np.nan_to_num(ug).ravel()],
+            "v": [float(x) for x in np.nan_to_num(vg).ravel()],
+        }
+
+    @app.get("/api/fisheries/{slug}/salinity-field/{raw_day}")
+    def get_salinity_field(slug: str, raw_day: str, hour: int, model: str = "best"):
+        _check_model(model)
+        _check_hour(hour)
+        day = _parse_day(raw_day)
+        _require_ready(slug)
+
+        fishery, day_conditions, _ = _regime_mix(slug, day, model)
+        try:
+            km = load_distance_field(slug)
+        except FileNotFoundError:
+            raise HTTPException(404, "no along-estuary distance field") from None
+
+        hour_obj = day_conditions.hours[hour]
+        phase = payload_mod._salinity_phase(hour_obj)
+        disch = day_conditions.discharge
+        if phase is None or disch is None or disch.cfs_now is None:
+            raise HTTPException(404, "no phase or discharge for this hour")
+
+        # Bin by along-estuary distance: salinity is a function of km, so one
+        # value per kilometre bin describes the whole field, and the client
+        # paints it by joining back to the distance field it already has.
+        finite = km[np.isfinite(km)]
+        edges = np.arange(np.floor(finite.min()), np.ceil(finite.max()) + 1.0, 1.0)
+        cells = []
+        for left in edges:
+            field = salinity_engine.salinity_field(
+                float(left), disch.cfs_now, phase, fishery.salinity
+            )
+            cells.append({"km": float(left), "ppt": float(field.ppt)})
+
+        return {
+            "hour": hour,
+            "fitted": fishery.salinity.fitted,
+            "extrapolated": payload_mod._is_extrapolated(disch.cfs_now, fishery.salinity),
+            "cells": cells,
+        }
 
     return app

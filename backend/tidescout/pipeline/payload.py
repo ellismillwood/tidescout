@@ -576,6 +576,25 @@ def _json_safe(obj):
     return obj
 
 
+def _regime_phase_axes(slug: str, mix) -> dict[str, list[float]]:
+    """Each mixed regime's phase axis, WITHOUT the closing duplicate.
+
+    The library stores a final snapshot at phase 1.0 recorded as 0.0, so
+    consecutive pairs span the cycle-closing gap. `flow.bracket_phases` wraps
+    the cycle itself and rejects the raw list as descending. Extracted from
+    `build_payload` so the overlay endpoints resolve the same axis the markers
+    were scored against.
+    """
+    axes: dict[str, list[float]] = {}
+    for name, _ in mix:
+        grid_path = fishery_data_dir(slug) / "flow" / name / "grid" / "grid.json"
+        stored = json.loads(grid_path.read_text())["phases"]
+        if len(stored) > 1 and stored[-1] == stored[0]:
+            stored = stored[:-1]
+        axes[name] = stored
+    return axes
+
+
 def _blended_state(slug: str, regime_phases: dict[str, list[float]], mix, phase: float) -> dict:
     """u/v/depth at `phase`, blended across the (at most two) regimes in
     `mix` -- phase-interpolated within each regime via `flow.bracket_phases`
@@ -640,22 +659,7 @@ def build_payload(slug: str, day: date, model_label: str, cache) -> dict:
     if not flow_events_ok:
         missing.append("flow-library-phase")
 
-    regime_phases: dict[str, list[float]] = {}
-    for name, _ in mix:
-        grid_path = fishery_data_dir(slug) / "flow" / name / "grid" / "grid.json"
-        stored = json.loads(grid_path.read_text())["phases"]
-        # The library stores a closing snapshot at phase 1.0 (recorded as
-        # 0.0, the same value as the first) so every consecutive PAIR of
-        # snapshots on disk spans one interpolatable gap, cycle-closing gap
-        # included. `flow.bracket_phases` wraps the cycle itself (its own
-        # `ordered[(i + 1) % len(ordered)]`), so it wants the phase axis
-        # WITHOUT that duplicate -- fed the raw 26-entry list it sees
-        # 0.966 -> 0.0 as a DESCENDING step and raises. Dropping the closing
-        # duplicate loses no state: index 25's snapshot is bit-identical to
-        # index 0's (same phase, same simulated instant one cycle later).
-        if len(stored) > 1 and stored[-1] == stored[0]:
-            stored = stored[:-1]
-        regime_phases[name] = stored
+    regime_phases = _regime_phase_axes(slug, mix)
 
     try:
         distance_field = load_distance_field(slug)
