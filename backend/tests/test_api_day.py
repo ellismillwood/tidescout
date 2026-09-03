@@ -1,5 +1,6 @@
 """The day endpoint: cache hits, misses, staleness, and honest degradation."""
 
+import gzip
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
@@ -215,3 +216,93 @@ def test_every_real_weather_model_is_still_accepted(client, model):
     r = c.get(f"/api/fisheries/winyah-bay/day/{day.isoformat()}", params={"model": model})
     assert r.status_code == 202, r.text
     assert coord.ensured == [("winyah-bay", day, model)]
+
+
+def test_a_cache_hit_is_served_as_the_stored_gzip_bytes_not_re_serialised(client):
+    """Spec §5 sizes the frontend against 1.67 MB gzipped, not 24.59 MB raw.
+
+    Gunzipping the cache entry only to hand it to `JSONResponse` re-serialised
+    it and put the uncompressed figure on the wire -- ~270 ms of CPU per
+    request and 24.6 MB instead of 1.67 MB, silently invalidating the transfer
+    numbers in §5. Three halves: the encoding is declared, the body on the wire
+    really is the compressed file (its length equals the file's, not the
+    decoded payload's), and the decoded content is byte-identical to what was
+    stored -- the contract must be unchanged, only the encoding.
+    """
+    c, _ = client
+    day = datetime.now(UTC).date() + timedelta(days=1)
+    # Big enough to compress: the real payload is 24.59 MB raw / 1.67 MB
+    # gzipped, and a 100-byte stub would gzip LARGER than it started.
+    payload = _write(day, datetime.now(UTC), species={"redfish": [{"flow": 0.5}] * 2000})
+    path = store.payload_path("winyah-bay", day, "best")
+
+    r = c.get(f"/api/fisheries/winyah-bay/day/{day.isoformat()}")
+    assert r.status_code == 200
+    assert r.headers["content-encoding"] == "gzip"
+    assert r.headers["content-type"].startswith("application/json")
+    assert int(r.headers["content-length"]) == path.stat().st_size
+    assert int(r.headers["content-length"]) < len(r.content), "the wire form must be smaller"
+    assert r.content == gzip.decompress(path.read_bytes())
+    assert r.json() == payload
+
+
+def test_a_degraded_payload_survives_the_gzip_passthrough(client):
+    """Spec §6, re-asserted against the compressed path specifically. Serving
+    stored bytes must not become an excuse to reshape the payload: a dark
+    sensor is DATA and reaches the client exactly as written."""
+    c, _ = client
+    day = datetime.now(UTC).date() + timedelta(days=1)
+    payload = _write(day, datetime.now(UTC), missing=["weather"], confidence=0.79)
+    r = c.get(f"/api/fisheries/winyah-bay/day/{day.isoformat()}")
+    assert r.headers["content-encoding"] == "gzip"
+    assert r.json() == payload
+    assert r.json()["missing"] == ["weather"]
+    assert r.json()["confidence"] == 0.79
+
+
+def test_the_horizon_and_staleness_are_measured_in_the_fishery_zone_not_utc(
+    tmp_path, monkeypatch
+):
+    """20:30 Eastern on 2026-09-03 is already 2026-09-04 in UTC.
+
+    Winyah Bay's own calendar day is the one the user is fishing, and the
+    fishery config carries its timezone -- `sources.weather._today` exists to
+    say so. Two gates move with the day boundary, and each is asserted against
+    the date UTC would have gotten wrong:
+
+    * the forecast horizon -- +16 days from the Eastern day is 2026-09-19, so
+      the 19th is inside the range and the 20th is not; in UTC the 20th would
+      wrongly be allowed;
+    * staleness -- 2026-09-03 is TODAY in the fishery, so an old payload for it
+      is stale and gets a background rebuild; in UTC it is yesterday, and
+      `is_stale`'s "past dates never go stale" rule would silently pin the user
+      to a stale forecast for the day he is actually fishing.
+    """
+    from zoneinfo import ZoneInfo
+
+    from tidescout.api import app as app_module
+
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path)
+    eastern = ZoneInfo("America/New_York")
+    frozen = datetime(2026, 9, 4, 0, 30, tzinfo=UTC).astimezone(eastern)
+    assert (frozen.date(), datetime(2026, 9, 4, 0, 30, tzinfo=UTC).date()) == (
+        date(2026, 9, 3),
+        date(2026, 9, 4),
+    ), "the two calendars disagree here -- that is the point of this test"
+    monkeypatch.setattr(app_module, "fishery_now", lambda slug: frozen)
+
+    coord = FakeCoordinator()
+    c = TestClient(create_app(coordinator=coord))
+
+    edge = c.get("/api/fisheries/winyah-bay/day/2026-09-19")
+    assert edge.status_code == 202, "today+16 in the fishery zone is inside the horizon"
+    beyond = c.get("/api/fisheries/winyah-bay/day/2026-09-20")
+    assert beyond.status_code == 422, beyond.text
+
+    coord.ensured.clear()
+    _write(date(2026, 9, 3), frozen - timedelta(hours=store.STALE_AFTER_H + 1))
+    hit = c.get("/api/fisheries/winyah-bay/day/2026-09-03")
+    assert hit.status_code == 200
+    assert coord.ensured == [("winyah-bay", date(2026, 9, 3), "best")], (
+        "the fishery's today is stale and must be rebuilt in the background"
+    )

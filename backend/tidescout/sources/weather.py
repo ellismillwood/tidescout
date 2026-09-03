@@ -10,6 +10,12 @@ from tidescout.sources.cache import Cache
 FORECAST_URL = "https://api.open-meteo.com/v1/forecast"
 ARCHIVE_URL = "https://archive-api.open-meteo.com/v1/archive"
 ARCHIVE_CUTOFF_DAYS = 7
+# Open-Meteo's forecast endpoint allowed through +16 days when measured
+# (2026-09-03); anything older than ARCHIVE_CUTOFF_DAYS routes to the ERA5
+# archive, which reaches back years. The bound that bites is the future one.
+# Lives here rather than in `api.app` so the CLI can honour it without
+# importing FastAPI.
+FORECAST_HORIZON_DAYS = 16
 FORECAST_TTL = timedelta(hours=1)
 
 WEATHER_MODELS = {

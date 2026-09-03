@@ -66,9 +66,10 @@ GET  /api/fisheries/{slug}/day/{date}?model=best
      → 404 unknown fishery
      → 409 fishery not processed, naming what is missing
      → 422 date outside the usable range, stating the range
+     → 422 unknown `model`, naming the valid ones
 
 GET  /api/fisheries/{slug}/day/{date}/status?model=best
-     → 200 {status:"ready"|"building"|"failed", generated_at?, stale?, error?}
+     → 200 {status:"ready"|"building"|"failed"|"absent", generated_at?, stale?, error?}
 
 GET  /api/fisheries/{slug}/layers/{name}
      → 200 a static per-fishery artifact (§4)
@@ -80,8 +81,26 @@ fishery is ready when its flow library, along-estuary distance field and
 `features.geojson` all exist. **The same predicate backs the `409`**, so the
 list and the error can never disagree — one function, two callers.
 
+`"absent"` means neither a cached payload nor a build record exists for that
+key — the normal answer for a date nobody has asked for yet. It is a distinct
+answer from `"failed"`, and the frontend's poller must not treat it as an
+error.
+
+`model` is validated against `sources.weather.WEATHER_MODELS` **before it
+reaches the cache**, on `/day` and `/status` alike. It becomes part of a
+filename, and the cache writer creates the target's parent directory, so an
+unchecked value is an arbitrary file write — not merely a bad forecast. The
+cache's own `payload_path` re-checks that the resolved path stays under
+`data/<slug>/payloads` as a backstop.
+
 `/status` is separate from the payload endpoint so that polling costs a few
 hundred bytes rather than re-transferring megabytes on every tick.
+
+**A cache hit is served as the stored gzip bytes**, with
+`Content-Encoding: gzip`, rather than gunzipped and re-serialised by the JSON
+encoder. That is what makes §5's 1.67 MB the number actually on the wire; the
+decode-and-re-encode round trip costs ~270 ms of CPU per request and sends
+24.59 MB instead.
 
 ## 3. The payload cache
 
@@ -121,6 +140,17 @@ avoid constant rebuilding. It is one constant, in one place, meant to be moved.
 payload already present and fresh. Roughly **8 minutes** for seven dates. It is
 an ordinary CLI command — testable, runnable by hand, and schedulable from cron
 or launchd. The API does not schedule anything itself.
+
+**"Today" is the FISHERY's calendar day**, from the timezone in its config —
+not UTC and not system-local. Winyah Bay is `America/New_York`, so between
+20:00 and 23:59 Eastern a UTC "today" is already tomorrow, and an overnight
+warming run — which is what this command is for — would skip today entirely.
+The same rule governs the API's forecast-horizon check and its staleness
+cutoff; `config.fishery_now` is the single source, following
+`sources.weather._today`'s existing precedent.
+
+`--days` is **clamped to `FORECAST_HORIZON_DAYS + 1`** with a warning. Beyond
+that, each date is ~70 s spent building a payload `/day` answers with a 422.
 
 ## 4. Static artifacts
 
@@ -201,7 +231,8 @@ is enabled for `localhost:5173` **in development only**. In production the
 frontend is same-origin and no CORS headers are emitted. The app binds
 `127.0.0.1`, not `0.0.0.0`: this is a single-user local tool with no auth (§7),
 and binding it to every interface would put an unauthenticated filesystem-backed
-API on the local network.
+API on the local network. `serve --host` therefore **refuses a non-loopback
+address** unless `--allow-remote` is also passed, and says why.
 
 ## 5. Payload contract notes for the frontend
 

@@ -1,6 +1,6 @@
 """The FastAPI app. Routes only -- the work lives in the sibling modules."""
 
-from datetime import UTC, date, datetime, timedelta
+from datetime import date, datetime, timedelta
 from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
@@ -9,13 +9,8 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from tidescout.api import layers as layers_mod
 from tidescout.api import readiness, store
 from tidescout.api.builds import BuildCoordinator
-from tidescout.sources.weather import WEATHER_MODELS
-
-# Open-Meteo's forecast endpoint allowed through +16 days when measured
-# (2026-09-03); anything older than `weather.ARCHIVE_CUTOFF_DAYS` routes to the
-# ERA5 archive, which reaches back years. The bound that bites is the future
-# one, so only it is enforced here.
-FORECAST_HORIZON_DAYS = 16
+from tidescout.config import fishery_now
+from tidescout.sources.weather import FORECAST_HORIZON_DAYS, WEATHER_MODELS
 
 
 def _parse_day(raw: str) -> date:
@@ -78,16 +73,28 @@ def create_app(
         _check_model(model)
         day = _parse_day(raw_day)
         _require_ready(slug)
-        now = datetime.now(UTC)
+        # Fishery-local, NOT UTC: `config.fishery_now` carries the reason.
+        # Both users of `now` below gate on a calendar day, and Winyah Bay's
+        # day boundary is five hours off UTC's.
+        now = fishery_now(slug)
         _check_range(day, now)
 
-        payload = store.read_payload(slug, day, model)
-        if payload is not None:
+        got = store.read_payload_gz(slug, day, model)
+        if got is not None:
+            raw, payload = got
             # A stale hit is served IMMEDIATELY and rebuilt in the background:
             # the user never waits on a rebuild for data already on disk.
             if store.is_stale(payload, day, now):
                 coord.ensure(slug, day, model)
-            return JSONResponse(payload)
+            # The STORED BYTES, verbatim. Gunzipping only to re-serialise costs
+            # ~270 ms of CPU per request at the spec's measured 24.59 MB and
+            # puts 24.59 MB on the wire instead of the 1.67 MB gzipped figure
+            # §5 sizes the frontend against. The payload itself is untouched --
+            # `missing: ['weather']` and a lowered `confidence` reach the
+            # client exactly as written (§6).
+            return Response(
+                raw, media_type="application/json", headers={"Content-Encoding": "gzip"}
+            )
 
         state = coord.ensure(slug, day, model)
         return JSONResponse(
@@ -101,7 +108,7 @@ def create_app(
         _check_model(model)
         day = _parse_day(raw_day)
         _require_ready(slug)
-        now = datetime.now(UTC)
+        now = fishery_now(slug)
 
         payload = store.read_payload(slug, day, model)
         if payload is not None:

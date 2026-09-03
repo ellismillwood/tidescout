@@ -399,22 +399,40 @@ def warm(
 
     Intended for cron or launchd overnight. Seven dates is roughly 8 minutes.
     """
-    from datetime import UTC, datetime, timedelta
+    from datetime import timedelta
 
     from tidescout.api import readiness, store
+    from tidescout.config import fishery_now
+    from tidescout.sources.weather import FORECAST_HORIZON_DAYS
 
     r = readiness.readiness(slug)
     if not r.ready:
         console.print(f"[red]{slug} is not ready: {', '.join(r.missing)}[/red]")
         raise typer.Exit(1)
 
-    today = datetime.now(UTC).date()
+    # `/day` rejects anything past today+FORECAST_HORIZON_DAYS with a 422, so
+    # dates beyond it are ~70 s each spent building payloads the API will not
+    # serve. Clamp rather than fail: the useful part of the request is honoured.
+    max_days = FORECAST_HORIZON_DAYS + 1  # today .. today+16, inclusive
+    if days > max_days:
+        console.print(
+            f"[yellow]--days {days} runs past the {FORECAST_HORIZON_DAYS}-day forecast "
+            f"horizon, and /day rejects those dates with a 422. Clamping to "
+            f"{max_days}.[/yellow]"
+        )
+        days = max_days
+
+    # Fishery-local, NOT UTC -- see `config.fishery_now`. Between 20:00 and
+    # 23:59 Eastern a UTC "today" is already tomorrow, so this command, whose
+    # docstring recommends running it overnight, would skip today entirely and
+    # leave the user a 70-second wait the next morning.
+    today = fishery_now(slug).date()
     failures = 0
     for offset in range(days):
         day = today + timedelta(days=offset)
         if not force:
             existing = store.read_payload(slug, day, model)
-            if existing is not None and not store.is_stale(existing, day, datetime.now(UTC)):
+            if existing is not None and not store.is_stale(existing, day, fishery_now(slug)):
                 console.print(f"{day}: fresh, skipping")
                 continue
         try:
