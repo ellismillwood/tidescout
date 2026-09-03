@@ -41,7 +41,7 @@ def test_an_unknown_slug_is_rejected_before_any_path_is_built(tmp_path, monkeypa
 
 def test_every_allowlisted_name_maps_to_a_filename():
     assert set(layers.LAYERS) == {
-        "features", "contours", "oysters", "hillshade", "hillshade-bounds",
+        "features", "contours", "oysters", "hillshade", "hillshade-bounds", "depth-tint",
     }
 
 

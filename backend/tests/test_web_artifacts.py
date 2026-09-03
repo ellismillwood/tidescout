@@ -92,3 +92,58 @@ def test_hillshade_is_reprojected_to_web_mercator_and_written_as_png(tmp_path):
     # hillshade underlay in the wrong hemisphere with every number in bounds.
     assert b[0] < b[2] and b[1] < b[3], b
     assert meta["width"] > 0 and meta["height"] > 0
+
+
+def test_depth_tint_renders_a_colour_ramp_and_makes_nodata_transparent(tmp_path):
+    """§9 asks for "bathy hillshade + depth tint + contours". The hillshade
+    shipped in PR #12 and contours already exist; the tint had no artifact.
+
+    Two properties, both load-bearing. The output must be RGBA -- a
+    single-band PNG cannot express "no data here", so the raster's -9999 fill
+    would paint an opaque block over the basemap outside the survey. And
+    deeper water must differ from shallow, or the layer conveys nothing.
+    """
+    rasterio = pytest.importorskip("rasterio")
+    from rasterio.transform import from_origin
+
+    src = tmp_path / "bathy.tif"
+    data = np.full((64, 64), -9999.0, dtype="float32")
+    data[:32, :] = -2.0    # shallow
+    data[32:, :] = -14.0   # deep
+    data[0, 0] = -9999.0   # a nodata cell inside the covered area
+    with rasterio.open(
+        src, "w", driver="GTiff", height=64, width=64, count=1, dtype="float32",
+        crs="EPSG:26917", transform=from_origin(600000, 3700000, 30, 30),
+        nodata=-9999.0,
+    ) as ds:
+        ds.write(data, 1)
+
+    png = tmp_path / "depth_tint.png"
+    meta = webartifacts.depth_tint_png(src, png)
+
+    assert png.exists() and png.read_bytes()[:8] == b"\x89PNG\r\n\x1a\n"
+    assert meta["width"] > 0 and meta["height"] > 0
+
+    with rasterio.open(png) as out:
+        assert out.count == 4, "must be RGBA so nodata can be transparent"
+        alpha = out.read(4)
+        rgb = out.read([1, 2, 3])
+
+    assert alpha.min() == 0, "nodata must be fully transparent"
+    assert alpha.max() == 255, "surveyed water must be fully opaque"
+    # Shallow and deep must not paint the same colour...
+    top = rgb[:, 8, 8]
+    bottom = rgb[:, 55, 8]
+    assert tuple(top) != tuple(bottom), (top, bottom)
+    # ...and deep must be DARKER than shallow. `np.interp` with a descending
+    # xp returns garbage without raising, so "they differ" alone would pass
+    # against a scrambled ramp. This pins the direction.
+    assert int(bottom.sum()) < int(top.sum()), (top, bottom)
+
+
+def test_depth_tint_is_registered_as_a_servable_layer():
+    """The API's allowlist is a dict-key check, so an artifact absent from it
+    cannot be fetched even once it exists on disk."""
+    from tidescout.api.layers import LAYERS
+
+    assert LAYERS["depth-tint"] == "depth_tint.png"

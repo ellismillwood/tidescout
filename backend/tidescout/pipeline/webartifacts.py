@@ -96,3 +96,68 @@ def hillshade_png(src: Path, png: Path, bounds_json: Path) -> dict:
         json.dumps({"bounds": [west, south, east, north], "crs": "EPSG:4326"})
     )
     return {"width": width, "height": height, "bounds": [west, south, east, north]}
+
+
+# Depth breakpoints in metres (negative = below datum) and their RGB colours,
+# shallow to deep. Chosen to read as water rather than as a heatmap: the
+# hillshade above supplies relief, so this layer only has to say "how deep".
+DEPTH_STOPS_M = (-0.5, -2.0, -5.0, -10.0, -20.0)
+DEPTH_COLOURS = (
+    (198, 232, 240),
+    (140, 200, 224),
+    (86, 158, 204),
+    (44, 108, 173),
+    (18, 62, 128),
+)
+
+
+def depth_tint_png(src: Path, png: Path) -> dict:
+    """Colour-ramp a bathymetry GeoTIFF into a web-mercator RGBA PNG.
+
+    RGBA, not single-band: the source fills unsurveyed cells with its nodata
+    value, and a PNG without an alpha channel has no way to say "nothing
+    here" -- it would paint an opaque rectangle over the basemap wherever the
+    survey stops. Alpha 0 on nodata is what lets the tint sit inside the
+    survey's real outline.
+
+    Shares `hillshade_png`'s bounds sidecar rather than writing its own: both
+    are warps of the same grid, so a second bounds file would be a second
+    thing to keep in sync.
+    """
+    with rasterio.open(src) as ds:
+        transform, width, height = calculate_default_transform(
+            ds.crs, "EPSG:3857", ds.width, ds.height, *ds.bounds
+        )
+        depth = np.full((height, width), np.nan, dtype="float32")
+        reproject(
+            source=rasterio.band(ds, 1),
+            destination=depth,
+            src_transform=ds.transform,
+            src_crs=ds.crs,
+            dst_transform=transform,
+            dst_crs="EPSG:3857",
+            src_nodata=ds.nodata,
+            dst_nodata=np.nan,
+        )
+
+    stops = np.array(DEPTH_STOPS_M, dtype="float32")
+    cols = np.array(DEPTH_COLOURS, dtype="float32")
+    flat = depth.ravel()
+    valid = np.isfinite(flat)
+    # `np.interp` REQUIRES ascending xp and returns garbage silently -- no
+    # error -- when given a descending one. DEPTH_STOPS_M is negative and
+    # descending (-0.5 .. -20), so negating it gives 0.5 .. 20, already
+    # ascending. Do NOT also reverse: negate-and-reverse yields
+    # [20, 10, 5, 2, 0.5], which is descending again and paints noise.
+    xs = -stops
+    rgba = np.zeros((flat.size, 4), dtype="uint8")
+    for band in range(3):
+        rgba[valid, band] = np.interp(-flat[valid], xs, cols[:, band]).astype("uint8")
+    rgba[valid, 3] = 255
+
+    out = rgba.reshape(height, width, 4).transpose(2, 0, 1)
+    with rasterio.open(
+        png, "w", driver="PNG", height=height, width=width, count=4, dtype="uint8"
+    ) as dst:
+        dst.write(out)
+    return {"width": width, "height": height}

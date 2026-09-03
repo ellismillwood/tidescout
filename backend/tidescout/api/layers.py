@@ -17,6 +17,7 @@ LAYERS: dict[str, str] = {
     "oysters": "oyster_reefs.web.geojson",
     "hillshade": "hillshade.png",
     "hillshade-bounds": "hillshade.bounds.json",
+    "depth-tint": "depth_tint.png",
 }
 
 
