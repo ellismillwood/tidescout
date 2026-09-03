@@ -1,6 +1,7 @@
 import json
 import math
 import time
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -378,6 +379,73 @@ def spots(slug: str) -> None:
         )
         table.add_row(s.name, best[0], best[1], f"{best[2]:,.0f}")
     console.print(table)
+
+
+def _warm_build(slug: str, day: date, model: str) -> dict:
+    """Indirection so tests can substitute a fast fake for the 70 s real build."""
+    from tidescout.api.builds import default_build_fn
+
+    return default_build_fn(slug, day, model)
+
+
+@app.command()
+def warm(
+    slug: str,
+    days: int = typer.Option(7, "--days", help="How many days from today, inclusive"),
+    model: str = typer.Option("best", "--model"),
+    force: bool = typer.Option(False, "--force", help="Rebuild even if already fresh"),
+) -> None:
+    """Pre-build the day payloads the UI will ask for. ~70 s per date.
+
+    Intended for cron or launchd overnight. Seven dates is roughly 8 minutes.
+    """
+    from datetime import UTC, datetime, timedelta
+
+    from tidescout.api import readiness, store
+
+    r = readiness.readiness(slug)
+    if not r.ready:
+        console.print(f"[red]{slug} is not ready: {', '.join(r.missing)}[/red]")
+        raise typer.Exit(1)
+
+    today = datetime.now(UTC).date()
+    failures = 0
+    for offset in range(days):
+        day = today + timedelta(days=offset)
+        if not force:
+            existing = store.read_payload(slug, day, model)
+            if existing is not None and not store.is_stale(existing, day, datetime.now(UTC)):
+                console.print(f"{day}: fresh, skipping")
+                continue
+        try:
+            payload = _warm_build(slug, day, model)
+            store.write_payload(slug, day, model, payload)
+            console.print(f"{day}: built")
+        except Exception as exc:  # noqa: BLE001
+            # Keep going: one dark source on one date must not abandon the rest.
+            failures += 1
+            console.print(f"[red]{day}: FAILED -- {type(exc).__name__}: {exc}[/red]")
+    if failures:
+        raise typer.Exit(1)
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8000, "--port"),
+    dev: bool = typer.Option(False, "--dev", help="Allow CORS from the Vite dev server"),
+) -> None:
+    """Run the API (and the built frontend, if present)."""
+    import uvicorn
+
+    from tidescout.api.app import create_app
+    from tidescout.paths import REPO_ROOT
+
+    uvicorn.run(
+        create_app(frontend_dist=REPO_ROOT / "frontend" / "dist", dev_cors=dev),
+        host=host,
+        port=port,
+    )
 
 
 @bathy_app.command()

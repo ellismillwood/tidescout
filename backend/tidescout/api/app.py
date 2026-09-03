@@ -1,6 +1,7 @@
 """The FastAPI app. Routes only -- the work lives in the sibling modules."""
 
 from datetime import UTC, date, datetime, timedelta
+from pathlib import Path
 
 from fastapi import FastAPI, HTTPException, Request
 from fastapi.responses import FileResponse, JSONResponse, Response
@@ -41,7 +42,11 @@ def _check_range(day: date, now: datetime) -> None:
         )
 
 
-def create_app(coordinator: BuildCoordinator | None = None) -> FastAPI:
+def create_app(
+    coordinator: BuildCoordinator | None = None,
+    frontend_dist: Path | None = None,
+    dev_cors: bool = False,
+) -> FastAPI:
     app = FastAPI(title="TideScout", docs_url="/api/docs", openapi_url="/api/openapi.json")
     coord = coordinator if coordinator is not None else BuildCoordinator()
 
@@ -112,5 +117,26 @@ def create_app(coordinator: BuildCoordinator | None = None) -> FastAPI:
             if etag in (tag.strip().removeprefix("W/") for tag in if_none_match.split(",")):
                 return Response(status_code=304, headers={"ETag": etag, **headers})
         return response
+
+    if dev_cors:
+        # Development runs two servers -- Vite on :5173, this on :8000. In
+        # production the frontend is same-origin and no CORS headers are
+        # emitted at all.
+        from fastapi.middleware.cors import CORSMiddleware
+
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+            allow_methods=["GET"],
+            allow_headers=["*"],
+        )
+
+    if frontend_dist is not None and frontend_dist.is_dir():
+        # Mounted LAST so every /api route is matched first and never falls
+        # through to the SPA. `html=True` serves index.html for unmatched
+        # paths, so client-side routes survive a page reload.
+        from fastapi.staticfiles import StaticFiles
+
+        app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
 
     return app
