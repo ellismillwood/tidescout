@@ -86,4 +86,9 @@ def test_hillshade_is_reprojected_to_web_mercator_and_written_as_png(tmp_path):
     assert len(b) == 4
     # WGS84 degrees, not UTM metres -- the whole point of the conversion.
     assert -180 <= b[0] <= 180 and -90 <= b[1] <= 90, b
+    # ...and in [west, south, east, north] ORDER. At this latitude a swapped
+    # west/south pair (-79, 33) still satisfies the range check above, so the
+    # range check alone cannot catch an axis swap -- which would put the
+    # hillshade underlay in the wrong hemisphere with every number in bounds.
+    assert b[0] < b[2] and b[1] < b[3], b
     assert meta["width"] > 0 and meta["height"] > 0

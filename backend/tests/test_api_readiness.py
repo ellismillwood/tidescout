@@ -74,3 +74,75 @@ def test_get_api_fisheries_returns_the_summaries_over_http():
     assert row["timezone"] == "America/New_York"
     assert row["ready"] is True
     assert len(row["center"]) == 2
+
+
+def test_readiness_names_each_missing_artifact_by_name(tmp_path, monkeypatch):
+    """The three `missing.append` branches, which nothing else reaches.
+
+    The repo's one fishery is fully processed on disk, so every other test in
+    this file exercises only the ready path -- and the 409's own test
+    monkeypatches `readiness.readiness` away entirely, asserting the route
+    against a hand-written fake rather than against this function. Pointing
+    `DATA_DIR` at an empty tmp dir is what actually runs the branches.
+
+    Satisfied one at a time rather than all at once: a function that returned a
+    fixed three-item list, or that checked the wrong file for a given label,
+    would pass an all-missing assertion and fail here.
+    """
+    monkeypatch.setattr(readiness, "DATA_DIR", tmp_path)
+    data = tmp_path / "winyah-bay"
+    data.mkdir()
+
+    r = readiness.readiness("winyah-bay")
+    assert r.ready is False
+    assert set(r.missing) == {
+        "flow library", "along-estuary distance field", "feature inventory",
+    }
+
+    # An EMPTY flow directory is still a missing flow library -- `flow/`
+    # exists as soon as anything writes into `data/<slug>/`, so `is_dir()`
+    # alone would report a library that holds no states.
+    (data / "flow").mkdir()
+    assert "flow library" in readiness.readiness("winyah-bay").missing
+
+    (data / "flow" / "regime0-phase00.npz").write_bytes(b"not really an npz")
+    assert "flow library" not in readiness.readiness("winyah-bay").missing
+    assert set(readiness.readiness("winyah-bay").missing) == {
+        "along-estuary distance field", "feature inventory",
+    }
+
+    (data / "estuary_km.npy").write_bytes(b"")
+    assert readiness.readiness("winyah-bay").missing == ("feature inventory",)
+
+    (data / "features.geojson").write_text("{}")
+    done = readiness.readiness("winyah-bay")
+    assert done.ready is True and done.missing == ()
+
+
+def test_the_409_names_what_is_missing_using_the_real_predicate(tmp_path, monkeypatch):
+    """Spec §2's promise, tested end to end instead of against a fake.
+
+    `test_api_day.py`'s 409 test substitutes `readiness.readiness` wholesale,
+    so it proves the route formats *something*, not that the real predicate's
+    output survives to the client. Driving the real function over an empty
+    DATA_DIR closes that gap -- and asserts the other half of "one predicate,
+    two callers": the `reason` in `/api/fisheries` and the 409 detail come from
+    the same list, so the picker and the error cannot disagree.
+    """
+    from fastapi.testclient import TestClient
+
+    from tidescout.api.app import create_app
+
+    monkeypatch.setattr(readiness, "DATA_DIR", tmp_path)
+    client = TestClient(create_app())
+
+    r = client.get("/api/fisheries/winyah-bay/day/2026-09-03")
+    assert r.status_code == 409, r.text
+    detail = r.json()["detail"]
+    for name in ("flow library", "along-estuary distance field", "feature inventory"):
+        assert name in detail, detail
+
+    row = next(x for x in client.get("/api/fisheries").json() if x["slug"] == "winyah-bay")
+    assert row["ready"] is False
+    assert row["reason"] == ", ".join(readiness.readiness("winyah-bay").missing)
+    assert row["reason"] in detail
