@@ -7,6 +7,7 @@ from fastapi.testclient import TestClient
 
 from tidescout.api import store
 from tidescout.api.app import create_app
+from tidescout.sources.weather import WEATHER_MODELS
 
 
 class FakeCoordinator:
@@ -166,3 +167,51 @@ def test_status_reports_ready_for_a_cached_payload_without_any_build(client):
     r = c.get(f"/api/fisheries/winyah-bay/day/{day.isoformat()}/status")
     assert r.json()["status"] == "ready"
     assert r.json()["stale"] is False
+
+
+@pytest.mark.parametrize(
+    "evil",
+    ["../../../pwned", "../../../../../escaped", "best/../../../../../x", "..", "gfs;rm"],
+)
+@pytest.mark.parametrize("suffix", ["", "/status"])
+def test_a_traversing_model_is_rejected_before_it_reaches_the_filesystem(
+    tmp_path, monkeypatch, evil, suffix
+):
+    """`?model=` becomes part of a FILENAME. `store.write_payload` mkdirs the
+    target's parent, so a `..` chain creates directories and writes files
+    OUTSIDE `data/`, and a second request then serves any gzipped JSON on disk
+    as a 200. Nothing upstream blocks it -- `weather.fetch_weather` raises
+    KeyError on an unknown model, but `dayloader.load_day`'s `attempt()`
+    catches bare `Exception` and degrades to `missing: ['weather']`, so the
+    build SUCCEEDS and writes.
+
+    Three halves, because a 422 alone would not prove the fix: the status
+    code, the fact that NO build was started (the rejection has to precede
+    `coord.ensure`), and the fact that nothing appeared anywhere on disk. Both
+    `/day` and `/status` take the parameter, so both are covered.
+    """
+    data_dir = tmp_path / "repo" / "data"
+    data_dir.mkdir(parents=True)
+    monkeypatch.setattr(store, "DATA_DIR", data_dir)
+    coord = FakeCoordinator()
+    c = TestClient(create_app(coordinator=coord))
+    day = (datetime.now(UTC).date() + timedelta(days=1)).isoformat()
+    before = sorted(tmp_path.rglob("*"))
+
+    r = c.get(f"/api/fisheries/winyah-bay/day/{day}{suffix}", params={"model": evil})
+
+    assert r.status_code == 422, r.text
+    assert "best" in r.json()["detail"], "the 422 must name the valid models"
+    assert coord.ensured == [], "rejection must precede any build"
+    assert sorted(tmp_path.rglob("*")) == before, "nothing may be created on disk"
+
+
+@pytest.mark.parametrize("model", sorted(WEATHER_MODELS))
+def test_every_real_weather_model_is_still_accepted(client, model):
+    """The other half of the traversal fix: a guard that rejected everything
+    would pass a rejection-only test while breaking all six real models."""
+    c, coord = client
+    day = datetime.now(UTC).date() + timedelta(days=1)
+    r = c.get(f"/api/fisheries/winyah-bay/day/{day.isoformat()}", params={"model": model})
+    assert r.status_code == 202, r.text
+    assert coord.ensured == [("winyah-bay", day, model)]

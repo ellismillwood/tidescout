@@ -9,6 +9,7 @@ from fastapi.responses import FileResponse, JSONResponse, Response
 from tidescout.api import layers as layers_mod
 from tidescout.api import readiness, store
 from tidescout.api.builds import BuildCoordinator
+from tidescout.sources.weather import WEATHER_MODELS
 
 # Open-Meteo's forecast endpoint allowed through +16 days when measured
 # (2026-09-03); anything older than `weather.ARCHIVE_CUTOFF_DAYS` routes to the
@@ -22,6 +23,24 @@ def _parse_day(raw: str) -> date:
         return date.fromisoformat(raw)
     except ValueError:
         raise HTTPException(422, f"not a date: {raw!r} (expected YYYY-MM-DD)") from None
+
+
+def _check_model(model: str) -> None:
+    """`model` is a query parameter that becomes part of a FILENAME.
+
+    Without this it reaches `store.payload_path` unvalidated, and
+    `write_payload` mkdirs the parent, so `?model=../../../x` writes outside
+    `data/` and a second request serves any gzipped JSON on disk. Nothing
+    upstream stops it: `weather.fetch_weather` raises KeyError on an unknown
+    model, but `dayloader.load_day`'s `attempt()` catches bare `Exception` and
+    degrades to `missing: ['weather']`, so the build SUCCEEDS and writes.
+    """
+    if model not in WEATHER_MODELS:
+        raise HTTPException(
+            422,
+            f"unknown weather model: {model!r} "
+            f"(expected one of: {', '.join(sorted(WEATHER_MODELS))})",
+        )
 
 
 def _require_ready(slug: str) -> None:
@@ -56,6 +75,7 @@ def create_app(
 
     @app.get("/api/fisheries/{slug}/day/{raw_day}")
     def get_day(slug: str, raw_day: str, model: str = "best"):
+        _check_model(model)
         day = _parse_day(raw_day)
         _require_ready(slug)
         now = datetime.now(UTC)
@@ -78,6 +98,7 @@ def create_app(
 
     @app.get("/api/fisheries/{slug}/day/{raw_day}/status")
     def get_status(slug: str, raw_day: str, model: str = "best"):
+        _check_model(model)
         day = _parse_day(raw_day)
         _require_ready(slug)
         now = datetime.now(UTC)

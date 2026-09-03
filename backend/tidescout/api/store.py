@@ -24,7 +24,20 @@ def payload_path(slug: str, day: date, model: str) -> Path:
     # DATA_DIR / slug directly, NOT `paths.fishery_data_dir`, which mkdirs its
     # argument -- callers validate the slug first, and this stays a pure path
     # computation so tests can monkeypatch DATA_DIR.
-    return DATA_DIR / slug / "payloads" / f"{day.isoformat()}-{model}.json.gz"
+    base = DATA_DIR / slug / "payloads"
+    target = base / f"{day.isoformat()}-{model}.json.gz"
+    # BACKSTOP, not the gate. `model` and `slug` both arrive from the URL, and
+    # `write_payload` mkdirs `target.parent`, so an unchecked `..` chain would
+    # create directories and write files OUTSIDE `data/` -- and a later read
+    # would then serve any gzipped JSON on disk as a 200. The route validates
+    # `model` against `weather.WEATHER_MODELS` and `slug` against
+    # `fishery_slugs()` BEFORE calling in here; this refuses to hand back an
+    # escaping path even if some future caller forgets to.
+    root = DATA_DIR.resolve()
+    resolved = target.resolve()
+    if not resolved.is_relative_to(base.resolve()) or not resolved.is_relative_to(root):
+        raise ValueError(f"payload path escapes the cache: slug={slug!r} model={model!r}")
+    return target
 
 
 def write_payload(slug: str, day: date, model: str, payload: dict) -> Path:
@@ -48,19 +61,33 @@ def write_payload(slug: str, day: date, model: str, payload: dict) -> Path:
     return target
 
 
-def read_payload(slug: str, day: date, model: str) -> dict | None:
-    """The cached payload, or None if absent OR unreadable.
+def read_payload_gz(slug: str, day: date, model: str) -> tuple[bytes, dict] | None:
+    """The stored gzip bytes AND the parsed payload, from ONE read of the file.
 
-    A corrupt entry degrades to "rebuild it", never to a 500 on every future
-    request for that date.
+    The day route serves the bytes VERBATIM -- spec §5 sizes the frontend
+    against 1.67 MB gzipped, and gunzipping only to re-serialise 24.59 MB of
+    JSON per request would put the uncompressed figure on the wire instead --
+    but it still needs `freshness.generated_at` parsed out to decide staleness.
+    Returning both from one read keeps the two in step and avoids a second
+    24 MB trip through the filesystem.
+
+    None for absent OR unreadable: a corrupt entry degrades to "rebuild it",
+    never to a 500 on every future request for that date.
     """
     path = payload_path(slug, day, model)
     if not path.exists():
         return None
     try:
-        return json.loads(gzip.decompress(path.read_bytes()))
+        raw = path.read_bytes()
+        return raw, json.loads(gzip.decompress(raw))
     except (OSError, EOFError, gzip.BadGzipFile, json.JSONDecodeError, UnicodeDecodeError):
         return None
+
+
+def read_payload(slug: str, day: date, model: str) -> dict | None:
+    """The cached payload, or None if absent OR unreadable."""
+    got = read_payload_gz(slug, day, model)
+    return None if got is None else got[1]
 
 
 def is_stale(payload: dict, day: date, now: datetime) -> bool:

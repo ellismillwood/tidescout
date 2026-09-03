@@ -1,6 +1,7 @@
 """The payload cache: a directory of gzipped JSON, not a database."""
 
 import gzip
+import json
 from datetime import UTC, date, datetime, timedelta
 
 import pytest
@@ -132,3 +133,64 @@ def test_a_naive_generated_at_is_treated_as_stale_not_a_crash():
     now = datetime(2026, 9, 3, 18, 0, tzinfo=UTC)
     naive = {"slug": "winyah-bay", "freshness": {"generated_at": "2026-09-03T17:59:00"}}
     assert store.is_stale(naive, date(2026, 9, 3), now) is True
+
+
+def test_payload_path_refuses_a_model_that_escapes_the_cache_directory(tmp_path, monkeypatch):
+    """`model` arrives from `?model=` and becomes part of a FILENAME, so a
+    `..` chain in it walks OUT of `data/`. `write_payload` then mkdirs the
+    escaped parent and writes there; a later read serves any gzipped JSON on
+    disk as a 200.
+
+    The route-level allowlist is the gate (see
+    `test_api_day.py::test_a_traversing_model_is_rejected...`); this is the
+    backstop, so it is asserted on its own. Both halves: the escaping model
+    raises AND the legitimate one still returns the expected path -- a guard
+    that rejected everything would pass a rejection-only test while breaking
+    every real request.
+    """
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path / "repo" / "data")
+    payloads = tmp_path / "repo" / "data" / "winyah-bay" / "payloads"
+
+    for evil in ("../../../pwned", "../../../../../escaped", "sub/../../../../../x"):
+        with pytest.raises(ValueError):
+            store.payload_path("winyah-bay", date(2026, 9, 3), evil)
+        with pytest.raises(ValueError):
+            store.write_payload("winyah-bay", date(2026, 9, 3), evil, {"ok": 1})
+
+    assert store.payload_path("winyah-bay", date(2026, 9, 3), "best") == (
+        payloads / "2026-09-03-best.json.gz"
+    )
+    # A refused write must leave nothing behind -- not the escaped file, and
+    # not the literal `2026-09-03-..` directory `mkdir(parents=True)` would
+    # otherwise create inside `payloads/` on the way out.
+    assert list(tmp_path.rglob("*")) == []
+
+
+def test_a_traversing_slug_cannot_escape_either(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path / "repo" / "data")
+    with pytest.raises(ValueError):
+        store.payload_path("../../..", date(2026, 9, 3), "best")
+
+
+def test_read_payload_gz_returns_the_stored_bytes_and_the_parsed_payload(tmp_path, monkeypatch):
+    """The day route serves the stored bytes verbatim but needs
+    `freshness.generated_at` parsed out to decide staleness; one read gives it
+    both, and the two must describe the same file."""
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path)
+    p = _payload(datetime(2026, 9, 3, 3, 0, tzinfo=UTC))
+    target = store.write_payload("winyah-bay", date(2026, 9, 3), "best", p)
+
+    got = store.read_payload_gz("winyah-bay", date(2026, 9, 3), "best")
+    assert got is not None
+    raw, parsed = got
+    assert raw == target.read_bytes()
+    assert gzip.decompress(raw) == json.dumps(p, separators=(",", ":")).encode()
+    assert parsed == p
+
+
+def test_read_payload_gz_treats_a_corrupt_file_as_a_miss(tmp_path, monkeypatch):
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path)
+    target = store.payload_path("winyah-bay", date(2026, 9, 3), "best")
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_bytes(gzip.compress(b'{"slug": "winyah'))
+    assert store.read_payload_gz("winyah-bay", date(2026, 9, 3), "best") is None
