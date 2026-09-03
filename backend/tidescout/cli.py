@@ -429,13 +429,54 @@ def warm(
         raise typer.Exit(1)
 
 
+def _is_loopback(host: str) -> bool:
+    """True only for addresses that cannot be reached from another machine.
+
+    `0.0.0.0` and `::` are wildcards, not loopback, and are what this exists to
+    catch. Parsed with `ipaddress` rather than matched against a literal set so
+    the whole 127.0.0.0/8 block counts, not just 127.0.0.1.
+    """
+    import ipaddress
+
+    h = host.strip().strip("[]")
+    if h.lower() in {"localhost", "localhost.localdomain"}:
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
 @app.command()
 def serve(
     host: str = typer.Option("127.0.0.1", "--host"),
     port: int = typer.Option(8000, "--port"),
     dev: bool = typer.Option(False, "--dev", help="Allow CORS from the Vite dev server"),
+    allow_remote: bool = typer.Option(
+        False,
+        "--allow-remote",
+        help="Permit a non-loopback --host. This API has NO auth; see the warning it prints.",
+    ),
 ) -> None:
     """Run the API (and the built frontend, if present)."""
+    # API design spec §4.3: "The app binds 127.0.0.1, not 0.0.0.0: this is a
+    # single-user local tool with no auth, and binding it to every interface
+    # would put an unauthenticated filesystem-backed API on the local network."
+    # A free-text `--host` reopens exactly what that sentence closes, so the
+    # non-loopback case needs a deliberate second flag rather than a typo.
+    if not _is_loopback(host) and not allow_remote:
+        console.print(
+            f"[red]refusing to bind {host!r}: it is reachable from other machines, and this "
+            f"API has no authentication -- it serves files from `data/` to anyone who asks. "
+            f"Use --host 127.0.0.1, or pass --allow-remote if you really mean it.[/red]"
+        )
+        raise typer.Exit(2)
+    if not _is_loopback(host):
+        console.print(
+            f"[yellow]--allow-remote: binding {host!r}, so this unauthenticated API is "
+            f"reachable from the local network.[/yellow]"
+        )
+
     import uvicorn
 
     from tidescout.api.app import create_app
