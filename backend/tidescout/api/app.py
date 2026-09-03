@@ -2,9 +2,10 @@
 
 from datetime import UTC, date, datetime, timedelta
 
-from fastapi import FastAPI, HTTPException
-from fastapi.responses import JSONResponse
+from fastapi import FastAPI, HTTPException, Request
+from fastapi.responses import FileResponse, JSONResponse, Response
 
+from tidescout.api import layers as layers_mod
 from tidescout.api import readiness, store
 from tidescout.api.builds import BuildCoordinator
 
@@ -87,5 +88,29 @@ def create_app(coordinator: BuildCoordinator | None = None) -> FastAPI:
         if state is None:
             return {"status": "absent"}
         return {"status": state.status, "error": state.error}
+
+    @app.get("/api/fisheries/{slug}/layers/{name}")
+    def get_layer(slug: str, name: str, request: Request):
+        try:
+            path = layers_mod.layer_path(slug, name)
+        except (KeyError, ValueError):
+            # One 404 for both cases on purpose: an unlisted layer name and an
+            # unknown fishery should be indistinguishable from outside.
+            raise HTTPException(404, "no such layer") from None
+        if not path.exists():
+            raise HTTPException(404, f"layer {name!r} has not been built for {slug!r}")
+        # FileResponse sets a strong ETag from (mtime, size), but -- unlike
+        # starlette.staticfiles.StaticFiles -- it does not itself compare that
+        # ETag against If-None-Match, so the 304 has to be done here. Passing
+        # stat_result up front (the same trick StaticFiles uses) makes the
+        # ETag available synchronously instead of only during the ASGI call.
+        headers = {"Cache-Control": "public, max-age=31536000, immutable"}
+        response = FileResponse(path, headers=headers, stat_result=path.stat())
+        if_none_match = request.headers.get("if-none-match")
+        if if_none_match:
+            etag = response.headers["etag"]
+            if etag in (tag.strip().removeprefix("W/") for tag in if_none_match.split(",")):
+                return Response(status_code=304, headers={"ETag": etag, **headers})
+        return response
 
     return app
