@@ -48,3 +48,29 @@ def test_summaries_carry_what_the_picker_needs():
     assert row["timezone"] == "America/New_York"
     assert row["ready"] is True
     assert len(row["center"]) == 2
+
+
+def test_get_api_fisheries_returns_the_summaries_over_http():
+    """This diff's only route lives in `app.py`, and every other test in this
+    file calls `readiness` directly -- none of them would notice a wiring bug
+    in the route itself (wrong path, wrong verb, a decorator applied to the
+    wrong function). Drive it through `TestClient` and tie the body back to
+    `fishery_summaries()`'s own output, not just a 200 -- a route that
+    returned `[]` would also pass a status-code-only check.
+    """
+    from fastapi.testclient import TestClient
+
+    from tidescout.api.app import create_app
+
+    client = TestClient(create_app())
+    response = client.get("/api/fisheries")
+    assert response.status_code == 200
+
+    body = response.json()
+    assert body == readiness.fishery_summaries()
+
+    row = next(r for r in body if r["slug"] == "winyah-bay")
+    assert row["name"] == "Winyah Bay"
+    assert row["timezone"] == "America/New_York"
+    assert row["ready"] is True
+    assert len(row["center"]) == 2
