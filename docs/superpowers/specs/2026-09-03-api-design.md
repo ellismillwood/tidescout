@@ -136,8 +136,16 @@ fisheries, and `name` against exactly
 Anything else is a `404`, including a name that merely resolves to a real file.
 This gets a test, not a code comment (§6).
 
-These files are immutable per pipeline run, so they are served with a strong
-`ETag` and `Cache-Control: immutable`; the browser fetches each once.
+These files are rewritten IN PLACE by `tidescout bathy artifacts` — same URL,
+new bytes — so they are served with a strong `ETag` and `Cache-Control:
+no-cache`, meaning *revalidate every time*, not *do not store*. A repeat load
+costs one ~200-byte `304`, not another 8 MB.
+
+**Not `Cache-Control: immutable`**, which an earlier draft of this section
+specified: `immutable` is only sound for content-addressed URLs. On a fixed
+path it tells the browser to serve its cached copy for a year without ever
+sending `If-None-Match`, so a regenerated layer stays invisible until a hard
+reload and the server's conditional-request handling becomes dead code.
 
 | Layer | Source | Served size |
 |---|---|---|

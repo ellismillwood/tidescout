@@ -130,7 +130,16 @@ def create_app(
         # ETag against If-None-Match, so the 304 has to be done here. Passing
         # stat_result up front (the same trick StaticFiles uses) makes the
         # ETag available synchronously instead of only during the ASGI call.
-        headers = {"Cache-Control": "public, max-age=31536000, immutable"}
+        # `no-cache` means "revalidate every time", NOT "do not store". It is
+        # deliberately not `immutable`: `immutable` is only sound for
+        # content-addressed URLs, and `/layers/oysters` is a fixed path that
+        # `tidescout bathy artifacts` rewrites IN PLACE. With `immutable` a
+        # browser would serve a year-old copy and never send the
+        # `If-None-Match` the conditional block below exists to answer, so a
+        # regenerated layer would be invisible until a hard reload -- and that
+        # block would only ever run from the test suite. With the strong ETag,
+        # revalidating costs one ~200-byte 304 instead of re-sending 8 MB.
+        headers = {"Cache-Control": "no-cache"}
         response = FileResponse(path, headers=headers, stat_result=path.stat())
         if_none_match = request.headers.get("if-none-match")
         if if_none_match:
@@ -153,11 +162,35 @@ def create_app(
         )
 
     if frontend_dist is not None and frontend_dist.is_dir():
-        # Mounted LAST so every /api route is matched first and never falls
-        # through to the SPA. `html=True` serves index.html for unmatched
-        # paths, so client-side routes survive a page reload.
-        from fastapi.staticfiles import StaticFiles
+        # Spec §4.3: any non-/api path that does not match a file returns
+        # index.html, so client-side routes survive a page reload.
+        #
+        # `StaticFiles(html=True)` does NOT do that. It serves index.html only
+        # for a path that resolves to a DIRECTORY; a genuine miss looks for
+        # `404.html` and then raises 404 -- measured, `/day/2026-09-03` was a
+        # 404. And a `Mount("/")` matches every path FULLY, so a catch-all
+        # route registered after it would never be reached. Hence one explicit
+        # catch-all that delegates real files to StaticFiles (keeping its safe
+        # path resolution, content types, ranges and 304s) and falls back to
+        # the shell. Registered LAST, so every /api route still matches first.
+        from starlette.exceptions import HTTPException as StarletteHTTPException
+        from starlette.staticfiles import StaticFiles
 
-        app.mount("/", StaticFiles(directory=frontend_dist, html=True), name="frontend")
+        static = StaticFiles(directory=frontend_dist)
+        index = frontend_dist / "index.html"
+
+        @app.get("/{spa_path:path}", include_in_schema=False)
+        async def spa(spa_path: str, request: Request) -> Response:
+            if spa_path == "api" or spa_path.startswith("api/"):
+                # An unknown /api path is a bug, not a client-side route.
+                # Returning the HTML shell there would turn a typo'd endpoint
+                # into a 200 that no fetch() could parse.
+                raise HTTPException(404, "no such endpoint")
+            try:
+                return await static.get_response(spa_path or "index.html", request.scope)
+            except StarletteHTTPException as exc:
+                if exc.status_code != 404:
+                    raise
+                return FileResponse(index)
 
     return app
