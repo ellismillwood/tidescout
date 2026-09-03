@@ -482,6 +482,67 @@ def _conditions_to_dict(hour) -> dict:
     }
 
 
+def _water_to_dict(water) -> dict | None:
+    """The day-level water-temperature summary, a sibling of `payload["salinity"]`
+    rather than a field inside it.
+
+    Spec §5 asks the rail to carry water temperature alongside air
+    temperature; `HourlyConditions` has no per-hour water reading (the
+    engine treats water temperature, like salinity, as a slow-moving DAY
+    fact rather than something that changes hour to hour), so this reads
+    `DayConditions.water` once instead.
+
+    Deliberately narrowed to `temp_f`/`temp_trend_f_3d` -- `salinity_ppt`,
+    `source` and `salinity_source` are withheld even though `WaterSummary`
+    carries them, because `payload["salinity"]` already publishes that same
+    reading WITH its provenance (MEASURED vs MODELLED, fitted, extrapolated
+    -- see `_bay_salinity_reading`). A second, provenance-free copy of the
+    same number here would give a reader two places to look for one fact
+    and no way to tell which one to trust if they ever disagreed.
+
+    `day_conditions.water` is `None` whenever no water sensor and no
+    climatology fallback produced a reading at all; returned as `None`
+    here too rather than raising, the same degrade-gracefully contract
+    every other optional source in this payload follows.
+    """
+    if water is None:
+        return None
+    return {"temp_f": water.temp_f, "temp_trend_f_3d": water.temp_trend_f_3d}
+
+
+def _astro_to_dict(sun, moon) -> dict:
+    """The day's sun and moon times, the other sibling spec §5 asks for
+    beside `payload["salinity"]` and `payload["water"]`.
+
+    `SunTimes` and `MoonInfo` are both computed once per DAY (see
+    `sources.astronomy`), never once per hour, so this reads
+    `DayConditions.sun`/`.moon` directly rather than being folded into
+    `_conditions_to_dict` -- publishing either in all 24 hourly rows would
+    repeat one day fact 24 times, the exact duplication this task's own
+    hour/day split exists to avoid (see the module docstring's "SALINITY: A
+    SERIES" section for the same reasoning applied to a genuinely hourly
+    value, which water/astro are not).
+
+    `sun` and `moon` can independently be `None` -- two different upstream
+    sources, wrapped in `dayloader.load_day`'s own single-dead-source
+    degrade-gracefully contract -- so each field is guarded on its own
+    source rather than assuming both arrived together. `moon.rise`/`.set`
+    are independently optional even when `moon` itself is present (a moon
+    that neither rises nor sets on a given calendar day is ephem's own
+    convention, not a bug here), so `moonrise`/`moonset` guard one level
+    deeper than `moon_phase_frac` does.
+    """
+    return {
+        "dawn": sun.dawn.isoformat() if sun else None,
+        "sunrise": sun.sunrise.isoformat() if sun else None,
+        "sunset": sun.sunset.isoformat() if sun else None,
+        "dusk": sun.dusk.isoformat() if sun else None,
+        "moon_phase_frac": moon.phase_frac if moon else None,
+        "moonrise": moon.rise.isoformat() if moon and moon.rise else None,
+        "moonset": moon.set.isoformat() if moon and moon.set else None,
+    }
+
+
 def _hour_to_dict(hour_time: datetime, combined) -> dict:
     return {
         "time": hour_time.isoformat(),
@@ -790,5 +851,11 @@ def build_payload(slug: str, day: date, model_label: str, cache) -> dict:
         "representative_hour": mid_reading["time"] if mid_reading else None,
         "provenance": mid_reading["provenance"] if mid_reading else None,
     }
+    # Day-level siblings of `salinity` above -- see `_water_to_dict`/
+    # `_astro_to_dict` for why these are day facts, not per-hour ones.
+    payload["water"] = _water_to_dict(getattr(day_conditions, "water", None))
+    payload["astro"] = _astro_to_dict(
+        getattr(day_conditions, "sun", None), getattr(day_conditions, "moon", None)
+    )
 
     return _json_safe(payload)
