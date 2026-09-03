@@ -455,6 +455,21 @@ def artifacts(slug: str) -> None:
     for name, path in build_artifacts(slug, fishery).items():
         console.print(f"{name}: {path} ({path.stat().st_size:,} bytes)")
 
+    from tidescout.paths import fishery_data_dir
+    from tidescout.pipeline.webartifacts import hillshade_png, simplify_oysters
+
+    d = fishery_data_dir(slug)
+    if (d / "oyster_reefs.geojson").exists():
+        stats = simplify_oysters(d / "oyster_reefs.geojson", d / "oyster_reefs.web.geojson")
+        console.print(
+            f"oysters: {stats['features']} reefs -> {stats['bytes'] / 1048576:.1f} MB web geojson"
+        )
+    if (d / "hillshade.tif").exists():
+        meta = hillshade_png(
+            d / "hillshade.tif", d / "hillshade.png", d / "hillshade.bounds.json"
+        )
+        console.print(f"hillshade: {meta['width']}x{meta['height']} png + bounds")
+
 
 @bathy_app.command("wetlands")
 def bathy_wetlands(slug: str) -> None:
