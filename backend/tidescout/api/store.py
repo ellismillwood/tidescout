@@ -77,4 +77,11 @@ def is_stale(payload: dict, day: date, now: datetime) -> bool:
         at = datetime.fromisoformat(generated)
     except ValueError:
         return True
+    if at.tzinfo is None:
+        # `fromisoformat` happily parses an offset-less string into a naive
+        # datetime instead of raising -- it does not protect us here. `now`
+        # is always aware (DTZ), so `now - at` on a naive `at` raises
+        # TypeError rather than degrading gracefully. Treat naive provenance
+        # the same as missing or unparseable: not evidence of freshness.
+        return True
     return (now - at) > timedelta(hours=STALE_AFTER_H)
