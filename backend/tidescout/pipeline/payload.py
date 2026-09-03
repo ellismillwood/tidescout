@@ -71,6 +71,7 @@ from tidescout.engine.activation import FeatureMetrics, _sampling_anchors, sampl
 from tidescout.engine.activation import structure_fields as compute_structure_fields
 from tidescout.engine.phase import library_phase
 from tidescout.engine.score import (
+    FACTORS,
     SalinityProvenance,
     SalinityReading,
     SubScore,
@@ -404,10 +405,56 @@ def _sub_to_dict(s: SubScore) -> dict:
     }
 
 
+# Which factors are a property of the HOUR (and the species profile) versus
+# of the FEATURE being scored. Measured, not assumed: on the real 2026-07-21
+# payload, across all 529 in-domain features at every hour, each factor below
+# in HOUR_SCOPE produced exactly ONE distinct {value, reason} per hour, while
+# flow produced 493, salinity 528 and structure 420.
+#
+# Nothing in `score_factors` marks a factor as one or the other -- the split
+# is a fact about what each factor READS, so it is stated here once and
+# published in the payload as `sub_scope` rather than left for the frontend
+# to rediscover.
+HOUR_SCOPE_SUBS = frozenset(
+    {"stage", "light", "solunar", "pressure", "wind", "water_temp", "season"}
+)
+# DERIVED, never hand-listed. `_feature_scope_subs` filters with the
+# denylist above, so writing the allowlist out separately would let the two
+# disagree: a newly added factor in neither set would be SHIPPED on every
+# feature-hour (the filter keeps it, deliberately -- see that function) while
+# `sub_scope` failed to declare it, and the payload would violate the very
+# contract it publishes. Deriving both from one rule makes that unreachable.
+#
+# `structure` is not in `FACTORS`: it is the feature-only sibling scored by
+# `score_feature`, not one of the nine hourly factors -- see
+# `SpeciesProfile`'s docstring.
+FEATURE_SCOPE_SUBS = frozenset({*FACTORS, "structure"}) - HOUR_SCOPE_SUBS
+
+
 def _sub_to_trimmed_dict(s: SubScore) -> dict:
     """factor/value/reason only -- see the per-feature-hour call site's
     comment for why this is trimmed rather than the full `_sub_to_dict`."""
     return {"factor": s.factor, "value": s.value, "reason": s.reason}
+
+
+def _feature_scope_subs(subs) -> list[dict]:
+    """Only the subs that actually vary per feature.
+
+    The other seven are identical to `species[name].hours[i].subs`' entries
+    for the same hour and species -- verified across all 266,616 shared
+    values on the real 2026-07-21 payload, zero mismatches -- so shipping
+    them on all 529 features x 24 hours x 3 species stated something false
+    (that they vary per feature) and cost 21.1 MB of a 47.9 MB payload to
+    state it.
+
+    A factor that is neither hour-scope nor feature-scope is kept rather
+    than silently dropped: an unrecognised factor is a scope question
+    nobody has answered yet, and dropping it would lose data to make a
+    number smaller.
+    """
+    return [
+        _sub_to_trimmed_dict(s) for s in subs if s.factor not in HOUR_SCOPE_SUBS
+    ]
 
 
 def _hour_to_dict(hour_time: datetime, combined) -> dict:
@@ -557,6 +604,20 @@ def build_payload(slug: str, day: date, model_label: str, cache) -> dict:
             "model_label": model_label,
             "generated_at": datetime.now(UTC).isoformat(),
         },
+        # WHICH FACTORS LIVE WHERE. A feature-hour ships only the subs that
+        # vary per feature; the other seven are on `species[name].hours[i]`,
+        # once per hour instead of once per feature-hour. A reader wanting a
+        # marker popover's full ten-factor breakdown merges the two by
+        # POSITION (feature `hours[i]` <-> species `hours[i]`).
+        #
+        # Published rather than left implicit so the frontend does not
+        # hardcode the split and silently break the day a factor changes
+        # scope -- e.g. if salinity ever became bay-wide, or a new factor
+        # arrived that reads a feature's own geometry.
+        "sub_scope": {
+            "hour": sorted(HOUR_SCOPE_SUBS),
+            "feature": sorted(FEATURE_SCOPE_SUBS),
+        },
         "flow": {
             "range_bucket": range_bucket,
             "discharge_cfs": discharge.cfs_now if discharge else None,
@@ -630,40 +691,47 @@ def build_payload(slug: str, day: date, model_label: str, cache) -> dict:
                     )
                     bucket["hours"].append(
                         {
-                            "time": hour.time.isoformat(),
+                            # No `time`: a feature-hour is positionally
+                            # aligned with `species[name].hours[i]`, whose
+                            # `time` it always equalled anyway (verified on
+                            # the real payload, all species, all 529
+                            # features, zero exceptions). Storing it 38,088
+                            # times also implied a feature-hour could carry
+                            # its own timestamp, which it cannot.
                             "activation": activation.activation,
                             "reason": activation.reason,
                             "confidence": activation.confidence,
                             "constrained_share": activation.constrained_share,
                             "excluded": activation.excluded,
                             "provisional": activation.provisional,
-                            # Trimmed (factor/value/reason only, no
-                            # weight/missing/provisional-per-sub -- those
-                            # ride on `provisional`/`excluded` above instead)
-                            # rather than omitted: spec section 8/9 covers
-                            # BOTH the hourly and the per-feature score, and
-                            # the marker popover's "what + why active"
-                            # cannot be built from `reason` alone -- see the
-                            # module docstring and 2026-08-26 review,
-                            # Important 5. The full `SubScore` (weight,
-                            # missing, per-sub provisional) is already on
-                            # every FISHERY-WIDE hour instead; duplicating
-                            # all of it across 529 features x 24 hours x 3
-                            # species too was measured, not guessed (2026-08-26
-                            # review, Important 4 -- the previous "roughly
-                            # double an already 13.4 MB payload" was wrong on
-                            # both halves: 13.4 MB is roughly the size with NO
-                            # feature subs at all, i.e. the version this
-                            # trimming exists to move away from, not the
-                            # shipped payload). Measured on the real
-                            # 2026-07-21 payload: shipped (this trimmed form)
-                            # is 50.16 MB compact JSON; the full `SubScore`
-                            # fields on every feature-hour would be 68.83 MB --
-                            # a 1.37x increase, not a doubling. A 50 MB
-                            # single-day JSON is the spec section 3/9 frontend
-                            # contract as it actually ships, not an
-                            # understated number.
-                            "subs": [_sub_to_trimmed_dict(s) for s in activation.subs],
+                            # SCOPED, then trimmed. `_feature_scope_subs`
+                            # drops the seven hour-scope factors entirely
+                            # (they are on `species[name].hours[i]`, once
+                            # per hour rather than once per feature-hour);
+                            # what survives is trimmed to factor/value/
+                            # reason, without weight/missing/per-sub
+                            # provisional, which ride on `provisional`/
+                            # `excluded` above.
+                            #
+                            # Not omitted altogether: spec section 8/9
+                            # covers BOTH the hourly and the per-feature
+                            # score, and the marker popover's "what + why
+                            # active" cannot be built from `reason` alone
+                            # (2026-08-26 review, Important 5).
+                            #
+                            # SIZE, measured on the real 2026-07-21 payload
+                            # (2026-09-02, Phase 4). Before scoping: 47.86
+                            # MB compact JSON, 2.34 MB gzip -6, 83 ms
+                            # JSON.parse, 75.7 MB JS heap. After: 24.59 MB,
+                            # 1.67 MB gzipped, 30 ms, 40.1 MB heap. The
+                            # frontend contract is the gzipped number, and
+                            # the heap is what actually constrains a device
+                            # -- desktop is comfortable at 40 MB even with
+                            # two or three days resident. Revisit only if
+                            # this goes mobile-first: the trigger is a
+                            # second day held in memory beside a MapLibre
+                            # GL context, not a byte count.
+                            "subs": _feature_scope_subs(activation.subs),
                         }
                     )
 

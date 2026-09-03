@@ -365,3 +365,80 @@ def test_a_climatology_salinity_is_never_published_as_measured(
             sal = next(s for s in h["subs"] if s["factor"] == "salinity")
             assert sal["provisional"] is True, sal
     assert saw_hour, "fixture produced no hours to check"
+
+
+# --- Phase 4: hour-level facts live on the hour, not on every feature ---
+
+HOUR_SCOPE_FACTORS = {
+    "stage", "light", "solunar", "pressure", "wind", "water_temp", "season",
+}
+FEATURE_SCOPE_FACTORS = {"flow", "salinity", "structure"}
+
+
+def test_hour_scope_factors_are_hoisted_off_every_feature_hour(synthetic_day_with_flow):
+    """Seven of the ten factors on a feature-hour are FISHERY-WIDE facts:
+    they depend on the hour and the species profile, never on which feature
+    is being scored. Measured on the real 2026-07-21 payload, all 529
+    features produced exactly ONE distinct value per hour for each of stage,
+    light, solunar, pressure, wind, water_temp and season -- while flow
+    (493 distinct), salinity (528) and structure (420) genuinely vary.
+    Shipping the seven inside every feature-hour asserted something false --
+    that they vary per feature -- and cost 21.1 MB of a 47.9 MB payload.
+
+    ONE test making four assertions rather than four tests, because
+    `synthetic_day_with_flow` builds a real payload against the 9.1 GB flow
+    library and costs ~70 s; the split version cost 283 s to assert the same
+    things. `test_the_feature_path_runs_at_all` above pays that price once
+    for the same reason.
+    """
+    from tidescout.engine.score import FACTORS
+    from tidescout.pipeline.payload import build_payload
+
+    p = build_payload(**synthetic_day_with_flow)
+
+    # 0. NOT VACUOUS. The first draft of this test ran on `synthetic_day`,
+    # which produces ZERO features (it passes `cache=None`, so `_flow_events`
+    # skips the tide fetch and `library_phase` never resolves) -- every
+    # assertion below sits inside a loop over features, so all of them went
+    # green against a completely unmodified payload. This line is what makes
+    # that impossible to repeat.
+    counts = {n: len(b["features"]) for n, b in p["species"].items()}
+    assert all(counts.values()), f"no features scored -- the rest is vacuous: {counts}"
+
+    # 1. The scope split is a declared CONTRACT, not something the frontend
+    # is expected to hardcode. A reader merging hour subs with feature subs
+    # has to be told which is which, or the merge breaks silently the day a
+    # factor changes scope.
+    scope = p["sub_scope"]
+    assert set(scope["hour"]) == HOUR_SCOPE_FACTORS
+    assert set(scope["feature"]) == FEATURE_SCOPE_FACTORS
+
+    for name, blob in p["species"].items():
+        assert len(blob["hours"]) == 24, name
+        hour_subs = [{s["factor"]: s for s in h["subs"]} for h in blob["hours"]]
+
+        for key, feat in blob["features"].items():
+            # 2. Positional alignment is now the ONLY link from a
+            # feature-hour back to its hour, since `time` is gone from it.
+            # Verified on the real payload before the change: every
+            # feature-hour's `time` already equalled `hours[i].time` across
+            # all three species and all 529 features. If this red-lines, a
+            # reader is silently pairing the wrong hour.
+            assert len(feat["hours"]) == 24, (name, key, len(feat["hours"]))
+
+            for i, fh in enumerate(feat["hours"]):
+                assert "time" not in fh, (name, key, fh)
+
+                got = {s["factor"] for s in fh["subs"]}
+                assert got <= FEATURE_SCOPE_FACTORS, (name, key, sorted(got))
+                assert not got & HOUR_SCOPE_FACTORS, (name, key, sorted(got))
+
+                # 3. LOSSLESS. Nothing a marker popover could show before is
+                # unavailable now; it just comes from two places. Without
+                # this, "the payload got smaller" and "the payload lost
+                # information" look identical from the outside.
+                merged = dict(hour_subs[i])
+                merged.update({s["factor"]: s for s in fh["subs"]})
+                assert set(FACTORS) <= set(merged), (name, key, i)
+                assert "structure" in merged, (name, key, i)
+                assert len(merged) == len(FACTORS) + 1
