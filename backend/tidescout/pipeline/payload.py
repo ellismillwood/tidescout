@@ -457,6 +457,31 @@ def _feature_scope_subs(subs) -> list[dict]:
     ]
 
 
+def _conditions_to_dict(hour) -> dict:
+    """The raw hourly values, for the right rail and the tide-curve underlay.
+
+    `_hour_to_dict` deliberately carries only scores and reasons; the raw
+    numbers survive nowhere else in the payload, so §9's rail and tide curve
+    have no source without this. Emitted ONCE at the top level rather than per
+    species: these are fishery-wide hour facts, and duplicating them across
+    three species would repeat the modelling error PR #11 corrected.
+    """
+    return {
+        "time": hour.time.isoformat(),
+        "air_temp_f": hour.air_temp_f,
+        "wind_speed_kn": hour.wind_speed_kn,
+        "wind_dir_deg": hour.wind_dir_deg,
+        "wind_gust_kn": hour.wind_gust_kn,
+        "pressure_mb": hour.pressure_mb,
+        "pressure_trend_mb_3h": hour.pressure_trend_mb_3h,
+        "cloud_cover_pct": hour.cloud_cover_pct,
+        "precip_in": hour.precip_in,
+        "tide_height_ft": hour.tide_height_ft,
+        "tide_phase": hour.tide_phase,
+        "tide_frac": hour.tide_frac,
+    }
+
+
 def _hour_to_dict(hour_time: datetime, combined) -> dict:
     return {
         "time": hour_time.isoformat(),
@@ -739,6 +764,7 @@ def build_payload(slug: str, day: date, model_label: str, cache) -> dict:
         name: {"hours": species_hours[name], "features": species_features[name]}
         for name in species
     }
+    payload["conditions"] = [_conditions_to_dict(h) for h in day_conditions.hours]
 
     effective_cfs = max(float(bay_cfs), 1.0) if bay_cfs is not None else None
     # A DELIBERATE choice of hour, not whichever one a loop happened to
