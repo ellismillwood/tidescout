@@ -227,29 +227,41 @@ def create_app(
         ug = np.where(wg > 0.5, ug, 0.0)[::step, ::step]
         vg = np.where(wg > 0.5, vg, 0.0)[::step, ::step]
 
-        # `GridSpec` has NO `bbox` attribute. `xs`/`ys` are the IN-DOMAIN cell
-        # centres only -- a strictly smaller extent than the grid `ug`/`vg`
-        # actually span, because `ug`/`vg` come from the FULL `spec.shape`
-        # raster (out-of-domain cells zeroed, not cropped) before decimation.
-        # Deriving bbox from xs/ys min/max shrinks it relative to the shipped
-        # u/v grid -- measured ~2.1x too narrow in x and ~1.7x in y, up to
-        # ~18 km of positional error once a client maps the array onto it.
-        # `array_bounds` on `spec.shape`/`spec.transform` instead describes
-        # the full raster -- the same grid `ug`/`vg` are a decimation of --
-        # and the result is reprojected to WGS84 degrees for MapLibre, the
-        # same way `webartifacts.hillshade_png` converts its bounds.
-        from rasterio.transform import array_bounds
+        # `bbox` must describe the extent of the SAMPLE CENTRES `ug`/`vg`
+        # actually carry, not the full raster's outer edges. The frontend
+        # (`overlays.ts`) draws element (r, c) AT the centre of full-grid cell
+        # (step*r, step*c) and spaces its grid by (east-west)/(cols-1) --
+        # i.e. it already treats bbox's corners as the first and last SAMPLED
+        # CENTRES, not the raster's edge. Shipping the raster's outer edges
+        # (the earlier fix, via `array_bounds`) stretched the field ~1.31% in
+        # latitude and ~0.60% in longitude against that contract -- a median
+        # 581 m placement error against an 860 m cell spacing. `spec.transform`
+        # maps (col, row) pixel indices to CRS coordinates, so
+        # `transform * (0.5, 0.5)` is the centre of decimated cell (0, 0) and
+        # `transform * ((cols-1)*step + 0.5, (rows-1)*step + 0.5)` is the
+        # centre of the last sampled cell -- exactly the pair `overlays.ts`
+        # already assumes bbox's corners to be.
         from rasterio.warp import transform_bounds
 
+        rows, cols = ug.shape
+        nw = spec.transform * (0.5, 0.5)
+        se = spec.transform * ((cols - 1) * step + 0.5, (rows - 1) * step + 0.5)
+        # A north-up transform yields a DESCENDING y as row increases, and an
+        # ASCENDING x as col increases -- so `nw` really is the north-west
+        # sample centre and `se` really is the south-east one. Asserted, not
+        # assumed: a flipped transform would silently swap south and north
+        # (or west and east) below rather than raising.
+        assert nw[1] > se[1], f"expected a north-up transform, got nw={nw} se={se}"
+        assert nw[0] < se[0], f"expected an east-increasing transform, got nw={nw} se={se}"
         west, south, east, north = transform_bounds(
             spec.crs or "EPSG:26917",
             "EPSG:4326",
-            *array_bounds(spec.shape[0], spec.shape[1], spec.transform),
+            nw[0], se[1], se[0], nw[1],
         )
         return {
             "hour": hour,
-            "rows": int(ug.shape[0]),
-            "cols": int(ug.shape[1]),
+            "rows": int(rows),
+            "cols": int(cols),
             "bbox": [west, south, east, north],
             "u": [float(x) for x in np.nan_to_num(ug).ravel()],
             "v": [float(x) for x in np.nan_to_num(vg).ravel()],

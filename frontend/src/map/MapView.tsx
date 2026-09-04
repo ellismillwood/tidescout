@@ -402,7 +402,6 @@ export function SalinityInset({
       className="sal"
       data-testid="salinity-section"
       data-busy={busy}
-      data-fitted={section.fitted}
       aria-busy={busy}
     >
       <figcaption>

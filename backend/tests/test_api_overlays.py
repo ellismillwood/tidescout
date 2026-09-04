@@ -93,38 +93,67 @@ def test_salinity_field_cannot_be_rendered_without_its_disclosure(client):
     assert body["cells"], "no field to draw"
 
 
-def test_flow_vectors_bbox_describes_the_full_raster_not_the_indomain_subset(client):
-    """`u`/`v` are decimated from the FULL `(2527, 1903)` bathymetry raster.
-    `bbox` used to be derived from `spec.xs`/`spec.ys`, which are the
-    IN-DOMAIN cell CENTRES only -- a strictly smaller extent, because the
-    raster carries hundreds of rows/cols of out-of-domain padding the mask
-    excludes but `u`/`v` still span (out-of-domain cells are zeroed, not
-    cropped).
+def test_flow_vectors_bbox_pins_the_sample_centres_not_the_raster_edges(client):
+    """`bbox` must describe the extent of the DECIMATED SAMPLE CENTRES `u`/`v`
+    actually carry -- the frontend (`overlays.ts`) places element (r, c) at
+    the centre of full-grid cell (step*r, step*c) and spaces its drawing grid
+    by `(east-west)/(cols-1)`, i.e. it already assumes bbox's own corners ARE
+    the first and last sampled centres, not the raster's outer edges.
 
-    Measured directly against `bathy_utm.tif` via `array_bounds` (2026-09-03,
-    task-13 report §2b): the full extent is west -79.458, south 33.144, east
-    -79.040, north 33.606. The in-domain xs/ys subset the endpoint used to
-    ship instead measured west -79.331, south 33.163, east -79.134, north
-    33.437 -- ~2.1x narrower in x and ~1.7x narrower in y, a difference of
-    more than 0.1 degree in each axis' total span. Asserting the real numbers
-    (not just "a bbox came back") is what makes this discriminate a
-    regression back to xs/ys -- a bbox that shrank back to the shipped subset
-    would still be four in-range floats with w < e and s < n.
+    An earlier fix shipped `array_bounds` on the FULL raster instead -- the
+    outer edges, not the sample centres -- which is a SMALL error compared to
+    the original xs/ys-subset bug (measured 2026-09-04: 1.31% latitude
+    stretch, 0.60% longitude, i.e. 0.0059 deg in south and 0.0023 deg in
+    east), so a corner check with `abs=0.01` -- fine enough to catch the
+    original xs/ys regression -- cannot see this one at all: it passes for
+    both the wrong (raster-edges) value and the right (sample-centres) one.
+
+    So the corners here are pinned to `abs=5e-4` (~55 m at this latitude,
+    comfortably finer than the 0.0023 deg error) AND derived from `grid_spec`
+    directly -- replicating the endpoint's own step/transform arithmetic
+    independently of its hardcoded literals -- so the expectation tracks the
+    fishery's real grid rather than a snapshot that goes stale the moment the
+    raster or the decimation target cell count changes.
     """
     r = client.get(f"/api/fisheries/winyah-bay/flow-vectors/{_day()}?hour=12")
     if r.status_code == 404:
         pytest.skip("no flow library for this date in this checkout")
     assert r.status_code == 200, r.text
-    w, s_, e, n = r.json()["bbox"]
+    body = r.json()
+    w, s_, e, n = body["bbox"]
+    rows, cols = body["rows"], body["cols"]
 
-    assert w == pytest.approx(-79.458, abs=0.01)
-    assert s_ == pytest.approx(33.144, abs=0.01)
-    assert e == pytest.approx(-79.040, abs=0.01)
-    assert n == pytest.approx(33.606, abs=0.01)
+    from rasterio.warp import transform_bounds
 
-    # ...and the pair: the shipped extent's SPAN, not just its corners, must
-    # be wider than the in-domain subset's was -- by more than 0.1 degree in
-    # both axes.
+    from tidescout.config import load_fishery
+    from tidescout.pipeline import flowlib
+
+    fishery = load_fishery("winyah-bay")
+    spec = flowlib.grid_spec("winyah-bay", fishery)
+    # Same decimation target as `get_flow_vectors` -- see app.py's own
+    # comment for why 2500.
+    step = max(1, int((spec.shape[0] * spec.shape[1] / 2500) ** 0.5))
+    assert (rows, cols) == (
+        (spec.shape[0] + step - 1) // step,
+        (spec.shape[1] + step - 1) // step,
+    ), "decimation target drifted from the endpoint's -- update `step` above"
+
+    nw = spec.transform * (0.5, 0.5)
+    se = spec.transform * ((cols - 1) * step + 0.5, (rows - 1) * step + 0.5)
+    exp_w, exp_s, exp_e, exp_n = transform_bounds(
+        spec.crs or "EPSG:26917", "EPSG:4326", nw[0], se[1], se[0], nw[1],
+    )
+
+    assert w == pytest.approx(exp_w, abs=5e-4)
+    assert s_ == pytest.approx(exp_s, abs=5e-4)
+    assert e == pytest.approx(exp_e, abs=5e-4)
+    assert n == pytest.approx(exp_n, abs=5e-4)
+
+    # ...and keep the ORIGINAL regression guard too: the shipped extent's
+    # SPAN, not just its corners, must still be wider than the in-domain
+    # xs/ys subset's span was -- by more than 0.1 degree in both axes. This
+    # is the good guard against the FIRST bug (xs/ys); the corner assertions
+    # above are what catches the second, smaller one (raster edges).
     shipped_subset_w, shipped_subset_s, shipped_subset_e, shipped_subset_n = (
         -79.33062, 33.16283, -79.13362, 33.43675,
     )
