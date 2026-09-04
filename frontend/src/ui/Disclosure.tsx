@@ -59,9 +59,10 @@ export interface DisclosureProps {
   /**
    * The run is older than the data behind it and a rebuild is running.
    *
-   * Only `/day/{date}/status` carries this, and the day context does not call
-   * it on a cache hit (the payload arrives straight from `/day`), so nothing
-   * passes it today. It is a prop rather than an inference because staleness
+   * Only `/day/{date}/status` carries this, so `DayContext` asks it once on a
+   * cache hit and keeps asking while the answer is stale -- `stale` on the
+   * context, passed down by `TopBar`, and cleared by the arrival of the
+   * rebuilt payload. It is a prop rather than an inference because staleness
    * is the backend's judgement -- `store.is_stale` -- and guessing at it here
    * from `generated_at` would be a second, disagreeing definition.
    */

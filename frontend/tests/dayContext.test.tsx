@@ -2,21 +2,34 @@ import { act, render, screen, waitFor } from "@testing-library/react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 
 import fixture from "../fixtures/day-payload.json";
+import type { DayPayload } from "../src/api/types";
 import { DayProvider, useDay } from "../src/state/DayContext";
 import type { DayContextValue } from "../src/state/DayContext";
+import { TopBar } from "../src/ui/TopBar";
 
 afterEach(() => vi.restoreAllMocks());
 
 function Probe() {
-  const { state, payload, hour, species } = useDay();
+  const { state, payload, hour, species, stale } = useDay();
   return (
     <div>
       <span data-testid="state">{state}</span>
       <span data-testid="hour">{hour}</span>
       <span data-testid="species">{species}</span>
       <span data-testid="missing">{payload?.missing.join(",") ?? ""}</span>
+      <span data-testid="stale">{String(stale)}</span>
+      {/* WHICH payload is in state, not merely that one is: the stale run and
+          the rebuilt one differ only by this stamp. */}
+      <span data-testid="generated">{payload?.freshness.generated_at ?? ""}</span>
     </div>
   );
+}
+
+/** The committed payload with a given run stamp on it. */
+function runStamped(generatedAt: string): DayPayload {
+  const payload = structuredClone(fixture) as unknown as DayPayload;
+  payload.freshness = { ...payload.freshness, generated_at: generatedAt };
+  return payload;
 }
 
 function renderWith() {
@@ -81,6 +94,69 @@ describe("DayProvider", () => {
     await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("ready"));
     expect(screen.getByTestId("hour")).toHaveTextContent("0");
     expect(screen.getByTestId("species")).toHaveTextContent("redfish");
+  });
+
+  it("picks the background rebuild up behind a stale cache hit, and clears the flag", async () => {
+    // BOTH halves, in one test, deliberately. `/day` serves a stale payload
+    // and rebuilds behind it, and the two answers are indistinguishable from
+    // this side -- so a context that never asked `/status` again would show
+    // yesterday's run forever. Asserting only the flag would pass against a
+    // UI that reports staleness forever and never refreshes; asserting only
+    // the swap would pass against one that swaps in silence, telling nobody
+    // the numbers they were reading were out of date.
+    const OLD = "2026-09-01T02:00:00+00:00";
+    const NEW = "2026-09-03T18:30:00+00:00";
+    const client = await import("../src/api/client");
+    const fetchDay = vi
+      .spyOn(client, "fetchDay")
+      .mockResolvedValueOnce({ kind: "ready", payload: runStamped(OLD) })
+      .mockResolvedValue({ kind: "ready", payload: runStamped(NEW) });
+    vi.spyOn(client, "fetchStatus")
+      .mockResolvedValueOnce({ status: "ready", generated_at: OLD, stale: true })
+      .mockResolvedValue({ status: "ready", generated_at: NEW, stale: false });
+    vi.spyOn(client, "fetchFisheries").mockResolvedValue([]);
+
+    // The REAL TopBar, so this covers the wiring too: `stale` on the context
+    // is worth nothing if nothing passes it to the disclosure.
+    render(
+      <DayProvider slug="winyah-bay" initialDate="2026-09-01">
+        <TopBar onFisheryChange={() => {}} />
+        <Probe />
+      </DayProvider>,
+    );
+
+    await waitFor(() => expect(screen.getByTestId("stale")).toHaveTextContent("true"));
+    expect(screen.getByTestId("generated")).toHaveTextContent(OLD);
+    expect(screen.getByTestId("disclosure-flag")).toHaveTextContent(/rebuild/i);
+
+    // The rebuild lands: the NEW payload is what is in state afterwards...
+    await waitFor(() => expect(screen.getByTestId("generated")).toHaveTextContent(NEW), {
+      timeout: 5000,
+    });
+    // ...and the flag is gone. (The band still flags this hour's provisional
+    // salinity -- that is a different sentence, and it is not this one.)
+    expect(screen.getByTestId("stale")).toHaveTextContent("false");
+    expect(screen.queryByTestId("disclosure-flag")?.textContent ?? "").not.toMatch(
+      /rebuild/i,
+    );
+    expect(fetchDay.mock.calls.length).toBe(2);
+  });
+
+  it("asks /status once on a FRESH cache hit and refetches nothing", async () => {
+    // The other side of the call above: the confirming check must not become
+    // a second download of the 1.67 MB payload that just arrived.
+    const client = await import("../src/api/client");
+    const fetchDay = vi.spyOn(client, "fetchDay").mockResolvedValue({
+      kind: "ready", payload: fixture as never,
+    });
+    const fetchStatus = vi.spyOn(client, "fetchStatus").mockResolvedValue({
+      status: "ready", generated_at: "x", stale: false,
+    });
+
+    renderWith();
+    await waitFor(() => expect(fetchStatus).toHaveBeenCalledTimes(1));
+    expect(screen.getByTestId("stale")).toHaveTextContent("false");
+    expect(fetchDay).toHaveBeenCalledTimes(1);
   });
 
   it("does not refetch on hour/species scrubs, but does refetch on a model change", async () => {

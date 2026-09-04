@@ -114,6 +114,7 @@ export function TopBar({ onFisheryChange }: TopBarProps) {
     state,
     error,
     payload,
+    stale,
     species,
     setSpecies,
     hour,
@@ -254,8 +255,10 @@ export function TopBar({ onFisheryChange }: TopBarProps) {
         </span>
       </div>
 
-      {/* The four signals, for whichever hour the strip is parked on. */}
-      <Disclosure hour={scored} freshness={payload?.freshness ?? null} />
+      {/* The four signals, for whichever hour the strip is parked on, plus
+          the run-level fact none of them can carry: this payload is out of
+          date and the rebuild that replaces it is already running. */}
+      <Disclosure hour={scored} freshness={payload?.freshness ?? null} stale={stale} />
     </header>
   );
 }

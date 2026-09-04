@@ -13,6 +13,15 @@ import type { DayPayload } from "../api/types";
 // Computing one day's scores costs the backend ~70s. A cache miss returns 202
 // and builds in the background, so this context polls a cheap status
 // endpoint until the build finishes, then fetches the real payload.
+//
+// A cache HIT needs the same poller for a different reason. `/day` serves a
+// STALE payload immediately and kicks off a rebuild behind it (app.py:
+// `if store.is_stale(...): coord.ensure(...)`), and only `/day/.../status`
+// carries the `stale` flag. So a cache hit is checked once against `/status`,
+// and if the answer is stale the poller runs until the rebuild lands and
+// replaces the payload on screen. Without that, the rebuild finishes on disk
+// and nothing ever picks it up: the reader keeps yesterday's scoring run
+// until they happen to reload.
 const POLL_INTERVAL_MS = 2000;
 const DEFAULT_MODEL = "best";
 
@@ -24,6 +33,15 @@ export interface DayContextValue {
   // `confidence` is a successful, degraded result -- never filtered here,
   // never treated as `failed`. See spec on payload disclosure.
   payload: DayPayload | null;
+  /**
+   * This payload is older than the data behind it and a rebuild is running.
+   *
+   * The BACKEND's judgement (`store.is_stale`), read off `/status` -- never
+   * inferred here from `generated_at`, which would be a second, disagreeing
+   * definition. True only between noticing the staleness and the rebuilt
+   * payload arriving, because that arrival clears it.
+   */
+  stale: boolean;
   error: string | null;
   species: string;
   hour: number;
@@ -55,6 +73,7 @@ export function DayProvider({
   const [model, setModel] = useState(initialModel);
   const [state, setState] = useState<DayState>("loading");
   const [payload, setPayload] = useState<DayPayload | null>(null);
+  const [stale, setStale] = useState(false);
   const [error, setError] = useState<string | null>(null);
   const [hour, setHour] = useState(0);
   const [species, setSpecies] = useState("");
@@ -66,6 +85,14 @@ export function DayProvider({
   useEffect(() => {
     let cancelled = false;
     let intervalId: ReturnType<typeof setInterval> | undefined;
+    // A payload is on screen. A background status check that fails after this
+    // point must not blank a day that is already rendering -- the day is
+    // fine; what was lost is the watch on its staleness.
+    let showing = false;
+    // `/status` said this payload is stale, so the next NOT-stale answer is a
+    // rebuilt payload to go and fetch. Without this flag the one status call
+    // a cache hit makes would re-fetch the 1.67 MB day it just fetched.
+    let awaitingRebuild = false;
 
     function clearPoll() {
       if (intervalId !== undefined) {
@@ -83,7 +110,12 @@ export function DayProvider({
 
     function applyReady(next: DayPayload) {
       if (cancelled) return;
+      showing = true;
+      awaitingRebuild = false;
       setPayload(next);
+      // Whatever this payload is, it is the newest the backend has: the
+      // rebuild it replaces is exactly what `stale` was reporting.
+      setStale(false);
       setHour(0);
       // First key of `species` -- an insertion-ordered Record, so this is
       // deterministic for a given payload.
@@ -99,6 +131,10 @@ export function DayProvider({
       } catch (err) {
         if (cancelled) return;
         clearPoll();
+        // Losing the status endpoint while a day is on screen degrades the
+        // staleness watch, not the day. Failing here would replace a
+        // perfectly good scoring run with an error message.
+        if (showing) return;
         setError(err instanceof Error ? err.message : String(err));
         setState("failed");
         return;
@@ -106,7 +142,20 @@ export function DayProvider({
       if (cancelled) return;
 
       if (status.status === "ready") {
+        if (status.stale) {
+          // The bytes served are older than the data behind them and the
+          // backend is rebuilding. Keep the stale day on screen -- flagged,
+          // by `stale` -- and keep polling: this poll is the only thing that
+          // will ever pick the rebuild up.
+          awaitingRebuild = true;
+          setStale(true);
+          startPoll();
+          return;
+        }
         clearPoll();
+        // A fresh payload is already on screen and no rebuild was pending --
+        // this was the one confirming check a cache hit makes.
+        if (showing && !awaitingRebuild) return;
         try {
           const result = await fetchDay(slug, date, model);
           if (cancelled) return;
@@ -120,11 +169,13 @@ export function DayProvider({
           }
         } catch (err) {
           if (cancelled) return;
+          if (showing) return;
           setError(err instanceof Error ? err.message : String(err));
           setState("failed");
         }
       } else if (status.status === "failed") {
         clearPoll();
+        if (showing) return;
         setError(status.error);
         setState("failed");
       }
@@ -134,11 +185,17 @@ export function DayProvider({
     async function start() {
       setState("loading");
       setError(null);
+      setStale(false);
       try {
         const result = await fetchDay(slug, date, model);
         if (cancelled) return;
         if (result.kind === "ready") {
           applyReady(result.payload);
+          // The one status call a cache hit makes. `/day` answers 200 for a
+          // stale payload exactly as it does for a current one -- the two are
+          // indistinguishable from this side -- so without this the rebuild
+          // running behind it is never noticed and never collected.
+          void pollStatus();
         } else {
           setState("building");
           startPoll();
@@ -165,6 +222,7 @@ export function DayProvider({
     () => ({
       state,
       payload,
+      stale,
       error,
       species,
       hour,
@@ -176,7 +234,7 @@ export function DayProvider({
       model,
       setModel,
     }),
-    [state, payload, error, species, hour, slug, date, model],
+    [state, payload, stale, error, species, hour, slug, date, model],
   );
 
   return <DayContext.Provider value={value}>{children}</DayContext.Provider>;
