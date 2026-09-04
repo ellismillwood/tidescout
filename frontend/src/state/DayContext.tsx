@@ -177,36 +177,44 @@ export function DayProvider({
       if (cancelled) return;
 
       if (status.status === "ready") {
+        // Collect the payload when there is nothing on screen, or when the
+        // rebuild this poller was waiting for has landed. A STALE payload is
+        // still collected when nothing is on screen: yesterday's numbers,
+        // flagged as such, beat a blank panel. Otherwise the payload showing
+        // is already the newest there is and re-fetching 1.67 MB to learn
+        // that would be the cost this whole status endpoint exists to avoid.
+        if (!showing || awaitingRebuild) {
+          clearPoll();
+          try {
+            const result = await fetchDay(slug, date, model);
+            if (cancelled) return;
+            if (result.kind === "ready") {
+              applyReady(result.payload);
+            } else {
+              // Status said ready but the day-endpoint still 202s (a race
+              // with the backend cache) -- keep polling rather than hang.
+              setState("building");
+              startPoll();
+              return;
+            }
+          } catch (err) {
+            if (cancelled) return;
+            if (showing) return;
+            setError(err instanceof Error ? err.message : String(err));
+            setState("failed");
+            return;
+          }
+        }
         if (status.stale) {
           // The bytes served are older than the data behind them and the
-          // backend is rebuilding. Keep the stale day on screen -- flagged,
-          // by `stale` -- and keep polling: this poll is the only thing that
-          // will ever pick the rebuild up.
+          // backend is rebuilding (`/day` kicked that off when it served
+          // them). Say so, and keep polling: this poll is the only thing
+          // that will ever pick the rebuild up.
           awaitingRebuild = true;
           setStale(true);
           startPoll();
-          return;
-        }
-        clearPoll();
-        // A fresh payload is already on screen and no rebuild was pending --
-        // this was the one confirming check a cache hit makes.
-        if (showing && !awaitingRebuild) return;
-        try {
-          const result = await fetchDay(slug, date, model);
-          if (cancelled) return;
-          if (result.kind === "ready") {
-            applyReady(result.payload);
-          } else {
-            // Status said ready but the day-endpoint still 202s (a race with
-            // the backend cache) -- keep polling rather than hang forever.
-            setState("building");
-            startPoll();
-          }
-        } catch (err) {
-          if (cancelled) return;
-          if (showing) return;
-          setError(err instanceof Error ? err.message : String(err));
-          setState("failed");
+        } else {
+          clearPoll();
         }
       } else if (status.status === "failed") {
         clearPoll();

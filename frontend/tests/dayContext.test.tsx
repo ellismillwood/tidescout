@@ -142,6 +142,28 @@ describe("DayProvider", () => {
     expect(fetchDay.mock.calls.length).toBe(2);
   });
 
+  it("collects a payload whose FIRST ready status is already stale", async () => {
+    // The edge between the two loops: the day starts absent (202), so the
+    // poller is running for the build -- and the status that ends the build
+    // reports the result already stale. Waiting for a rebuild with nothing on
+    // screen would leave the app parked on "building" forever. A stale run,
+    // flagged, beats a blank panel, so it is collected AND flagged: the pair.
+    const client = await import("../src/api/client");
+    vi.spyOn(client, "fetchDay")
+      .mockResolvedValueOnce({ kind: "building" })
+      .mockResolvedValue({ kind: "ready", payload: runStamped("2026-09-01T02:00:00+00:00") });
+    vi.spyOn(client, "fetchStatus").mockResolvedValue({
+      status: "ready", generated_at: "2026-09-01T02:00:00+00:00", stale: true,
+    });
+
+    renderWith();
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("ready"), {
+      timeout: 5000,
+    });
+    expect(screen.getByTestId("generated")).toHaveTextContent("2026-09-01T02:00:00+00:00");
+    expect(screen.getByTestId("stale")).toHaveTextContent("true");
+  });
+
   it("asks /status once on a FRESH cache hit and refetches nothing", async () => {
     // The other side of the call above: the confirming check must not become
     // a second download of the 1.67 MB payload that just arrived.
