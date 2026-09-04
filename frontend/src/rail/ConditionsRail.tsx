@@ -70,7 +70,13 @@ export function ConditionsRail() {
   }
 
   const scored = payload.species[species]?.hours[hour];
-  const now = payload.conditions[hour];
+  // Optional-chained even though `conditions` is a required field: a payload
+  // cached BEFORE this branch has no `conditions` at all, and `store.is_stale`
+  // returns False for a past date, so it is served from disk forever rather
+  // than rebuilt. Indexing `undefined` throws during render with no error
+  // boundary above -- a blank app. The `now ? ... : cond-absent` branch below
+  // already knows how to say "no reading" for this hour; this is what lets it.
+  const now = payload.conditions?.[hour];
   const water = payload.water;
   const astro = payload.astro;
 

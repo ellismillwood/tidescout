@@ -339,6 +339,26 @@ describe("HourStrip", () => {
     expect(spies.setHour).not.toHaveBeenCalledWith(1);
   });
 
+  it("draws the scores of a payload that carries NO conditions block at all", () => {
+    // A payload cached before `conditions` existed has no such field, and
+    // `store.is_stale` is False for a past date -- so the backend serves that
+    // payload forever. `payload.conditions[i]` on it throws during render,
+    // and nothing above the strip is an error boundary: the whole app goes
+    // blank. The pair is what makes this a test: the tide underlay is gone
+    // (there is nothing to draw it from) AND the score bars are still there,
+    // still scrubbable. A component that caught the throw and rendered
+    // nothing would satisfy the first half alone.
+    const spies = mount({
+      payload: payloadWith((day) => {
+        delete (day as Partial<DayPayload>).conditions;
+      }),
+    });
+    expect(bars()).toHaveLength(24);
+    expect(screen.queryAllByTestId("tide-segment")).toHaveLength(0);
+    fireEvent.click(bars()[11]!);
+    expect(spies.setHour).toHaveBeenCalledWith(11);
+  });
+
   it("clamps a drag past either edge to hour 0 and hour 23", () => {
     const spies = mount({ hour: 12 });
     const plot = screen.getByTestId("strip-plot");

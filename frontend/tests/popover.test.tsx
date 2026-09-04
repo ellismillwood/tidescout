@@ -254,6 +254,27 @@ describe("ConditionsRail", () => {
     expect(screen.queryAllByTestId("factor-flag-note")).toHaveLength(0);
   });
 
+  it("says 'no reading' for a payload that carries NO conditions block at all", () => {
+    // Same pre-branch payload the strip test describes: the field is required
+    // by the type and absent from anything cached before it existed, and
+    // indexing `undefined` throws through a rail with no error boundary above
+    // it. Degrade, do not crash -- and the pair says which: the conditions
+    // block reports its absence AND the rest of the rail (the hour's score,
+    // its factor bars) still renders, which a caught-and-blank rail would not.
+    install({
+      hour: 12,
+      payload: payloadWith((p) => {
+        delete (p as Partial<DayPayload>).conditions;
+      }),
+    });
+    render(<ConditionsRail />);
+    expect(screen.getByTestId("cond-absent")).toHaveTextContent(/no conditions row/i);
+    expect(screen.getByTestId("rail-score")).toHaveTextContent(
+      String(payload.species[SPECIES]!.hours[12]!.score),
+    );
+    expect(screen.getAllByTestId("factor-row").length).toBeGreaterThan(0);
+  });
+
   it("says so when the day carries no water or astronomy block", () => {
     install({
       hour: 12,

@@ -145,7 +145,15 @@ export function HourStrip() {
       // arrays are short renders empty hours rather than throwing, and the
       // strip keeps its 24 columns either way.
       const scored = block?.hours[i];
-      const conditions = payload?.conditions[i];
+      // `conditions?.` and not `conditions[i]`: the field is REQUIRED by the
+      // type and absent from any payload cached before it existed, and
+      // `store.is_stale` returns False for a past date, so such a payload is
+      // served forever rather than rebuilt. `undefined[i]` throws during
+      // render, and there is no error boundary above this -- a blank app, not
+      // a degraded one. This costs one character and the strip degrades to a
+      // day with no tide underlay, which is what it already draws for a day
+      // whose tide readings are all null.
+      const conditions = payload?.conditions?.[i];
       return {
         hour: i,
         score: isReading(scored?.score) ? scored.score : null,
