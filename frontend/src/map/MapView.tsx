@@ -21,6 +21,8 @@ import {
   setWorkerUrl,
   type GeoJSONSource,
   type LngLatBoundsLike,
+  type MapLayerMouseEvent,
+  type MapMouseEvent,
 } from "maplibre-gl";
 import maplibreWorkerUrl from "maplibre-gl/dist/maplibre-gl-worker.mjs?worker&url";
 import type {
@@ -740,40 +742,59 @@ export function MapView() {
     const source = ready.getSource(MARKER_SOURCE) as GeoJSONSource | undefined;
     if (source) {
       // Reached only when the DAY changes -- a new payload is new numbers on
-      // the same geometry. Never on a scrub.
+      // the same geometry. Never on a scrub. The source and layer are already
+      // there; the handlers below are (re-)registered either way, and the
+      // cleanup at the end of this effect is what makes that safe.
       source.setData(points as unknown as SourceData);
-      return;
+    } else {
+      ready.addSource(MARKER_SOURCE, {
+        type: "geojson",
+        data: points as unknown as SourceData,
+      });
+      const { species: sp, hour: hr } = selectionRef.current;
+      addInOrder(ready, {
+        id: MARKER_LAYER_ID,
+        type: "circle",
+        source: MARKER_SOURCE,
+        paint: {
+          "circle-radius": radiusExpr(sp, hr) as ExpressionSpecification,
+          "circle-color": colorExpr(sp, hr) as ExpressionSpecification,
+          // Constant, all three of them: anything data-driven by activation
+          // would have to be re-set on every scrub tick, which is the cost
+          // this whole design exists to avoid.
+          "circle-opacity": 0.92,
+          "circle-stroke-width": 0.8,
+          "circle-stroke-color": "rgba(6,19,28,0.6)",
+        },
+      });
     }
-    ready.addSource(MARKER_SOURCE, { type: "geojson", data: points as unknown as SourceData });
-    const { species: sp, hour: hr } = selectionRef.current;
-    addInOrder(ready, {
-      id: MARKER_LAYER_ID,
-      type: "circle",
-      source: MARKER_SOURCE,
-      paint: {
-        "circle-radius": radiusExpr(sp, hr) as ExpressionSpecification,
-        "circle-color": colorExpr(sp, hr) as ExpressionSpecification,
-        // Constant, all three of them: anything data-driven by activation
-        // would have to be re-set on every scrub tick, which is the cost this
-        // whole design exists to avoid.
-        "circle-opacity": 0.92,
-        "circle-stroke-width": 0.8,
-        "circle-stroke-color": "rgba(6,19,28,0.6)",
-      },
-    });
 
+    /*
+     * THE THREE HANDLERS, AND WHY THEY ARE NAMED AND CLEANED UP.
+     *
+     * They register on every run of this effect and come off in its cleanup,
+     * so "exactly one of each is attached" is a property of the effect's own
+     * shape. It used to rest on the `setData` branch above returning early,
+     * three statements away: correct, but only as long as nobody moved the
+     * return -- and no test can catch that, because jsdom has no WebGL and
+     * this effect never runs under vitest. (The review confirmed the
+     * accumulation this guards against does NOT happen today. This is
+     * structure, not a bug fix.)
+     */
     // The 1,633 features outside the flow-model domain are not clickable, and
     // the cursor is where that becomes visible before a click proves it.
     const canvas = ready.getCanvas();
-    ready.on("mousemove", MARKER_LAYER_ID, (event) => {
+    const onMarkerMove = (event: MapLayerMouseEvent) => {
       const props = event.features?.[0]?.properties;
       const { species: s, hour: h } = selectionRef.current;
       const scored = props ? props[activationKey(s, h)] !== undefined : false;
       canvas.style.cursor = scored ? "pointer" : "";
-    });
-    ready.on("mouseleave", MARKER_LAYER_ID, () => {
+    };
+    const onMarkerLeave = () => {
       canvas.style.cursor = "";
-    });
+    };
+    ready.on("mousemove", MARKER_LAYER_ID, onMarkerMove);
+    ready.on("mouseleave", MARKER_LAYER_ID, onMarkerLeave);
 
     /**
      * The click that opens the popover.
@@ -784,7 +805,7 @@ export function MapView() {
      * would open the popover and immediately close it depending on the order
      * MapLibre happens to dispatch them.
      */
-    ready.on("click", (event) => {
+    const onMapClick = (event: MapMouseEvent) => {
       const hit = ready.queryRenderedFeatures(event.point, {
         layers: [MARKER_LAYER_ID],
       })[0];
@@ -802,7 +823,16 @@ export function MapView() {
       // The marker's own point, not the click point: the card stays pinned to
       // the feature rather than to wherever the pointer happened to land.
       setPicked({ key, lng, lat });
-    });
+    };
+    ready.on("click", onMapClick);
+    return () => {
+      ready.off("mousemove", MARKER_LAYER_ID, onMarkerMove);
+      ready.off("mouseleave", MARKER_LAYER_ID, onMarkerLeave);
+      ready.off("click", onMapClick);
+      // The cursor is set by the handler that just went away; leaving a
+      // "pointer" behind would point at a layer nothing is listening on.
+      canvas.style.cursor = "";
+    };
     // DO NOT ADD `species` OR `hour` TO THIS ARRAY. This effect re-joins
     // 2,162 features and rebuilds the whole marker source; running it on a
     // scrub tick is the single cost this design exists to avoid (measured:
