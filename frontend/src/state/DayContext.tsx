@@ -183,7 +183,14 @@ export function DayProvider({
         // flagged as such, beat a blank panel. Otherwise the payload showing
         // is already the newest there is and re-fetching 1.67 MB to learn
         // that would be the cost this whole status endpoint exists to avoid.
-        if (!showing || awaitingRebuild) {
+        // `awaitingRebuild` alone re-arms on every still-stale tick (it is
+        // set unconditionally below whenever `status.stale` is true), so
+        // pairing it with this tick's OWN stale reading is what makes this
+        // fire once -- on the tick the rebuild actually lands -- rather than
+        // on every poll for the whole rebuild. Without `!status.stale` this
+        // re-downloads the 1.67 MB payload every 2s for as long as the
+        // rebuild takes, which is exactly the cost cited above.
+        if (!showing || (awaitingRebuild && !status.stale)) {
           clearPoll();
           try {
             const result = await fetchDay(slug, date, model);
@@ -199,7 +206,15 @@ export function DayProvider({
             }
           } catch (err) {
             if (cancelled) return;
-            if (showing) return;
+            if (showing) {
+              // The day on screen is still fine -- only this collection
+              // attempt failed. `clearPoll()` already ran above, so without
+              // restarting it here a single transient network blip pins
+              // `stale` true permanently: nothing is left to notice the
+              // rebuild ever lands.
+              startPoll();
+              return;
+            }
             setError(err instanceof Error ? err.message : String(err));
             setState("failed");
             return;

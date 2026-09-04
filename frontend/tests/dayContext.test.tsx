@@ -305,3 +305,97 @@ describe("DayProvider", () => {
     );
   });
 });
+
+// --- the rebuild-collection cadence (a regression the fix wave introduced) -
+
+describe("DayProvider — rebuild-collection cadence", () => {
+  afterEach(() => {
+    vi.useRealTimers();
+  });
+
+  it("collects a still-stale rebuild once, not once per status tick", async () => {
+    // `awaitingRebuild` was being re-armed on every still-stale tick, so the
+    // condition `!showing || awaitingRebuild` re-entered the collect branch
+    // on EVERY poll for the whole rebuild, not just the one that lands it --
+    // exactly the 1.67 MB re-download the guard's own comment says the
+    // status endpoint exists to avoid. A boolean assertion ("did it fetch")
+    // cannot tell that apart from this bug: it fetches either way. Only the
+    // count can.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const OLD = "2026-09-01T02:00:00+00:00";
+    const client = await import("../src/api/client");
+    const fetchDay = vi.spyOn(client, "fetchDay").mockResolvedValue({
+      kind: "ready", payload: runStamped(OLD),
+    });
+    const fetchStatus = vi.spyOn(client, "fetchStatus").mockResolvedValue({
+      status: "ready", generated_at: OLD, stale: true,
+    });
+
+    renderWith();
+    // The cache-hit fetch, then the one confirming /status call `start()`
+    // fires directly -- this is the arm, not a poll tick yet.
+    await waitFor(() => expect(screen.getByTestId("stale")).toHaveTextContent("true"));
+    expect(fetchDay.mock.calls.length).toBe(1);
+
+    // Three more status polls, 2s apart (POLL_INTERVAL_MS in DayContext.tsx),
+    // all still reporting stale: a rebuild that just hasn't landed yet.
+    for (let tick = 0; tick < 3; tick += 1) {
+      await act(async () => {
+        vi.advanceTimersByTime(2000);
+      });
+    }
+
+    // The ticks really happened...
+    expect(fetchStatus.mock.calls.length).toBeGreaterThanOrEqual(4);
+    // ...and none of them re-downloaded the payload. Pre-fix this is 4.
+    expect(fetchDay.mock.calls.length).toBe(1);
+  });
+
+  it("recovers from a failed collection: polling survives and the flag clears once the retry lands", async () => {
+    // If the collecting fetchDay throws while a payload is already showing,
+    // `clearPoll()` has already run (it runs before the await, to guarantee
+    // at most one in-flight collect). The old catch just `return`ed there,
+    // so nothing ever restarted the interval: `stale` stayed true forever
+    // and a single transient network blip pinned the banner until a manual
+    // reload. Assert the pair -- the app does not crash to "failed" AND it
+    // actually recovers -- not just one half.
+    vi.useFakeTimers({ shouldAdvanceTime: true });
+    const OLD = "2026-09-01T02:00:00+00:00";
+    const NEW = "2026-09-03T18:30:00+00:00";
+    const client = await import("../src/api/client");
+    const fetchDay = vi
+      .spyOn(client, "fetchDay")
+      .mockResolvedValueOnce({ kind: "ready", payload: runStamped(OLD) })
+      .mockRejectedValueOnce(new Error("network blip"))
+      .mockResolvedValue({ kind: "ready", payload: runStamped(NEW) });
+    const fetchStatus = vi
+      .spyOn(client, "fetchStatus")
+      .mockResolvedValueOnce({ status: "ready", generated_at: OLD, stale: true })
+      .mockResolvedValue({ status: "ready", generated_at: OLD, stale: false });
+
+    renderWith();
+    await waitFor(() => expect(screen.getByTestId("stale")).toHaveTextContent("true"));
+
+    // Tick 1: /status says the rebuild landed, so the collect is attempted --
+    // and this attempt is the one that throws.
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+    });
+    await waitFor(() => expect(fetchDay.mock.calls.length).toBe(2));
+    // The day on screen survives the blip -- it does not degrade to "failed".
+    expect(screen.getByTestId("state")).toHaveTextContent("ready");
+    expect(screen.getByTestId("generated")).toHaveTextContent(OLD);
+
+    // Tick 2: only reachable if the catch restarted the poll. This retry
+    // succeeds.
+    await act(async () => {
+      vi.advanceTimersByTime(2000);
+    });
+
+    await waitFor(() => expect(screen.getByTestId("generated")).toHaveTextContent(NEW), {
+      timeout: 5000,
+    });
+    expect(screen.getByTestId("stale")).toHaveTextContent("false");
+    expect(fetchStatus.mock.calls.length).toBeGreaterThanOrEqual(3);
+  });
+});
