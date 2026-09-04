@@ -14,5 +14,11 @@ export default defineConfig({
     environment: "jsdom",
     globals: true,
     setupFiles: ["./tests/setup.ts"],
+    // Vitest's default glob would also collect `e2e/smoke.spec.ts`, which is a
+    // Playwright spec: it needs a browser and a live API, and under jsdom it
+    // fails on import. The two suites answer different questions and neither
+    // runner can run the other's file, so the boundary is drawn here rather
+    // than left to a filename convention.
+    include: ["tests/**/*.{test,spec}.{ts,tsx}"],
   },
 });
