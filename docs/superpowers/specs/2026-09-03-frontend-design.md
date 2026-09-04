@@ -118,10 +118,37 @@ default scrub path still refetches nothing.
 3  hillshade       PR #12's PNG, blended for relief
 4  contours        line layer, labelled from depth_m
 5  oyster reefs    fill; 1.9 MB, all 8451 reefs
-6  salinity field  OPTIONAL — hatched, permanent UNCALIBRATED badge
-7  flow arrows     OPTIONAL — per-hour fetch
-8  markers         circles; radius and colour = activation
+6  flow arrows     OPTIONAL — per-hour fetch (two layers: casing + shaft)
+7  markers         circles; radius and colour = activation
 ```
+
+**AMENDED, 2026-09-04 — salinity is not a map layer.** This list originally
+had the salinity field as layer 6, hatched, under the flow arrows. It shipped
+as a hatched along-estuary PROFILE in the chart's margin instead (`MapView`'s
+`SalinityInset`), and the layer stack above is what the code actually draws.
+
+Why, and what it would take. `/salinity-field` returns a **1-D profile**: one
+ppt per along-estuary kilometre bin, because that is what the model is — a
+function of distance, discharge and phase, with no second spatial dimension in
+it. Painting a 2-D field from that needs `estuary_km.npy`, the per-cell
+distance field the backend joins those bins back onto. The client has no such
+field: `api/layers.py`'s `LAYERS` allowlist does not carry it, so there is no
+URL that serves it.
+
+So this is **not impossible — it is one served artifact away.** The array
+exists (`data/winyah-bay/estuary_km.npy`, 587,325 cells) and the backend
+already loads it (`pipeline.estuary.load_distance_field`, called by the
+endpoint itself). Serving it would mean a web-ready warp (the raw `.npy` is
+neither web-mercator nor an image) plus a `LAYERS` entry, i.e. a fifth entry
+in `webartifacts` beside the depth tint.
+
+What was NOT acceptable was the alternative: inventing an estuary axis on the
+client — interpolating distance from the shoreline, or from the marker
+positions — and tinting the bay with it. The salinity model is `fitted:
+false`, an uncalibrated fit whose own disclosure says so on every reading. A
+falsified model painted across geography the client made up is exactly the
+overclaiming §1.1 forbids, and it would be the most confident-looking thing on
+the chart. A profile in the margin says what the model says and no more.
 
 ### 4.2 The depth tint artifact
 

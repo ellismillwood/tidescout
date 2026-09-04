@@ -1,6 +1,17 @@
-"""Browser-ready versions of two artifacts the frontend cannot consume as-is.
+"""Browser-ready versions of the artifacts the frontend cannot consume as-is.
 
-Spec §4.1. Both are OFFLINE pipeline steps -- the API only serves their output.
+Four of them now, from three functions (spec §4.1 and §4.2):
+
+    oyster_reefs.web.geojson   `simplify_oysters` -- 37.6 MB of 14-decimal
+                               coordinates down to a drawable fill
+    hillshade.png              `hillshade_png` -- RGBA, web mercator
+    hillshade.bounds.json      the WGS84 bounds sidecar an image overlay takes,
+                               written by `hillshade_png` and SHARED by
+    depth_tint.png             `depth_tint_png` -- RGBA, the same warp of the
+                               same grid, so it writes no second sidecar
+
+Every one is an OFFLINE pipeline step -- the API only serves their output,
+through the `LAYERS` allowlist in `api/layers.py`.
 
 `oyster_reefs.web.geojson` is a DISPLAY artifact ONLY. Feature scoring reads
 real oyster geometry (`features.geojson` carries `oyster_area_m2`,

@@ -99,20 +99,23 @@ const FLOW_ARROWS = "flow-arrows";
  * present that belongs above it, so a slow fetch cannot land its layer on top
  * of one that should cover it.
  *
- * Slot 7, the flow arrows, sits between the oysters and the markers, and it
+ * Slot 6, the flow arrows, sits between the oysters and the markers, and it
  * is two layers rather than one: a dark casing under a pale shaft. The tint
  * beneath ramps pale cyan (198,232,240) in the shallows to deep navy
  * (18,62,128) in the channel, so ONE ink cannot carry the field -- a pale
  * arrow vanishes on the flats and a dark one vanishes in the deep. The casing
  * is what a paper chart does when it prints over its own soundings.
  *
- * Spec §4.1's slot 6, the salinity field, is deliberately NOT here. It has no
- * geometry to be a map layer with: the endpoint bins by along-estuary
- * distance and the distance field is not on the layer allowlist, so painting
- * it onto the water would mean inventing an estuary axis on the client and
- * tinting the bay with it. That is the discounting-by-overclaiming spec §1.1
- * forbids, applied to a model that is already falsified. It renders as a
- * section inset in the chart's margin instead -- see `SalinityInset`.
+ * The salinity field is deliberately NOT a layer here. It has no geometry to
+ * be one with: the endpoint returns a 1-D profile binned by along-estuary
+ * distance, and the per-cell distance field it would be painted through
+ * (`estuary_km.npy`) is not on the layer allowlist, so no URL serves it.
+ * Painting the bay anyway would mean inventing an estuary axis on the client
+ * -- the discounting-by-overclaiming spec §1.1 forbids, applied to a model
+ * that is already falsified (`fitted: false`). It renders as a section inset
+ * in the chart's margin instead -- see `SalinityInset`. Spec §4.1 listed it
+ * as layer 6 and is amended to match what shipped, including what serving the
+ * distance field would take.
  */
 const STACK = [
   DEPTH_TINT,
@@ -876,7 +879,7 @@ export function MapView() {
     );
   }, [species, hour]);
 
-  // --- slot 7: the current arrows ------------------------------------------
+  // --- slot 6: the current arrows ------------------------------------------
   // Adds on first arrival, `setData`s on every later hour, and REMOVES itself
   // when the toggle goes off or a fetch fails. Removing the layer and its
   // source rather than hiding them is what makes "toggling it off restores the
