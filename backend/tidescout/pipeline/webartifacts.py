@@ -66,31 +66,60 @@ def simplify_oysters(
 
 
 def hillshade_png(src: Path, png: Path, bounds_json: Path) -> dict:
-    """Reproject a UTM GeoTIFF hillshade to web mercator and write a PNG.
+    """Reproject a UTM GeoTIFF hillshade to web mercator and write an RGBA PNG.
 
     MapLibre needs raster tiles or an image plus bounds; it can consume neither
     a GeoTIFF nor EPSG:26917. The bounds sidecar is written in WGS84 degrees
     because that is what an image overlay takes.
+
+    RGBA rather than single-band, for exactly the reason `depth_tint_png` below
+    is. Two independent sources of "nothing here" land in this raster: the
+    source declares 0 as its nodata (`render.hillshade` writes 0 wherever the
+    DEM is NaN, and `build_artifacts` stamps nodata=0 on the GeoTIFF), and
+    warping a north-up UTM grid onto web mercator rotates it slightly, so the
+    destination rectangle always carries a margin no source pixel reaches. On
+    the real Winyah raster that was 6.7% of all pixels, a ~74 px border. A
+    single-band PNG has no way to say "nothing here", so every one of those
+    pixels painted opaque BLACK -- a hard dark frame around the fishery. No
+    frontend paint property can remove it either: lowering the layer's white
+    point (`raster-brightness-max`) makes already-black pixels RELATIVELY more
+    prominent, not less. Alpha 0 on nodata is what lets the relief sit inside
+    the survey's real outline.
     """
     with rasterio.open(src) as ds:
         transform, width, height = calculate_default_transform(
             ds.crs, "EPSG:3857", ds.width, ds.height, *ds.bounds
         )
-        dest = np.zeros((height, width), dtype="uint8")
+        # float32/NaN rather than the uint8 the source is, purely so nodata
+        # has somewhere to live: in uint8 the fill value would be an ordinary
+        # shade and indistinguishable from real terrain that happens to match.
+        shade = np.full((height, width), np.nan, dtype="float32")
         reproject(
             source=rasterio.band(ds, 1),
-            destination=dest,
+            destination=shade,
             src_transform=ds.transform,
             src_crs=ds.crs,
             dst_transform=transform,
             dst_crs="EPSG:3857",
+            src_nodata=ds.nodata,
+            dst_nodata=np.nan,
         )
         west, south, east, north = transform_bounds(ds.crs, "EPSG:4326", *ds.bounds)
 
+    lit = np.isfinite(shade)
+    rgba = np.zeros((4, height, width), dtype="uint8")
+    grey = np.zeros((height, width), dtype="uint8")
+    grey[lit] = shade[lit].astype("uint8")
+    # Neutral grey: relief is a luminance signal, and the depth tint under it
+    # owns the colour. Alpha carries the whole "is there terrain here" claim.
+    for band in range(3):
+        rgba[band] = grey
+    rgba[3][lit] = 255
+
     with rasterio.open(
-        png, "w", driver="PNG", height=height, width=width, count=1, dtype="uint8"
+        png, "w", driver="PNG", height=height, width=width, count=4, dtype="uint8"
     ) as out:
-        out.write(dest, 1)
+        out.write(rgba)
 
     Path(bounds_json).write_text(
         json.dumps({"bounds": [west, south, east, north], "crs": "EPSG:4326"})

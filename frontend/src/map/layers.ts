@@ -11,6 +11,31 @@ export const MARKER_LAYER_ID = "markers";
  */
 export const UNSCORED_SENTINEL = -1;
 
+/**
+ * The colour an unscored feature paints, and the ONE place it is written.
+ *
+ * The key's ghost swatch shows the same colour; letting the stylesheet keep
+ * its own copy meant the key could go on describing a mapping the map no
+ * longer used.
+ */
+export const UNSCORED_COLOR = "rgba(154,170,182,0.32)";
+
+/**
+ * The activation colour ramp: `[activation 0-100, colour]`, ascending.
+ *
+ * The single source for both the paint expression below and the key's ramp
+ * bar in `MapView`. The bar reads these stops at their real positions, so it
+ * shows the ACTUAL mapping -- uneven spacing included -- rather than a
+ * tidied version, and changing the ramp cannot leave the key lying about it.
+ */
+export const ACTIVATION_STOPS: readonly (readonly [number, string])[] = [
+  [0, "#5f3168"],
+  [35, "#8f356f"],
+  [60, "#cf5560"],
+  [80, "#ef8a3c"],
+  [100, "#ffc247"],
+];
+
 function activation(species: string, hour: number) {
   // `coalesce` is load-bearing: unscored features carry no a_* property, and
   // feeding interpolate a null throws at style-parse time -- which would take
@@ -76,16 +101,12 @@ export function colorExpr(species: string, hour: number): unknown[] {
   return [
     "case",
     ["<", activation(species, hour), 0],
-    "rgba(154,170,182,0.32)",
+    UNSCORED_COLOR,
     [
       "interpolate",
       ["linear"],
       activation(species, hour),
-      0, "#5f3168",
-      35, "#8f356f",
-      60, "#cf5560",
-      80, "#ef8a3c",
-      100, "#ffc247",
+      ...ACTIVATION_STOPS.flatMap(([at, colour]) => [at, colour]),
     ],
   ];
 }

@@ -32,7 +32,13 @@ import { layerUrl } from "../api/client";
 import { useDay } from "../state/DayContext";
 import { activationKey, joinActivations } from "./join";
 import { ACTIVE_BASEMAP } from "./basemap";
-import { colorExpr, MARKER_LAYER_ID, radiusExpr } from "./layers";
+import {
+  ACTIVATION_STOPS,
+  colorExpr,
+  MARKER_LAYER_ID,
+  radiusExpr,
+  UNSCORED_COLOR,
+} from "./layers";
 import "./MapView.css";
 
 /**
@@ -85,21 +91,39 @@ const IMAGE_LAYERS = [
   [
     HILLSHADE,
     {
-      // `hillshade.png` is a single-band greyscale with NO alpha channel --
-      // `webartifacts.hillshade_png` never got the transparency treatment
-      // `depth_tint_png` did -- so it is an opaque mid-grey (mean 168/255)
-      // across its whole rectangle, nodata included. Laid over the basemap at
-      // any real opacity it draws a visible grey BOX around the fishery.
-      // Pulling its white point down to 0.5 lands its mid-tone on top of the
-      // knocked-back basemap's own tone, so what survives the blend is the
-      // relief variation rather than the rectangle. The proper fix is an
-      // alpha channel on the artifact, which is backend work.
+      // The nodata frame is GONE, and it was fixed in the backend, not here:
+      // `hillshade.png` is RGBA now (`webartifacts.hillshade_png`, alpha 0 on
+      // nodata), so the 6.7% margin that used to paint an opaque black border
+      // around the fishery is simply not painted. No paint property could
+      // have fixed that -- lowering the white point makes already-black
+      // pixels RELATIVELY more prominent.
+      //
+      // The white point stays, doing the OTHER job it turned out to be doing.
+      // A hillshade is relief, i.e. variation, and it must not also be a
+      // brightness lift. This artifact's opaque area means 180/255 while the
+      // deliberately knocked-back basemap under it sits at ~83, so at full
+      // white point the layer washes its whole rectangle +34 levels brighter
+      // than the world around it -- measured in the running app, and a slab
+      // that obvious is just the old box in a lighter colour. Mapping the
+      // white point to 0.5 lands the mean at ~90 against the ground's 83
+      // (the exactly-seamless value is 83/180 = 0.46; 0.5 measures a +3.0
+      // step, at the noise floor) and what survives the blend is the relief
+      // variation alone. Relief amplitude is unchanged: sd 10.7 vs 11.1.
       "raster-opacity": 0.35,
       "raster-brightness-max": 0.5,
       "raster-fade-duration": 0,
     },
   ],
 ] as const;
+
+/**
+ * The key's ramp bar, built from `layers.ts`'s stops rather than a hand copy.
+ * Activation is 0-100, so a stop's value IS its percentage along the bar --
+ * which is what makes the bar show the real, unevenly spaced mapping.
+ */
+const KEY_RAMP = `linear-gradient(to right, ${ACTIVATION_STOPS.map(
+  ([at, colour]) => `${colour} ${at}%`,
+).join(", ")})`;
 
 /**
  * Glyphs for the contour labels. MapLibre renders text from font PBFs, which
@@ -448,8 +472,17 @@ export function MapView() {
       cancelled = true;
       controller.abort();
       mapRef.current = null;
+      // All four pieces of per-map state die with the map. `degraded` and
+      // `geojson` in particular: `setDegraded` only ever APPENDS, so a
+      // fishery whose depth tint failed would keep saying so on the next
+      // fishery, whose tint is fine -- and a stale `geojson` would let the
+      // join paint fishery A's markers over fishery B's basemap if B's
+      // `features` fetch failed. `slug` is a constant today; Task 12's
+      // fishery picker is what makes this reachable.
       setReady(null);
       setRevealed(false);
+      setDegraded([]);
+      setGeojson(null);
       map.remove();
       for (const objectUrl of objectUrls) URL.revokeObjectURL(objectUrl);
     };
@@ -497,8 +530,27 @@ export function MapView() {
     ready.on("mouseleave", MARKER_LAYER_ID, () => {
       canvas.style.cursor = "";
     });
-    // `species` and `hour` are deliberately absent: this must not re-run on a
-    // scrub. The two setPaintProperty calls below are the whole tick.
+    // DO NOT ADD `species` OR `hour` TO THIS ARRAY. This effect re-joins
+    // 2,162 features and rebuilds the whole marker source; running it on a
+    // scrub tick is the single cost this design exists to avoid (measured:
+    // 24 hour changes in 143 ms, median frame 6.0 ms, zero network). The
+    // scrub is the two setPaintProperty calls below and nothing else.
+    //
+    // The array is exhaustive as written -- the effect reads the live
+    // selection from `selectionRef`, not from `species`/`hour`, purely to
+    // paint the layer correctly the FIRST time -- so the rule is quiet today.
+    // The suppression is for the day someone inlines that ref read: the rule
+    // would then demand both names and an autofix would supply them,
+    // reintroducing the per-tick re-join with no test to catch it.
+    //
+    // Cost of this line, measured: oxlint 1.79 does not scope an
+    // `exhaustive-deps` directive to the line it sits on. It silently drops
+    // `react/set-state-in-effect` for the ENTIRE enclosing component -- here
+    // that is the accepted `setUnsupported` in the WebGL catch above, and it
+    // would hide a genuine one too. `react/rules-of-hooks` is unaffected, and
+    // no rule config prevents it. Reproduced against every spelling of the
+    // directive; naming any other rule behaves correctly.
+    // oxlint-disable-next-line react/exhaustive-deps
   }, [ready, geojson, payload]);
 
   // --- the scrub loop ------------------------------------------------------
@@ -550,7 +602,7 @@ export function MapView() {
             {String(hour).padStart(2, "0")}:00
           </span>
         </figcaption>
-        <div className="key-ramp" />
+        <div className="key-ramp" style={{ background: KEY_RAMP }} />
         <div className="key-ticks">
           <span>0</span>
           <span>50</span>
@@ -558,7 +610,7 @@ export function MapView() {
         </div>
         <ul className="key-notes">
           <li>
-            <i className="dot dot-ghost" />
+            <i className="dot dot-ghost" style={{ background: UNSCORED_COLOR }} />
             {counts.unscored.toLocaleString()} of {counts.total.toLocaleString()} features sit
             outside the flow model — detected, not scored
           </li>
