@@ -43,7 +43,7 @@ describe("mergeFeatureSubs", () => {
     expect(merged.find((s) => s.factor === "structure")?.provisional).toBe(false);
   });
 
-  it("reads sub_scope from the payload rather than a hardcoded list", () => {
+  it("reads sub_scope.feature from the payload rather than a hardcoded list", () => {
     // A frontend with the split hardcoded breaks silently the day a factor
     // changes scope -- which is precisely why the payload publishes it.
     const shuffled = {
@@ -52,6 +52,28 @@ describe("mergeFeatureSubs", () => {
     } as DayPayload;
     const merged = mergeFeatureSubs(shuffled, "redfish", key, 12);
     expect(merged.length).not.toBe(10);
+  });
+
+  it("reads sub_scope.hour from the payload rather than a hardcoded list", () => {
+    // The same guard, the OTHER scope. The check above shuffles
+    // sub_scope.feature and leaves sub_scope.hour untouched, so a merge that
+    // reads sub_scope.feature correctly but hardcodes the hour-scope split
+    // would still pass it -- and did: a hardcoded
+    // new Set(["light","pressure","season","solunar","stage","water_temp","wind"])
+    // in place of `payload.sub_scope.hour` left all 66 tests green. Shuffle
+    // hour down to a single factor (feature scope left at the payload's own
+    // three) and assert the exact factor set that implies.
+    const shuffled = {
+      ...payload,
+      sub_scope: { hour: ["stage"], feature: [...payload.sub_scope.feature] },
+    } as DayPayload;
+    const merged = mergeFeatureSubs(shuffled, "redfish", key, 12);
+    expect(merged.map((sub) => sub.factor).sort()).toEqual([
+      "flow",
+      "salinity",
+      "stage",
+      "structure",
+    ]);
   });
 });
 
@@ -288,6 +310,40 @@ describe("FeaturePopover", () => {
     expect(
       screen.getByTestId("factor-bars-feature").querySelectorAll("[data-factor]"),
     ).toHaveLength(payload.sub_scope.feature.length);
+  });
+
+  it("shows the excluded-from-the-score treatment for a feature-scope factor the payload excludes", () => {
+    // A feature-hour's subs are trimmed to factor/value/reason -- they carry
+    // no flags of their own. `missing` (rendered as "no reading -- excluded
+    // from the score") is read back from the feature-hour's own `excluded`
+    // list, the same way `provisional` is read back from its `provisional`
+    // list (pinned above). The fixture ships zero excluded factors across
+    // all 144 feature-hours, so that readback line has no fixture coverage;
+    // mutate one locally. Salinity is the factor this project flags as
+    // uncalibrated everywhere else, so it is the one worth pinning here too.
+    // The sub's own value is left untouched (a real number, not null) so
+    // this test can only pass because of the `missing` readback -- not
+    // because `value === null` independently triggers the same flag.
+    const day = install({
+      hour: 12,
+      payload: payloadWith((p) => {
+        const featureHour = p.species[SPECIES]!.features[KEY]!.hours[12]!;
+        featureHour.excluded = ["salinity"];
+        featureHour.provisional = [];
+      }),
+    });
+    render(<FeaturePopover featureKey={KEY} onClose={vi.fn()} />);
+    const salinitySub = day!.species[SPECIES]!.features[KEY]!.hours[12]!.subs.find(
+      (sub) => sub.factor === "salinity",
+    )!;
+    expect(salinitySub.value).not.toBeNull();
+    const row = screen
+      .getByTestId("factor-bars-feature")
+      .querySelector('[data-factor="salinity"]');
+    expect(row).not.toBeNull();
+    expect(row?.querySelector('[data-testid="factor-flag-missing"]')).toHaveTextContent(
+      "no reading — excluded from the score",
+    );
   });
 
   it("admits an unscored feature instead of drawing an empty card", () => {
