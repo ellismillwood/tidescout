@@ -35,7 +35,7 @@
  * re-encoding what bar height already says, leaving nothing to carry the one
  * fact height cannot: which hours are only partly observed.
  */
-import { useCallback, useMemo, useRef, useState } from "react";
+import { useCallback, useEffect, useMemo, useRef, useState } from "react";
 
 import { useDay } from "../state/DayContext";
 import "./HourStrip.css";
@@ -133,6 +133,8 @@ const pct = (n: number) => `${round(n * 100)}%`;
 export function HourStrip() {
   const { payload, species, hour, setHour } = useDay();
   const plotRef = useRef<HTMLDivElement | null>(null);
+  const groupRef = useRef<HTMLDivElement | null>(null);
+  const barRefs = useRef(new Map<number, HTMLButtonElement>());
   const draggingRef = useRef(false);
   const [hovered, setHovered] = useState<number | null>(null);
 
@@ -293,6 +295,38 @@ export function HourStrip() {
     [hasData, hour, scrub],
   );
 
+  /**
+   * Roving tabindex, the half that `tabIndex` alone does not do: move real
+   * DOM focus onto the bar that just became the tab stop.
+   *
+   * Setting `tabIndex={selected ? 0 : -1}` and stopping there looks like the
+   * APG pattern and is not it. Focus stays pinned to whichever bar the person
+   * first landed on, so a screen reader announces that bar forever while the
+   * selection walks away underneath, and the readout -- which is fed by the
+   * bars' `onFocus` -- freezes on the same stale hour. Found in review; the
+   * regression test fires three arrows and checks focus AND the readout after
+   * each.
+   *
+   * THE GUARD IS THE WHOLE DESIGN. It moves focus only when focus is ALREADY
+   * inside this radiogroup, which is the honest test for "the person is
+   * driving the strip right now". On mount `document.activeElement` is
+   * `<body>`, which this group does not contain, so a freshly loaded page
+   * never has its caret yanked into the chart -- and neither does an hour
+   * change driven from somewhere else (Task 12's date picker, a restored URL,
+   * a click that did not focus). Both cases are pinned by a test.
+   */
+  useEffect(() => {
+    const group = groupRef.current;
+    const target = barRefs.current.get(hour);
+    if (!group || !target || target === document.activeElement) return;
+    const active = document.activeElement;
+    if (!active || !group.contains(active)) return;
+    // `preventScroll`: the strip is already fully on screen inside a
+    // 100svh grid, so the only thing a scroll-into-view could do here is
+    // jog the layout.
+    target.focus({ preventScroll: true });
+  }, [hour]);
+
   return (
     <section className="strip" data-testid="hour-strip" aria-label="The day, hour by hour">
       <header className="strip-head">
@@ -344,6 +378,7 @@ export function HourStrip() {
           <div
             className="strip-bars"
             data-testid="hour-bars"
+            ref={groupRef}
             role="radiogroup"
             aria-label="Hour of day"
             onKeyDown={onKeyDown}
@@ -354,6 +389,10 @@ export function HourStrip() {
               return (
                 <button
                   key={slot.hour}
+                  ref={(node) => {
+                    if (node) barRefs.current.set(slot.hour, node);
+                    else barRefs.current.delete(slot.hour);
+                  }}
                   type="button"
                   role="radio"
                   data-testid="hour-bar"

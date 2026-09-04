@@ -1,4 +1,5 @@
 import { fireEvent, render, screen } from "@testing-library/react";
+import { useState } from "react";
 import { afterEach, describe, expect, it, vi } from "vitest";
 import type { Mock } from "vitest";
 
@@ -62,6 +63,47 @@ function mount(options: { hour?: number; payload?: DayPayload | null } = {}): Sp
     ...spies,
   };
   render(<HourStrip />);
+  return spies;
+}
+
+/**
+ * The same strip, but with `hour` held in real state so `setHour` actually
+ * MOVES the selection.
+ *
+ * `mount` above deliberately freezes `hour`, which is right for asserting
+ * what the strip CALLS. It is wrong for asserting what the strip does after
+ * the hour has changed -- and that blind spot is exactly what hid the focus
+ * bug this harness exists to catch: every keyboard test fired `keyDown` at a
+ * component whose hour could never move.
+ */
+function mountLive(startHour: number): Spies {
+  const spies: Spies = {
+    setHour: vi.fn<(hour: number) => void>(),
+    setSpecies: vi.fn<(species: string) => void>(),
+    setDate: vi.fn<(date: string) => void>(),
+    setModel: vi.fn<(model: string) => void>(),
+  };
+  const payload = payloadWith();
+  function Harness() {
+    const [hour, setHour] = useState(startHour);
+    holder.value = {
+      state: "ready",
+      payload,
+      error: null,
+      species: SPECIES,
+      hour,
+      slug: "winyah-bay",
+      date: "2026-09-03",
+      model: "best",
+      ...spies,
+      setHour: (next: number) => {
+        spies.setHour(next);
+        setHour(next);
+      },
+    };
+    return <HourStrip />;
+  }
+  render(<Harness />);
   return spies;
 }
 
@@ -144,6 +186,52 @@ describe("HourStrip", () => {
     fireEvent.keyDown(group(), { key: "ArrowRight" });
     expect(spies.setHour).toHaveBeenCalledTimes(1);
     expect(spies.setHour).toHaveBeenCalledWith(1);
+  });
+
+  it("moves DOM focus with the arrow keys, and the readout follows it", () => {
+    // Both halves, asserted together after every press. Focus alone would
+    // pass against a readout still wired to the old hour; the readout alone
+    // would pass against a component that never moves focus at all -- which
+    // is what a roving tabindex that only sets `tabIndex` actually is.
+    const spies = mountLive(5);
+    bars()[5]!.focus();
+    expect(document.activeElement).toBe(bars()[5]!);
+    expect(screen.getByTestId("strip-readout")).toHaveTextContent("05:00");
+
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowRight" });
+    expect(spies.setHour).toHaveBeenLastCalledWith(6);
+    expect(document.activeElement).toBe(bars()[6]!);
+    expect(screen.getByTestId("strip-readout")).toHaveTextContent("06:00");
+
+    // Twice more: a component that moves focus once and then freezes on the
+    // new bar would pass the single-press version.
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowRight" });
+    fireEvent.keyDown(document.activeElement!, { key: "ArrowRight" });
+    expect(document.activeElement).toBe(bars()[8]!);
+    expect(screen.getByTestId("strip-readout")).toHaveTextContent("08:00");
+    // The tab stop moved with it, or the strip has two of them.
+    expect(bars().filter((bar) => bar.tabIndex === 0)).toHaveLength(1);
+    expect(bars()[8]!.tabIndex).toBe(0);
+  });
+
+  it("never takes focus that was not already inside the strip", () => {
+    // On mount, and on an hour change driven from anywhere else, the strip
+    // must not yank the caret out of whatever the person is using.
+    const outside = document.createElement("button");
+    document.body.appendChild(outside);
+    outside.focus();
+
+    mountLive(5);
+    expect(document.activeElement).toBe(outside);
+
+    // A click moves the hour without focusing a bar (jsdom does not focus on
+    // click), which is the same shape as a scrub driven from another
+    // component. The pair: the hour DID move, and focus did NOT.
+    fireEvent.click(bars()[9]!);
+    expect(bars()[9]!).toHaveAttribute("aria-checked", "true");
+    expect(document.activeElement).toBe(outside);
+
+    outside.remove();
   });
 
   it("jumps to the ends with Home and End, still inside 0-23", () => {
