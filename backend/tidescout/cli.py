@@ -1,6 +1,7 @@
 import json
 import math
 import time
+from datetime import date
 from pathlib import Path
 from typing import TYPE_CHECKING
 
@@ -380,6 +381,132 @@ def spots(slug: str) -> None:
     console.print(table)
 
 
+def _warm_build(slug: str, day: date, model: str) -> dict:
+    """Indirection so tests can substitute a fast fake for the 70 s real build."""
+    from tidescout.api.builds import default_build_fn
+
+    return default_build_fn(slug, day, model)
+
+
+@app.command()
+def warm(
+    slug: str,
+    days: int = typer.Option(7, "--days", help="How many days from today, inclusive"),
+    model: str = typer.Option("best", "--model"),
+    force: bool = typer.Option(False, "--force", help="Rebuild even if already fresh"),
+) -> None:
+    """Pre-build the day payloads the UI will ask for. ~70 s per date.
+
+    Intended for cron or launchd overnight. Seven dates is roughly 8 minutes.
+    """
+    from datetime import timedelta
+
+    from tidescout.api import readiness, store
+    from tidescout.config import fishery_now
+    from tidescout.sources.weather import FORECAST_HORIZON_DAYS
+
+    r = readiness.readiness(slug)
+    if not r.ready:
+        console.print(f"[red]{slug} is not ready: {', '.join(r.missing)}[/red]")
+        raise typer.Exit(1)
+
+    # `/day` rejects anything past today+FORECAST_HORIZON_DAYS with a 422, so
+    # dates beyond it are ~70 s each spent building payloads the API will not
+    # serve. Clamp rather than fail: the useful part of the request is honoured.
+    max_days = FORECAST_HORIZON_DAYS + 1  # today .. today+16, inclusive
+    if days > max_days:
+        console.print(
+            f"[yellow]--days {days} runs past the {FORECAST_HORIZON_DAYS}-day forecast "
+            f"horizon, and /day rejects those dates with a 422. Clamping to "
+            f"{max_days}.[/yellow]"
+        )
+        days = max_days
+
+    # Fishery-local, NOT UTC -- see `config.fishery_now`. Between 20:00 and
+    # 23:59 Eastern a UTC "today" is already tomorrow, so this command, whose
+    # docstring recommends running it overnight, would skip today entirely and
+    # leave the user a 70-second wait the next morning.
+    today = fishery_now(slug).date()
+    failures = 0
+    for offset in range(days):
+        day = today + timedelta(days=offset)
+        if not force:
+            existing = store.read_payload(slug, day, model)
+            if existing is not None and not store.is_stale(existing, day, fishery_now(slug)):
+                console.print(f"{day}: fresh, skipping")
+                continue
+        try:
+            payload = _warm_build(slug, day, model)
+            store.write_payload(slug, day, model, payload)
+            console.print(f"{day}: built")
+        except Exception as exc:  # noqa: BLE001
+            # Keep going: one dark source on one date must not abandon the rest.
+            failures += 1
+            console.print(f"[red]{day}: FAILED -- {type(exc).__name__}: {exc}[/red]")
+    if failures:
+        raise typer.Exit(1)
+
+
+def _is_loopback(host: str) -> bool:
+    """True only for addresses that cannot be reached from another machine.
+
+    `0.0.0.0` and `::` are wildcards, not loopback, and are what this exists to
+    catch. Parsed with `ipaddress` rather than matched against a literal set so
+    the whole 127.0.0.0/8 block counts, not just 127.0.0.1.
+    """
+    import ipaddress
+
+    h = host.strip().strip("[]")
+    if h.lower() in {"localhost", "localhost.localdomain"}:
+        return True
+    try:
+        return ipaddress.ip_address(h).is_loopback
+    except ValueError:
+        return False
+
+
+@app.command()
+def serve(
+    host: str = typer.Option("127.0.0.1", "--host"),
+    port: int = typer.Option(8000, "--port"),
+    dev: bool = typer.Option(False, "--dev", help="Allow CORS from the Vite dev server"),
+    allow_remote: bool = typer.Option(
+        False,
+        "--allow-remote",
+        help="Permit a non-loopback --host. This API has NO auth; see the warning it prints.",
+    ),
+) -> None:
+    """Run the API (and the built frontend, if present)."""
+    # API design spec §4.3: "The app binds 127.0.0.1, not 0.0.0.0: this is a
+    # single-user local tool with no auth, and binding it to every interface
+    # would put an unauthenticated filesystem-backed API on the local network."
+    # A free-text `--host` reopens exactly what that sentence closes, so the
+    # non-loopback case needs a deliberate second flag rather than a typo.
+    if not _is_loopback(host) and not allow_remote:
+        console.print(
+            f"[red]refusing to bind {host!r}: it is reachable from other machines, and this "
+            f"API has no authentication -- it serves files from `data/` to anyone who asks. "
+            f"Use --host 127.0.0.1, or pass --allow-remote if you really mean it.[/red]"
+        )
+        raise typer.Exit(2)
+    if not _is_loopback(host):
+        console.print(
+            f"[yellow]--allow-remote: binding {host!r}, so this unauthenticated API is "
+            f"reachable from the local network.[/yellow]"
+        )
+
+    import uvicorn
+
+    from tidescout.api.app import create_app
+    from tidescout.paths import REPO_ROOT
+
+    uvicorn.run(
+        create_app(frontend_dist=REPO_ROOT / "frontend" / "dist", dev_cors=dev),
+        host=host,
+        port=port,
+    )
+
+
 @bathy_app.command()
 def discover(
     slug: str,
@@ -454,6 +581,21 @@ def artifacts(slug: str) -> None:
     fishery = load_fishery(slug)
     for name, path in build_artifacts(slug, fishery).items():
         console.print(f"{name}: {path} ({path.stat().st_size:,} bytes)")
+
+    from tidescout.paths import fishery_data_dir
+    from tidescout.pipeline.webartifacts import hillshade_png, simplify_oysters
+
+    d = fishery_data_dir(slug)
+    if (d / "oyster_reefs.geojson").exists():
+        stats = simplify_oysters(d / "oyster_reefs.geojson", d / "oyster_reefs.web.geojson")
+        console.print(
+            f"oysters: {stats['features']} reefs -> {stats['bytes'] / 1048576:.1f} MB web geojson"
+        )
+    if (d / "hillshade.tif").exists():
+        meta = hillshade_png(
+            d / "hillshade.tif", d / "hillshade.png", d / "hillshade.bounds.json"
+        )
+        console.print(f"hillshade: {meta['width']}x{meta['height']} png + bounds")
 
 
 @bathy_app.command("wetlands")

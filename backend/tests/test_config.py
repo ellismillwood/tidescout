@@ -263,3 +263,29 @@ def test_redfish_tolerate_the_whole_range():
 
     red = load_species()["redfish"].salinity
     assert all(evaluate(red, s) > 0.4 for s in (2.0, 12.0, 30.0))
+
+
+def test_fishery_now_is_the_fisherys_own_clock_not_utc_or_system_local():
+    """`sources.weather._today`'s rule, made reusable: "near the day boundary
+    those can disagree with the fishery's own calendar day."
+
+    Both halves. It must be AWARE and in the fishery's zone -- a naive or UTC
+    datetime would break `store.is_stale`, which subtracts it -- and it must
+    actually track the fishery's wall clock, which a function that returned
+    `datetime.now(UTC)` with a tzinfo bolted on would not.
+    """
+    from datetime import UTC, datetime
+    from zoneinfo import ZoneInfo
+
+    from tidescout.config import fishery_now
+
+    eastern = ZoneInfo("America/New_York")
+    now = fishery_now("winyah-bay")
+    assert now.tzinfo is not None, "a naive datetime cannot be compared with an aware one"
+    assert now.utcoffset() == datetime.now(eastern).utcoffset()
+    assert now.date() == datetime.now(eastern).date()
+    # The property that matters, stated as the failure it prevents: 00:30 UTC
+    # is still the previous calendar day in the fishery.
+    assert datetime(2026, 9, 4, 0, 30, tzinfo=UTC).astimezone(now.tzinfo).date() != datetime(
+        2026, 9, 4, 0, 30, tzinfo=UTC
+    ).date()
