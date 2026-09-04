@@ -40,10 +40,17 @@ body {
   margin: 0;
 }
 
+/* Margin bar, chart, day strip. The chart takes what is left, so the strip
+   never scrolls out of reach -- it is the only view of a whole day. */
 #root {
   block-size: 100svh;
   display: grid;
-  grid-template-rows: auto 1fr;
+  grid-template-rows: auto 1fr auto;
+  min-block-size: 0;
+}
+
+#root > main {
+  min-block-size: 0;
 }
 
 /* Eyebrows label a thing; they never carry the thing. Tracked wide and small,
@@ -94,20 +101,10 @@ body {
   flex: 1;
 }
 
-/* Temporary controls (Tasks 10 and 12 replace them with the hour strip and
-   the real pickers). Deliberately plain: they are scaffolding, and dressing
-   them up would only make them harder to throw away. */
-.scrub {
-  display: flex;
-  align-items: center;
-  gap: 10px;
-}
-
-.scrub input[type="range"] {
-  inline-size: 260px;
-  accent-color: var(--hot);
-}
-
+/* Temporary control (Task 12 replaces it with the real pickers).
+   Deliberately plain: it is scaffolding, and dressing it up would only make
+   it harder to throw away. The hour slider that stood beside it belonged to
+   Task 9's verification step and is now `HourStrip`. */
 .species {
   display: flex;
   gap: 1px;
@@ -132,8 +129,7 @@ body {
   font-weight: 600;
 }
 
-.species button:focus-visible,
-.scrub input:focus-visible {
+.species button:focus-visible {
   outline: 2px solid var(--hot);
   outline-offset: 2px;
 }

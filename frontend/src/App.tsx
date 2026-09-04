@@ -1,5 +1,6 @@
 import { DayProvider, useDay } from "./state/DayContext";
 import { MapView } from "./map/MapView";
+import { HourStrip } from "./strip/HourStrip";
 
 // Until Task 12's picker exists there is one fishery and one day. The picker
 // replaces both of these; nothing else here depends on them.
@@ -19,15 +20,17 @@ const STATUS: Record<string, string> = {
 };
 
 /**
- * The chart margin.
+ * The chart margin above, the chart, and the day's strip below.
  *
- * The species buttons and the hour slider are TEMPORARY: Task 10 replaces the
- * slider with the 24-hour strip and Task 12 replaces the rest with the real
- * pickers. They are here because Task 9's own verification step is "drag the
- * hour and watch the markers", and that needs something to drag.
+ * The species buttons are TEMPORARY -- Task 12 replaces them with the real
+ * pickers. The hour slider that used to sit beside them is GONE: it existed
+ * only so Task 9 had something to drag while verifying the scrub loop, and
+ * `HourStrip` is now the real control. Both it and `MapView` read `hour` from
+ * the same context, so scrubbing the strip moves the markers with no wiring
+ * between the two.
  */
 function Shell() {
-  const { state, error, payload, species, setSpecies, hour, setHour, date } = useDay();
+  const { state, error, payload, species, setSpecies, date } = useDay();
   const names = payload ? Object.keys(payload.species) : [];
 
   return (
@@ -50,19 +53,6 @@ function Shell() {
             </button>
           ))}
         </div>
-        <label className="scrub">
-          <span className="eyebrow">Hour</span>
-          <input
-            type="range"
-            min={0}
-            max={23}
-            step={1}
-            value={hour}
-            onChange={(event) => setHour(Number(event.target.value))}
-            disabled={state !== "ready"}
-          />
-          <span className="num">{String(hour).padStart(2, "0")}:00</span>
-        </label>
         <span className="fill" />
         <span className="status" data-tone={state}>
           {state === "failed" ? (error ?? STATUS.failed) : STATUS[state]}
@@ -71,6 +61,7 @@ function Shell() {
       <main>
         <MapView />
       </main>
+      <HourStrip />
     </>
   );
 }

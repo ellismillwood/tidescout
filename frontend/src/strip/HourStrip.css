@@ -1,0 +1,329 @@
+/*
+ * The hour strip. A chart in the chart's margin: hairline chrome, mono
+ * numbers, and exactly two data colours.
+ *
+ * Both hues are validated, not chosen by eye -- see the block comment at the
+ * top of HourStrip.tsx for the two `validate_palette.js` runs and their
+ * numbers. They are declared once, here, so the component never spells a
+ * colour inline.
+ */
+
+.strip {
+  --strip-surface: var(--ink-800);
+  --strip-bar: #b8822f; /* score, every hour */
+  --strip-bar-hot: var(--hot); /* score, the selected hour (ordinal step up) */
+  --strip-tide: #2f9ac6; /* tide, the second series */
+  --strip-bar-w: 20px; /* dataviz cap: a bar is <= 24px and never fills its slot */
+
+  padding: 9px 16px 8px;
+  background: var(--strip-surface);
+  border-block-start: 1px solid var(--rule);
+  user-select: none;
+}
+
+.strip-head {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 16px;
+  margin: 0 0 7px;
+}
+
+.strip-head .eyebrow {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+}
+
+.strip-scale {
+  font-size: 10px;
+  letter-spacing: 0;
+  color: var(--paper-dim);
+  text-transform: none;
+}
+
+/* The readout is the tooltip, and it follows hover AND keyboard focus -- so
+   no value in this chart is reachable by pointer alone. Values lead, labels
+   follow, per the interaction rules. */
+.strip-readout {
+  display: flex;
+  align-items: baseline;
+  gap: 6px;
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--paper-dim);
+}
+
+.strip-readout .num {
+  font-size: 12.5px;
+}
+
+.strip-unit,
+.strip-sep {
+  font-size: 10.5px;
+  color: var(--paper-dim);
+}
+
+.strip-flag {
+  margin-inline-start: 4px;
+  padding: 1px 6px;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  font-size: 10.5px;
+  color: var(--paper);
+}
+
+/* --- the plot: bars over tide, one shared x -------------------------------
+   This box is the hour grid EXACTLY -- no gutters, no padding. The drag maths
+   divides its width by 24, so anything inset here would put the pointer on
+   the wrong hour. */
+.strip-plot {
+  position: relative;
+  display: grid;
+  grid-template-rows: 82px 46px;
+  gap: 4px;
+  touch-action: none; /* a horizontal drag scrubs; it must not also pan */
+}
+
+.strip-plot[data-active="true"] {
+  cursor: ew-resize;
+}
+
+.strip-band {
+  position: relative;
+}
+
+/* The one hairline in the chart: the bars' baseline, which the tide band
+   also hangs from. Solid, one step off the surface, recessive. */
+.strip-band-score {
+  border-block-end: 1px solid var(--rule);
+}
+
+.strip-bars {
+  display: grid;
+  grid-template-columns: repeat(24, 1fr);
+  block-size: 100%;
+  align-items: end;
+}
+
+.hour-bar {
+  --fill: var(--strip-bar);
+  display: flex;
+  align-items: flex-end;
+  justify-content: center;
+  block-size: 100%;
+  padding: 0;
+  border: 0;
+  background: none;
+  /* The whole column is the hit target, not the painted bar: a 6px-tall bar
+     at score 6 must still be as easy to hit as a full-height one. */
+  cursor: inherit;
+}
+
+.hour-bar[data-selected="true"] {
+  --fill: var(--strip-bar-hot);
+}
+
+.hour-bar:disabled {
+  cursor: default;
+}
+
+.hour-bar-fill {
+  inline-size: min(64%, var(--strip-bar-w));
+  min-block-size: 0;
+  position: relative;
+  background: var(--fill);
+  /* Rounded data-end, square at the baseline. */
+  border-radius: 4px 4px 0 0;
+  transition: background-color 90ms linear;
+}
+
+/* The day's best hour, and the only direct label in the chart. The reason it
+   earns its place: this species' scores span 62-78 today, so a truthful
+   zero-baseline column chart draws a nearly flat row -- correct, and nearly
+   silent about "when should I go". Labelling the extreme (never every point)
+   is the sanctioned answer, and the baseline stays at zero. */
+.hour-bar-peak {
+  position: absolute;
+  inset-block-end: 100%;
+  inset-inline: -100%;
+  margin-block-end: 4px;
+  font-size: 10px;
+  line-height: 1;
+  color: var(--paper);
+  text-align: center;
+  pointer-events: none;
+}
+
+/* Disclosure. An hour whose factors did not all resolve is drawn as an open
+   weave rather than a solid fill -- the same "modelled, not measured" grammar
+   the salinity overlay uses, and a channel that survives greyscale, CVD and
+   forced-colors, none of which a colour change would. Hue still says
+   "score", so the bar stays in its series. */
+.hour-bar[data-confidence="partial"] .hour-bar-fill {
+  background-color: color-mix(in srgb, var(--fill) 20%, transparent);
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--fill) 0 2px,
+    rgba(0, 0, 0, 0) 2px 5px
+  );
+}
+
+.strip-plot[data-active="true"] .hour-bar:hover .hour-bar-fill {
+  filter: brightness(1.3);
+}
+
+.hour-bar:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: -2px;
+  border-radius: 2px;
+}
+
+/* --- the tide band ------------------------------------------------------- */
+.strip-tide {
+  display: block;
+  inline-size: 100%;
+  block-size: 100%;
+  overflow: visible;
+}
+
+/* `preserveAspectRatio: none` stretches user space to the band, which is what
+   aligns x to the bars; `non-scaling-stroke` is what stops that stretch from
+   smearing the line's width with it. */
+.strip-tide-line {
+  fill: none;
+  stroke: var(--strip-tide);
+  stroke-width: 2;
+  stroke-linecap: round;
+  stroke-linejoin: round;
+  vector-effect: non-scaling-stroke;
+}
+
+.strip-tide-area {
+  fill: var(--strip-tide);
+  fill-opacity: 0.1; /* a wash, never a saturated block */
+  stroke: none;
+}
+
+/* A missing reading is drawn as an absence with a shape, not as nothing: the
+   line already stops here, and this says WHY it stopped. */
+.strip-tide-gap {
+  position: absolute;
+  inset-block: 0;
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(150, 166, 178, 0.34) 0 1px,
+    rgba(0, 0, 0, 0) 1px 4px
+  );
+  pointer-events: none;
+}
+
+/* --- the playhead -------------------------------------------------------- */
+.strip-playhead {
+  position: absolute;
+  inset-block: -2px 0;
+  inline-size: 1px;
+  transform: translateX(-50%);
+  background: rgba(233, 227, 212, 0.4);
+  pointer-events: none;
+  z-index: 2;
+}
+
+.strip-playhead-grip {
+  position: absolute;
+  inset-block-start: -3px;
+  inset-inline-start: 50%;
+  inline-size: 11px;
+  block-size: 5px;
+  transform: translateX(-50%);
+  background: var(--hot);
+  border-radius: 1px;
+}
+
+.strip-plot:focus-within .strip-playhead {
+  background: rgba(233, 227, 212, 0.7);
+}
+
+/* --- axis and key -------------------------------------------------------- */
+/* The axis gets its own full-width row and the key sits BELOW it, never
+   beside it. Sharing the row was measured wrong in the running app: the key
+   squeezed the tick row to 873px against a 1408px plot, so "23" printed
+   under hour 14 -- the axis stopped being shared, which is the one thing
+   this component exists to guarantee. */
+.strip-foot {
+  display: grid;
+  gap: 2px;
+}
+
+/* Ticks are positioned on the same (i + 0.5)/24 centres the bars and the
+   tide curve use, so all three genuinely share one axis. */
+.strip-axis {
+  position: relative;
+  inline-size: 100%;
+  block-size: 15px;
+  margin-block-start: 3px;
+}
+
+.strip-axis-tick {
+  position: absolute;
+  inset-block-start: 0;
+  transform: translateX(-50%);
+  font-size: 10px;
+  color: var(--paper-dim);
+}
+
+.strip-key {
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: flex-end;
+  gap: 4px 14px;
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--paper-dim);
+  text-align: end;
+}
+
+.strip-key li {
+  display: flex;
+  align-items: center;
+  gap: 6px;
+}
+
+.strip-key .num {
+  font-size: 10.5px;
+}
+
+.strip-swatch {
+  flex: 0 0 auto;
+  inline-size: 9px;
+  block-size: 9px;
+  border-radius: 1px;
+}
+
+/* Legends mirror their mark: a line key for the line, a rect for the bars. */
+.strip-swatch-tide {
+  block-size: 2px;
+  inline-size: 14px;
+  border-radius: 1px;
+  background: var(--strip-tide);
+}
+
+.strip-swatch-partial {
+  background-color: color-mix(in srgb, var(--strip-bar) 20%, transparent);
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--strip-bar) 0 2px,
+    rgba(0, 0, 0, 0) 2px 5px
+  );
+}
+
+.strip-swatch-gap {
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(150, 166, 178, 0.5) 0 1px,
+    rgba(0, 0, 0, 0) 1px 4px
+  );
+}
