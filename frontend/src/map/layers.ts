@@ -18,29 +18,74 @@ function activation(species: string, hour: number) {
   return ["coalesce", ["get", activationKey(species, hour)], UNSCORED_SENTINEL];
 }
 
-/** Marker radius from activation. Unscored features render small and flat. */
+/**
+ * Marker radius from activation. Unscored features render as a small ghost.
+ *
+ * The stops are not evenly spaced, and that is the considered part. Winyah's
+ * real activations on 2026-09-03 run 0-87 with the mass between 38 and 78
+ * (p25 47, p50 56, p75 65 for redfish), so an evenly spaced 0/50/100 ramp
+ * spends most of its dynamic range on values the data never takes and
+ * flattens the band a person is actually choosing between. Bunching the
+ * stops through 40-80 puts the visual difference where the decision is.
+ *
+ * The cap is 12px, not 16: at bay zoom 529 markers already crowd, and a
+ * 32px-wide hot marker swallows its neighbours instead of standing out
+ * among them.
+ */
 export function radiusExpr(species: string, hour: number): unknown[] {
   return [
     "case",
     ["<", activation(species, hour), 0],
-    3,
-    ["interpolate", ["linear"], activation(species, hour), 0, 4, 50, 9, 100, 16],
-  ];
-}
-
-/** Marker colour from activation. Unscored features render muted grey. */
-export function colorExpr(species: string, hour: number): unknown[] {
-  return [
-    "case",
-    ["<", activation(species, hour), 0],
-    "#9aa3ad",
+    2,
     [
       "interpolate",
       ["linear"],
       activation(species, hour),
-      0, "#2b3a4a",
-      50, "#2f7fb8",
-      100, "#f2c14e",
+      0, 3.5,
+      40, 5,
+      60, 7.5,
+      80, 10,
+      100, 12,
+    ],
+  ];
+}
+
+/**
+ * Marker colour from activation. Unscored features render as a grey ghost.
+ *
+ * The ramp runs aubergine -> mulberry -> coral -> sodium gold, and the choice
+ * of hue family is forced by what it sits on. `depth_tint.png` ramps pale
+ * cyan (198,232,240) to deep navy (18,62,128), so the water OWNS blue: the
+ * placeholder ramp's mid-value #2f7fb8 is within a few units of the tint's
+ * 5-metre colour (86,158,204), which would have made a middling marker
+ * disappear into middling water. Nothing in this palette but a marker is
+ * magenta or gold.
+ *
+ * Lightness climbs monotonically with activation (L* roughly 30 -> 38 -> 52
+ * -> 66 -> 82), so the ramp still reads in order for a colour-blind viewer
+ * and in a greyscale screenshot -- the hue is the second channel, not the
+ * only one. Stops match `radiusExpr`'s for the same reason they are uneven.
+ *
+ * The zero end stops at a plum rather than going near-black on purpose. More
+ * than 5% of feature-hours score exactly 0, and "scored, and the answer is
+ * zero" has to stay tellable from "outside the model domain" at 3 px -- the
+ * distinction the sentinel exists to keep. Scored zero is a saturated plum;
+ * unscored is a pale translucent grey.
+ */
+export function colorExpr(species: string, hour: number): unknown[] {
+  return [
+    "case",
+    ["<", activation(species, hour), 0],
+    "rgba(154,170,182,0.32)",
+    [
+      "interpolate",
+      ["linear"],
+      activation(species, hour),
+      0, "#5f3168",
+      35, "#8f356f",
+      60, "#cf5560",
+      80, "#ef8a3c",
+      100, "#ffc247",
     ],
   ];
 }

@@ -1,0 +1,156 @@
+/* Chart chrome. The map is the content; everything here is the margin. */
+
+.map {
+  position: relative;
+  inline-size: 100%;
+  block-size: 100%;
+  background: var(--ink-900);
+  overflow: hidden;
+}
+
+.map-canvas {
+  position: absolute;
+  inset: 0;
+  opacity: 0;
+  transition: opacity 380ms ease-out;
+}
+.map-canvas[data-revealed="true"] {
+  opacity: 1;
+}
+
+.map-unsupported {
+  display: grid;
+  place-content: center;
+  gap: 8px;
+  block-size: 100%;
+  padding: 24px;
+  text-align: center;
+  color: var(--paper-dim);
+}
+
+/* The sounding key. It reads like a chart's depth key, and it carries the
+   honest rows too: what is not scored, and what did not load. */
+.key {
+  position: absolute;
+  inset-block-end: 16px;
+  inset-inline-start: 16px;
+  z-index: 2;
+  inline-size: 306px;
+  margin: 0;
+  padding: 11px 13px 12px;
+  background: rgba(9, 26, 35, 0.93);
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  box-shadow: 0 10px 30px rgba(0, 0, 0, 0.5);
+  backdrop-filter: blur(6px);
+}
+
+.key figcaption {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 10px;
+  margin-block-end: 9px;
+}
+
+.key-scope {
+  font: 11px/1 var(--data);
+  letter-spacing: 0.02em;
+  color: var(--paper);
+  text-transform: none;
+}
+
+.key-ramp {
+  block-size: 9px;
+  border-radius: 1px;
+  /* The stops are the stops in layers.ts, at their real positions -- so the
+     bar shows the actual mapping, uneven spacing included, rather than a
+     tidied version of it. */
+  background: linear-gradient(
+    to right,
+    #5f3168 0%,
+    #8f356f 35%,
+    #cf5560 60%,
+    #ef8a3c 80%,
+    #ffc247 100%
+  );
+  box-shadow: inset 0 0 0 1px rgba(6, 19, 28, 0.55);
+}
+
+.key-ticks {
+  display: flex;
+  justify-content: space-between;
+  margin-block-start: 4px;
+  font: 10px/1 var(--data);
+  color: var(--paper-dim);
+}
+
+.key-notes {
+  margin: 10px 0 0;
+  padding: 9px 0 0;
+  border-block-start: 1px solid var(--rule);
+  list-style: none;
+  display: grid;
+  gap: 6px;
+  font-size: 11.5px;
+  line-height: 1.4;
+  color: var(--paper-dim);
+}
+
+.key-notes li {
+  display: grid;
+  grid-template-columns: 12px 1fr;
+  gap: 7px;
+  align-items: start;
+}
+
+.dot {
+  inline-size: 8px;
+  block-size: 8px;
+  margin-block-start: 4px;
+  border-radius: 50%;
+  border: 0.8px solid rgba(6, 19, 28, 0.8);
+}
+.dot-ghost {
+  background: rgba(154, 170, 182, 0.32);
+  border-color: rgba(6, 19, 28, 0.6);
+}
+.dot-pending {
+  background: var(--hot);
+}
+.dot-missing {
+  background: none;
+  border: 1px dashed var(--paper-dim);
+}
+
+/* MapLibre's own chrome, brought into the palette. Left white it glares
+   against the water and reads as part of the browser, not the chart. */
+.maplibregl-ctrl-group {
+  background: rgba(9, 26, 35, 0.93);
+  border: 1px solid var(--rule);
+  box-shadow: 0 6px 18px rgba(0, 0, 0, 0.45);
+}
+.maplibregl-ctrl-group button + button {
+  border-block-start: 1px solid var(--rule);
+}
+.maplibregl-ctrl-group button .maplibregl-ctrl-icon {
+  filter: invert(0.86);
+}
+.maplibregl-ctrl-group button:not(:disabled):hover {
+  background: rgba(255, 194, 71, 0.14);
+}
+.maplibregl-ctrl-scale {
+  background: rgba(9, 26, 35, 0.86);
+  border-color: var(--rule);
+  border-block-start: none;
+  color: var(--paper-dim);
+  font: 10px/1.6 var(--data);
+}
+.maplibregl-ctrl-attrib {
+  background: rgba(9, 26, 35, 0.86);
+  color: var(--paper-dim);
+  font-size: 10.5px;
+}
+.maplibregl-ctrl-attrib a {
+  color: var(--paper);
+}
