@@ -5,6 +5,7 @@ from datetime import UTC, datetime, timedelta
 import pytest
 from fastapi.testclient import TestClient
 
+from tidescout.api import store
 from tidescout.api.app import create_app
 
 
@@ -90,3 +91,147 @@ def test_salinity_field_cannot_be_rendered_without_its_disclosure(client):
     assert "fitted" in body and "extrapolated" in body
     assert body["fitted"] is False, "winyah's model is unfitted; see spec §1.1"
     assert body["cells"], "no field to draw"
+
+
+def test_flow_vectors_bbox_describes_the_full_raster_not_the_indomain_subset(client):
+    """`u`/`v` are decimated from the FULL `(2527, 1903)` bathymetry raster.
+    `bbox` used to be derived from `spec.xs`/`spec.ys`, which are the
+    IN-DOMAIN cell CENTRES only -- a strictly smaller extent, because the
+    raster carries hundreds of rows/cols of out-of-domain padding the mask
+    excludes but `u`/`v` still span (out-of-domain cells are zeroed, not
+    cropped).
+
+    Measured directly against `bathy_utm.tif` via `array_bounds` (2026-09-03,
+    task-13 report §2b): the full extent is west -79.458, south 33.144, east
+    -79.040, north 33.606. The in-domain xs/ys subset the endpoint used to
+    ship instead measured west -79.331, south 33.163, east -79.134, north
+    33.437 -- ~2.1x narrower in x and ~1.7x narrower in y, a difference of
+    more than 0.1 degree in each axis' total span. Asserting the real numbers
+    (not just "a bbox came back") is what makes this discriminate a
+    regression back to xs/ys -- a bbox that shrank back to the shipped subset
+    would still be four in-range floats with w < e and s < n.
+    """
+    r = client.get(f"/api/fisheries/winyah-bay/flow-vectors/{_day()}?hour=12")
+    if r.status_code == 404:
+        pytest.skip("no flow library for this date in this checkout")
+    assert r.status_code == 200, r.text
+    w, s_, e, n = r.json()["bbox"]
+
+    assert w == pytest.approx(-79.458, abs=0.01)
+    assert s_ == pytest.approx(33.144, abs=0.01)
+    assert e == pytest.approx(-79.040, abs=0.01)
+    assert n == pytest.approx(33.606, abs=0.01)
+
+    # ...and the pair: the shipped extent's SPAN, not just its corners, must
+    # be wider than the in-domain subset's was -- by more than 0.1 degree in
+    # both axes.
+    shipped_subset_w, shipped_subset_s, shipped_subset_e, shipped_subset_n = (
+        -79.33062, 33.16283, -79.13362, 33.43675,
+    )
+    assert (e - w) - (shipped_subset_e - shipped_subset_w) > 0.1, "x-span not widened"
+    assert (n - s_) - (shipped_subset_n - shipped_subset_s) > 0.1, "y-span not widened"
+
+
+class _FakeCoordinator:
+    """A stand-in for `BuildCoordinator` that never touches the network.
+
+    Only `get_day`/`get_status` call `coord` at all, and the real
+    `BuildCoordinator.ensure` submits a REAL background build -- weather,
+    tide and USGS fetches -- to a thread pool. This test only cares whether
+    the route resolves at all, not what it builds, so it fakes the
+    coordinator the same way `test_api_day.py` does.
+    """
+
+    def ensure(self, slug, day, model):
+        from tidescout.api.builds import BuildState
+
+        return BuildState("building", datetime.now(UTC))
+
+    def state(self, slug, day, model):
+        return None
+
+
+@pytest.fixture
+def dist(tmp_path):
+    d = tmp_path / "dist"
+    d.mkdir()
+    (d / "index.html").write_text(
+        "<!doctype html><title>TideScout</title><div id=root></div>"
+    )
+    return d
+
+
+def test_every_api_route_still_resolves_with_the_spa_catch_all_registered(
+    dist, monkeypatch, tmp_path
+):
+    """Closes the blind spot this file's own `client` fixture leaves open.
+
+    `TestClient(create_app())` never passes `frontend_dist`, so the SPA
+    catch-all in `app.py` never registers at all -- every other test in this
+    file runs against an app that structurally CANNOT exhibit a route-
+    ordering conflict, because there is no catch-all route to conflict with.
+    `tidescout serve` (`cli.py`) always passes `frontend_dist`, so that is the
+    shape that has to work, and only building the app that way here exercises
+    it.
+
+    `flow-vectors` and `salinity-field` were once defined AFTER the catch-all,
+    so Starlette matched the catch-all first and both 404'd with the
+    catch-all's OWN message, `no such endpoint` -- verified against a real
+    `tidescout serve` (task-13 report §2a). `_not_swallowed` below checks for
+    that EXACT message rather than "not a shell page", because a legitimate
+    domain 404 (missing fishery data, no regime for the day, ...) is also a
+    non-swallowed response and must not be mistaken for the bug.
+
+    Every `/api/*` route the app defines is checked, paired in the same test
+    with the other half: an unrecognised, non-API path must still fall
+    through to the SPA shell. Either half alone would pass against a broken
+    app -- checking only /api/* would pass even if the catch-all were deleted
+    outright (nothing left to swallow /api/*, but also nothing serving the
+    shell), and checking only the shell would pass even with these two routes
+    shadowed exactly as they once were.
+    """
+    # `store.DATA_DIR` only, not `tidescout.paths.DATA_DIR`: flow-vectors and
+    # salinity-field read real winyah-bay data through their OWN DATA_DIR
+    # import in app.py and must keep doing so, but the day/status endpoints'
+    # payload cache is redirected to an empty dir so a miss is deterministic
+    # rather than depending on whatever a previous local `tidescout serve`
+    # happened to leave on disk.
+    monkeypatch.setattr(store, "DATA_DIR", tmp_path / "no-payloads-here")
+    client = TestClient(create_app(coordinator=_FakeCoordinator(), frontend_dist=dist))
+    day = _day()
+
+    def _not_swallowed(r):
+        if r.status_code != 404:
+            return True
+        try:
+            return r.json().get("detail") != "no such endpoint"
+        except ValueError:
+            return True
+
+    fisheries = client.get("/api/fisheries")
+    assert fisheries.status_code == 200, fisheries.text
+    assert any(f["slug"] == "winyah-bay" for f in fisheries.json())
+
+    day_r = client.get(f"/api/fisheries/winyah-bay/day/{day}")
+    assert _not_swallowed(day_r), day_r.text
+    assert day_r.status_code == 202, day_r.text  # no cached payload; fake coord says "building"
+
+    status_r = client.get(f"/api/fisheries/winyah-bay/day/{day}/status")
+    assert _not_swallowed(status_r), status_r.text
+    assert status_r.json()["status"] == "absent"
+
+    layers_r = client.get("/api/fisheries/winyah-bay/layers/features")
+    assert _not_swallowed(layers_r), layers_r.text
+    assert layers_r.status_code == 200, layers_r.text  # features.geojson ships with the repo
+
+    flow_r = client.get(f"/api/fisheries/winyah-bay/flow-vectors/{day}?hour=12")
+    assert _not_swallowed(flow_r), flow_r.text
+
+    sal_r = client.get(f"/api/fisheries/winyah-bay/salinity-field/{day}?hour=12")
+    assert _not_swallowed(sal_r), sal_r.text
+
+    # The pair this test exists to check together: an unrecognised, non-API
+    # path must still return the SPA shell, not a 404.
+    shell = client.get("/some/unknown/client-route")
+    assert shell.status_code == 200, shell.text
+    assert "TideScout" in shell.text

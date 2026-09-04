@@ -166,51 +166,6 @@ def create_app(
                 return Response(status_code=304, headers={"ETag": etag, **headers})
         return response
 
-    if dev_cors:
-        # Development runs two servers -- Vite on :5173, this on :8000. In
-        # production the frontend is same-origin and no CORS headers are
-        # emitted at all.
-        from fastapi.middleware.cors import CORSMiddleware
-
-        app.add_middleware(
-            CORSMiddleware,
-            allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
-            allow_methods=["GET"],
-            allow_headers=["*"],
-        )
-
-    if frontend_dist is not None and frontend_dist.is_dir():
-        # Spec §4.3: any non-/api path that does not match a file returns
-        # index.html, so client-side routes survive a page reload.
-        #
-        # `StaticFiles(html=True)` does NOT do that. It serves index.html only
-        # for a path that resolves to a DIRECTORY; a genuine miss looks for
-        # `404.html` and then raises 404 -- measured, `/day/2026-09-03` was a
-        # 404. And a `Mount("/")` matches every path FULLY, so a catch-all
-        # route registered after it would never be reached. Hence one explicit
-        # catch-all that delegates real files to StaticFiles (keeping its safe
-        # path resolution, content types, ranges and 304s) and falls back to
-        # the shell. Registered LAST, so every /api route still matches first.
-        from starlette.exceptions import HTTPException as StarletteHTTPException
-        from starlette.staticfiles import StaticFiles
-
-        static = StaticFiles(directory=frontend_dist)
-        index = frontend_dist / "index.html"
-
-        @app.get("/{spa_path:path}", include_in_schema=False)
-        async def spa(spa_path: str, request: Request) -> Response:
-            if spa_path == "api" or spa_path.startswith("api/"):
-                # An unknown /api path is a bug, not a client-side route.
-                # Returning the HTML shell there would turn a typo'd endpoint
-                # into a 200 that no fetch() could parse.
-                raise HTTPException(404, "no such endpoint")
-            try:
-                return await static.get_response(spa_path or "index.html", request.scope)
-            except StarletteHTTPException as exc:
-                if exc.status_code != 404:
-                    raise
-                return FileResponse(index)
-
     def _check_hour(hour: int) -> int:
         if not 0 <= hour <= 23:
             raise HTTPException(422, f"hour must be 0-23, got {hour}")
@@ -272,18 +227,24 @@ def create_app(
         ug = np.where(wg > 0.5, ug, 0.0)[::step, ::step]
         vg = np.where(wg > 0.5, vg, 0.0)[::step, ::step]
 
-        # `GridSpec` has NO `bbox` attribute -- it carries `xs`/`ys` (in-domain
-        # cell centres) and a `crs` that is EPSG:26917 for this fishery, i.e.
-        # UTM metres. MapLibre needs WGS84 degrees, so derive the extent from
-        # xs/ys and reproject it, the same way `webartifacts.hillshade_png`
-        # converts its bounds.
+        # `GridSpec` has NO `bbox` attribute. `xs`/`ys` are the IN-DOMAIN cell
+        # centres only -- a strictly smaller extent than the grid `ug`/`vg`
+        # actually span, because `ug`/`vg` come from the FULL `spec.shape`
+        # raster (out-of-domain cells zeroed, not cropped) before decimation.
+        # Deriving bbox from xs/ys min/max shrinks it relative to the shipped
+        # u/v grid -- measured ~2.1x too narrow in x and ~1.7x in y, up to
+        # ~18 km of positional error once a client maps the array onto it.
+        # `array_bounds` on `spec.shape`/`spec.transform` instead describes
+        # the full raster -- the same grid `ug`/`vg` are a decimation of --
+        # and the result is reprojected to WGS84 degrees for MapLibre, the
+        # same way `webartifacts.hillshade_png` converts its bounds.
+        from rasterio.transform import array_bounds
         from rasterio.warp import transform_bounds
 
         west, south, east, north = transform_bounds(
             spec.crs or "EPSG:26917",
             "EPSG:4326",
-            float(spec.xs.min()), float(spec.ys.min()),
-            float(spec.xs.max()), float(spec.ys.max()),
+            *array_bounds(spec.shape[0], spec.shape[1], spec.transform),
         )
         return {
             "hour": hour,
@@ -331,5 +292,54 @@ def create_app(
             "extrapolated": payload_mod._is_extrapolated(disch.cfs_now, fishery.salinity),
             "cells": cells,
         }
+
+    if dev_cors:
+        # Development runs two servers -- Vite on :5173, this on :8000. In
+        # production the frontend is same-origin and no CORS headers are
+        # emitted at all.
+        from fastapi.middleware.cors import CORSMiddleware
+
+        app.add_middleware(
+            CORSMiddleware,
+            allow_origins=["http://localhost:5173", "http://127.0.0.1:5173"],
+            allow_methods=["GET"],
+            allow_headers=["*"],
+        )
+
+    if frontend_dist is not None and frontend_dist.is_dir():
+        # Spec §4.3: any non-/api path that does not match a file returns
+        # index.html, so client-side routes survive a page reload.
+        #
+        # `StaticFiles(html=True)` does NOT do that. It serves index.html only
+        # for a path that resolves to a DIRECTORY; a genuine miss looks for
+        # `404.html` and then raises 404 -- measured, `/day/2026-09-03` was a
+        # 404. And a `Mount("/")` matches every path FULLY, so a catch-all
+        # route registered after it would never be reached. Hence one explicit
+        # catch-all that delegates real files to StaticFiles (keeping its safe
+        # path resolution, content types, ranges and 304s) and falls back to
+        # the shell. This block is the LAST thing registered on `app` --
+        # every route above it, including flow-vectors and salinity-field,
+        # is defined and therefore matched first. A route added below this
+        # point would be shadowed by the catch-all exactly as these two once
+        # were; new routes belong above this block, not after it.
+        from starlette.exceptions import HTTPException as StarletteHTTPException
+        from starlette.staticfiles import StaticFiles
+
+        static = StaticFiles(directory=frontend_dist)
+        index = frontend_dist / "index.html"
+
+        @app.get("/{spa_path:path}", include_in_schema=False)
+        async def spa(spa_path: str, request: Request) -> Response:
+            if spa_path == "api" or spa_path.startswith("api/"):
+                # An unknown /api path is a bug, not a client-side route.
+                # Returning the HTML shell there would turn a typo'd endpoint
+                # into a 200 that no fetch() could parse.
+                raise HTTPException(404, "no such endpoint")
+            try:
+                return await static.get_response(spa_path or "index.html", request.scope)
+            except StarletteHTTPException as exc:
+                if exc.status_code != 404:
+                    raise
+                return FileResponse(index)
 
     return app
