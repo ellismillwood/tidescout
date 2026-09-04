@@ -105,20 +105,13 @@ export function ConditionsRail() {
             bite score · {species.replace(/_/g, " ")}
           </span>
         </p>
-        {scored && (
-          <p className="rail-disclosure" data-testid="rail-disclosure">
-            <span className="num">{percent(scored.confidence) ?? "—"}</span> of the authored
-            weight resolved · <span className="num">
-              {percent(scored.constrained_share) ?? "—"}
-            </span>{" "}
-            of that rests on an observation
-          </p>
-        )}
-        {scored && scored.excluded.length > 0 && (
-          <p className="rail-disclosure" data-testid="rail-excluded">
-            excluded from this hour: {scored.excluded.join(", ")}
-          </p>
-        )}
+        {/* The hour's confidence, constrained share, provisional factors and
+            excluded ones USED to be restated here as prose. They now live in
+            `ui/Disclosure`, which the top bar renders for this same hour --
+            one summary, in one idiom, instead of the same two numbers in two.
+            What stays in this column is the DETAIL the summary points at: the
+            factor bars below flag each provisional and each missing factor on
+            its own row, with the reason string verbatim. */}
       </header>
 
       <section className="rail-block">

@@ -92,74 +92,8 @@ body {
   font-variant-numeric: tabular-nums;
 }
 
-.margin-bar {
-  display: flex;
-  align-items: center;
-  gap: 22px;
-  padding: 0 16px;
-  block-size: 52px;
-  background: var(--ink-800);
-  border-block-end: 1px solid var(--rule);
-}
-
-.wordmark {
-  margin: 0;
-  font-size: 14px;
-  font-weight: 600;
-  letter-spacing: 0.3em;
-  text-transform: uppercase;
-  color: var(--paper);
-}
-
-.margin-bar .place {
-  display: flex;
-  align-items: baseline;
-  gap: 8px;
-  padding-inline-start: 22px;
-  border-inline-start: 1px solid var(--rule);
-}
-
-.margin-bar .fill {
-  flex: 1;
-}
-
-/* Temporary control (Task 12 replaces it with the real pickers).
-   Deliberately plain: it is scaffolding, and dressing it up would only make
-   it harder to throw away. The hour slider that stood beside it belonged to
-   Task 9's verification step and is now `HourStrip`. */
-.species {
-  display: flex;
-  gap: 1px;
-  padding: 1px;
-  background: var(--rule);
-  border-radius: 2px;
-}
-
-.species button {
-  padding: 5px 10px;
-  border: none;
-  background: var(--ink-700);
-  color: var(--paper-dim);
-  font: inherit;
-  font-size: 11.5px;
-  cursor: pointer;
-}
-
-.species button[aria-pressed="true"] {
-  background: var(--hot);
-  color: var(--ink-900);
-  font-weight: 600;
-}
-
-.species button:focus-visible {
-  outline: 2px solid var(--hot);
-  outline-offset: 2px;
-}
-
-.status {
-  font-size: 11.5px;
-  color: var(--paper-dim);
-}
-.status[data-tone="failed"] {
-  color: #ef8a3c;
-}
+/*
+ * The bar, the strip, the rail and the disclosure band each carry their own
+ * styles beside their component. What stays here is what more than one of
+ * them shares: the palette, the page grid, and the two text roles above.
+ */
