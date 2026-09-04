@@ -457,6 +457,92 @@ def _feature_scope_subs(subs) -> list[dict]:
     ]
 
 
+def _conditions_to_dict(hour) -> dict:
+    """The raw hourly values, for the right rail and the tide-curve underlay.
+
+    `_hour_to_dict` deliberately carries only scores and reasons; the raw
+    numbers survive nowhere else in the payload, so §9's rail and tide curve
+    have no source without this. Emitted ONCE at the top level rather than per
+    species: these are fishery-wide hour facts, and duplicating them across
+    three species would repeat the modelling error PR #11 corrected.
+    """
+    return {
+        "time": hour.time.isoformat(),
+        "air_temp_f": hour.air_temp_f,
+        "wind_speed_kn": hour.wind_speed_kn,
+        "wind_dir_deg": hour.wind_dir_deg,
+        "wind_gust_kn": hour.wind_gust_kn,
+        "pressure_mb": hour.pressure_mb,
+        "pressure_trend_mb_3h": hour.pressure_trend_mb_3h,
+        "cloud_cover_pct": hour.cloud_cover_pct,
+        "precip_in": hour.precip_in,
+        "tide_height_ft": hour.tide_height_ft,
+        "tide_phase": hour.tide_phase,
+        "tide_frac": hour.tide_frac,
+    }
+
+
+def _water_to_dict(water) -> dict | None:
+    """The day-level water-temperature summary, a sibling of `payload["salinity"]`
+    rather than a field inside it.
+
+    Spec §5 asks the rail to carry water temperature alongside air
+    temperature; `HourlyConditions` has no per-hour water reading (the
+    engine treats water temperature, like salinity, as a slow-moving DAY
+    fact rather than something that changes hour to hour), so this reads
+    `DayConditions.water` once instead.
+
+    Deliberately narrowed to `temp_f`/`temp_trend_f_3d` -- `salinity_ppt`,
+    `source` and `salinity_source` are withheld even though `WaterSummary`
+    carries them, because `payload["salinity"]` already publishes that same
+    reading WITH its provenance (MEASURED vs MODELLED, fitted, extrapolated
+    -- see `_bay_salinity_reading`). A second, provenance-free copy of the
+    same number here would give a reader two places to look for one fact
+    and no way to tell which one to trust if they ever disagreed.
+
+    `day_conditions.water` is `None` whenever no water sensor and no
+    climatology fallback produced a reading at all; returned as `None`
+    here too rather than raising, the same degrade-gracefully contract
+    every other optional source in this payload follows.
+    """
+    if water is None:
+        return None
+    return {"temp_f": water.temp_f, "temp_trend_f_3d": water.temp_trend_f_3d}
+
+
+def _astro_to_dict(sun, moon) -> dict:
+    """The day's sun and moon times, the other sibling spec §5 asks for
+    beside `payload["salinity"]` and `payload["water"]`.
+
+    `SunTimes` and `MoonInfo` are both computed once per DAY (see
+    `sources.astronomy`), never once per hour, so this reads
+    `DayConditions.sun`/`.moon` directly rather than being folded into
+    `_conditions_to_dict` -- publishing either in all 24 hourly rows would
+    repeat one day fact 24 times, the exact duplication this task's own
+    hour/day split exists to avoid (see the module docstring's "SALINITY: A
+    SERIES" section for the same reasoning applied to a genuinely hourly
+    value, which water/astro are not).
+
+    `sun` and `moon` can independently be `None` -- two different upstream
+    sources, wrapped in `dayloader.load_day`'s own single-dead-source
+    degrade-gracefully contract -- so each field is guarded on its own
+    source rather than assuming both arrived together. `moon.rise`/`.set`
+    are independently optional even when `moon` itself is present (a moon
+    that neither rises nor sets on a given calendar day is ephem's own
+    convention, not a bug here), so `moonrise`/`moonset` guard one level
+    deeper than `moon_phase_frac` does.
+    """
+    return {
+        "dawn": sun.dawn.isoformat() if sun else None,
+        "sunrise": sun.sunrise.isoformat() if sun else None,
+        "sunset": sun.sunset.isoformat() if sun else None,
+        "dusk": sun.dusk.isoformat() if sun else None,
+        "moon_phase_frac": moon.phase_frac if moon else None,
+        "moonrise": moon.rise.isoformat() if moon and moon.rise else None,
+        "moonset": moon.set.isoformat() if moon and moon.set else None,
+    }
+
+
 def _hour_to_dict(hour_time: datetime, combined) -> dict:
     return {
         "time": hour_time.isoformat(),
@@ -488,6 +574,25 @@ def _json_safe(obj):
     if isinstance(obj, float):
         return None if not math.isfinite(obj) else obj
     return obj
+
+
+def _regime_phase_axes(slug: str, mix) -> dict[str, list[float]]:
+    """Each mixed regime's phase axis, WITHOUT the closing duplicate.
+
+    The library stores a final snapshot at phase 1.0 recorded as 0.0, so
+    consecutive pairs span the cycle-closing gap. `flow.bracket_phases` wraps
+    the cycle itself and rejects the raw list as descending. Extracted from
+    `build_payload` so the overlay endpoints resolve the same axis the markers
+    were scored against.
+    """
+    axes: dict[str, list[float]] = {}
+    for name, _ in mix:
+        grid_path = fishery_data_dir(slug) / "flow" / name / "grid" / "grid.json"
+        stored = json.loads(grid_path.read_text())["phases"]
+        if len(stored) > 1 and stored[-1] == stored[0]:
+            stored = stored[:-1]
+        axes[name] = stored
+    return axes
 
 
 def _blended_state(slug: str, regime_phases: dict[str, list[float]], mix, phase: float) -> dict:
@@ -554,22 +659,7 @@ def build_payload(slug: str, day: date, model_label: str, cache) -> dict:
     if not flow_events_ok:
         missing.append("flow-library-phase")
 
-    regime_phases: dict[str, list[float]] = {}
-    for name, _ in mix:
-        grid_path = fishery_data_dir(slug) / "flow" / name / "grid" / "grid.json"
-        stored = json.loads(grid_path.read_text())["phases"]
-        # The library stores a closing snapshot at phase 1.0 (recorded as
-        # 0.0, the same value as the first) so every consecutive PAIR of
-        # snapshots on disk spans one interpolatable gap, cycle-closing gap
-        # included. `flow.bracket_phases` wraps the cycle itself (its own
-        # `ordered[(i + 1) % len(ordered)]`), so it wants the phase axis
-        # WITHOUT that duplicate -- fed the raw 26-entry list it sees
-        # 0.966 -> 0.0 as a DESCENDING step and raises. Dropping the closing
-        # duplicate loses no state: index 25's snapshot is bit-identical to
-        # index 0's (same phase, same simulated instant one cycle later).
-        if len(stored) > 1 and stored[-1] == stored[0]:
-            stored = stored[:-1]
-        regime_phases[name] = stored
+    regime_phases = _regime_phase_axes(slug, mix)
 
     try:
         distance_field = load_distance_field(slug)
@@ -739,6 +829,7 @@ def build_payload(slug: str, day: date, model_label: str, cache) -> dict:
         name: {"hours": species_hours[name], "features": species_features[name]}
         for name in species
     }
+    payload["conditions"] = [_conditions_to_dict(h) for h in day_conditions.hours]
 
     effective_cfs = max(float(bay_cfs), 1.0) if bay_cfs is not None else None
     # A DELIBERATE choice of hour, not whichever one a loop happened to
@@ -764,5 +855,11 @@ def build_payload(slug: str, day: date, model_label: str, cache) -> dict:
         "representative_hour": mid_reading["time"] if mid_reading else None,
         "provenance": mid_reading["provenance"] if mid_reading else None,
     }
+    # Day-level siblings of `salinity` above -- see `_water_to_dict`/
+    # `_astro_to_dict` for why these are day facts, not per-hour ones.
+    payload["water"] = _water_to_dict(getattr(day_conditions, "water", None))
+    payload["astro"] = _astro_to_dict(
+        getattr(day_conditions, "sun", None), getattr(day_conditions, "moon", None)
+    )
 
     return _json_safe(payload)

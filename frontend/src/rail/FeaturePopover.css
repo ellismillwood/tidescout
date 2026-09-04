@@ -1,0 +1,142 @@
+/*
+ * The marker popover: a raised card on the chart, anchored to the marker.
+ *
+ * It scrolls when it is taller than the chart. It never CLIPS: the reason
+ * strings inside it wrap in full and the card's own overflow is `auto`, so
+ * every word is reachable -- scrolling is not truncation.
+ */
+
+/* A zero-size anchor pinned to the marker's projected point; MapView keeps it
+   there as the map moves, and the card hangs off it. */
+.popover-anchor {
+  position: absolute;
+  inline-size: 0;
+  block-size: 0;
+  z-index: 4;
+}
+
+.popover {
+  position: absolute;
+  inline-size: min(330px, 78vw);
+  /* MapView measures the room between the marker and the chart's edge and
+     passes it in; the card never grows past it, so it can never be clipped by
+     `.map`'s overflow. It scrolls instead -- and scrolling is not truncation. */
+  max-block-size: min(var(--popover-room, 58svh), 520px);
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 11px 13px 13px;
+  background: var(--ink-700);
+  border: 1px solid var(--rule);
+  border-radius: 3px;
+  box-shadow: 0 10px 26px rgba(0, 0, 0, 0.5);
+  color: var(--paper-dim);
+}
+
+/* Placement, decided by MapView against the chart's box: the card flips
+   rather than hanging off the edge. */
+.popover-anchor[data-vertical="above"] .popover {
+  inset-block-end: 14px;
+}
+.popover-anchor[data-vertical="below"] .popover {
+  inset-block-start: 14px;
+}
+.popover-anchor[data-horizontal="center"] .popover {
+  inset-inline-start: 50%;
+  transform: translateX(-50%);
+}
+.popover-anchor[data-horizontal="start"] .popover {
+  inset-inline-start: -14px;
+}
+.popover-anchor[data-horizontal="end"] .popover {
+  inset-inline-end: -14px;
+}
+
+.popover-head {
+  display: grid;
+  grid-template-columns: 1fr auto auto;
+  align-items: start;
+  gap: 10px;
+  padding-block-end: 8px;
+  border-block-end: 1px solid var(--rule);
+}
+
+.popover-key {
+  margin: 3px 0 0;
+  font-size: 11px;
+  overflow-wrap: anywhere;
+}
+
+.popover-title .eyebrow {
+  text-transform: uppercase;
+}
+
+/* The one figure the card leads with. Proportional figures, not tabular: a
+   standalone display number is not a column. */
+.popover-activation {
+  display: flex;
+  flex-direction: column;
+  align-items: flex-end;
+  gap: 1px;
+  margin: 0;
+  text-align: end;
+}
+
+.popover-activation .num {
+  font-size: 26px;
+  line-height: 1;
+  font-variant-numeric: proportional-nums;
+  color: var(--paper);
+}
+
+.popover-unit {
+  font-size: 10px;
+  color: var(--paper-dim);
+}
+
+.popover-close {
+  padding: 0 5px;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  background: none;
+  color: var(--paper-dim);
+  font: inherit;
+  font-size: 14px;
+  line-height: 1.3;
+  cursor: pointer;
+}
+
+.popover-close:hover {
+  color: var(--paper);
+}
+
+.popover-close:focus-visible {
+  outline: 2px solid var(--hot);
+  outline-offset: 2px;
+}
+
+.popover-reason {
+  margin: 9px 0 0;
+  font-size: 11px;
+  line-height: 1.45;
+  color: var(--paper);
+  overflow-wrap: anywhere;
+}
+
+.popover-meta {
+  display: grid;
+  gap: 2px;
+  margin: 7px 0 11px;
+  font-size: 10.5px;
+}
+
+.popover-meta-item .num {
+  font-size: 10.5px;
+}
+
+.popover-note {
+  margin: 11px 0 0;
+  padding-block-start: 8px;
+  border-block-start: 1px solid var(--rule);
+  font-size: 10.5px;
+  line-height: 1.4;
+}

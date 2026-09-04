@@ -1,0 +1,250 @@
+/*
+ * The disclosure band: marginalia under the chart's title block.
+ *
+ * It sits on the PAGE colour rather than the bar's panel colour, one step
+ * back from the controls above it, because that is what it is -- the note in
+ * the margin of a chart, set small, that says how the survey was made.
+ *
+ * NO NEW HUE ENTERS THE PALETTE HERE, and that is a decision rather than an
+ * omission. The one warm colour in this interface means "the fish are here",
+ * and a disclosure that borrowed it would be competing with the map for the
+ * same signal. Every mark below is the ink/paper duotone the chrome already
+ * uses -- so the three states are told apart by TEXTURE, not colour. They
+ * survive greyscale and CVD as drawn, and forced-colors through the
+ * `@media (forced-colors: active)` block at the foot of this file, which
+ * restates them as border styles because that mode strips background images:
+ *
+ *   solid   measured
+ *   weave   modelled (45deg, the same weave FactorBars gives a provisional
+ *           factor and the strip gives a partly resolved hour)
+ *   void    no reading -- an absence is drawn as an absence, never as a
+ *           zero-length bar, which would be the different claim "scored, and
+ *           the answer is zero"
+ */
+
+.disclosure {
+  --disc-solid: rgba(233, 227, 212, 0.62); /* chart paper: a measured share */
+  --disc-weave: rgba(150, 166, 178, 0.55); /* = --ghost's hue: modelled */
+
+  display: flex;
+  flex-wrap: wrap;
+  align-items: stretch;
+  padding: 8px 16px 9px;
+  background: var(--ink-900);
+  border-block-end: 1px solid var(--rule);
+}
+
+/* Names WHOSE hour these three numbers describe. Without it the band reads
+   as a day-level statement, which two of the four signals are not. */
+.disc-eyebrow {
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  gap: 3px;
+  padding-inline-end: 16px;
+  line-height: 1.2;
+}
+
+.disc-eyebrow .num {
+  font-size: 13px;
+  letter-spacing: 0;
+}
+
+.disc-cell {
+  min-inline-size: 142px;
+  padding-inline: 16px;
+  border-inline-start: 1px solid var(--rule);
+}
+
+.disc-cell[data-signal="provisional"] {
+  min-inline-size: 176px;
+}
+
+.disc-label {
+  margin: 0;
+  font-size: 10px;
+  font-weight: 600;
+  letter-spacing: 0.14em;
+  text-transform: uppercase;
+  color: var(--paper-dim);
+}
+
+/* The value leads, the label follows -- both numbers are on the same 0..1
+   scale, set in the mono face the way soundings are, so the two can be
+   compared at a glance and still never be mistaken for one number. */
+.disc-value {
+  margin: 3px 0 0;
+  font-family: var(--data);
+  font-variant-numeric: tabular-nums;
+  font-size: 14px;
+  color: var(--paper);
+}
+
+.disc-note {
+  margin: 5px 0 0;
+  max-inline-size: 27ch;
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--paper-dim);
+}
+
+.disc-names {
+  margin: 2px 0 0;
+  max-inline-size: 27ch;
+  font-size: 10px;
+  line-height: 1.35;
+  color: var(--paper-dim);
+}
+
+/* The two meters. Same geometry on purpose: the difference between them is
+   what the UNFILLED part is made of, and putting them side by side in the
+   same form is what makes that difference legible. */
+.disc-share {
+  display: block;
+  inline-size: 100%;
+  max-inline-size: 132px;
+  block-size: 5px;
+  margin-block-start: 6px;
+  border-radius: 2px;
+  overflow: hidden;
+}
+
+/* Confidence: the weight that did not resolve produced no reading at all. */
+.disc-share[data-rest="void"] {
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(150, 166, 178, 0.34) 0 1px,
+    rgba(0, 0, 0, 0) 1px 4px
+  );
+}
+
+/* Constrained share: the remainder IS scored -- at full weight -- off a
+   model. The weave says "there, but modelled". */
+.disc-share[data-rest="weave"] {
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--disc-weave) 0 2px,
+    rgba(0, 0, 0, 0) 2px 5px
+  );
+}
+
+.disc-share-fill {
+  display: block;
+  block-size: 100%;
+  background: var(--disc-solid);
+  border-radius: 2px;
+}
+
+/* Provisional factors, named. Each chip wears the weave under its name, so
+   the mark and the word arrive together. */
+.disc-chips {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px;
+  font-size: 11.5px;
+}
+
+.disc-chip {
+  padding: 2px 8px 3px;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  /* The weave, at a whisper: the chip has to stay READABLE, and the mark is
+     doing its real work in the meter above. Measured in the running app at
+     0.55 the stripes fought the word they were labelling. */
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(150, 166, 178, 0.22) 0 1px,
+    rgba(0, 0, 0, 0) 1px 7px
+  );
+  font-family: var(--ui);
+  font-size: 11px;
+  color: var(--paper);
+}
+
+.disc-none {
+  font-family: var(--ui);
+  font-size: 12px;
+  color: var(--paper-dim);
+}
+
+/*
+ * The flag: one sentence, naming the thing. It only exists when something is
+ * actually short -- see the tone rule in Disclosure.tsx -- so it is set in
+ * full paper rather than dimmed, and it does not shout.
+ */
+.disc-flag {
+  flex: 1 1 240px;
+  align-self: center;
+  margin: 0;
+  padding-inline-start: 16px;
+  border-inline-start: 1px solid var(--rule);
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--paper);
+  overflow-wrap: anywhere;
+}
+
+/* Under ~900px the band wraps rather than squeezing the cells; the leading
+   hairline would then land at the start of a wrapped row, so it is dropped
+   there and the row gap carries the separation instead. */
+@media (max-width: 900px) {
+  .disclosure {
+    gap: 8px 0;
+  }
+
+  .disc-flag {
+    padding-inline-start: 0;
+    border-inline-start: none;
+  }
+}
+
+/*
+ * FORCED COLORS: where the weave's claim is actually kept.
+ *
+ * Every mark above is a `background-image`, and forced-colors mode STRIPS
+ * background images -- so without this block the three states collapse into
+ * one flat shape and the file's own claim at the top ("they survive
+ * greyscale, CVD and forced-colors") is false. It cannot be papered over
+ * with colour either: this component deliberately spends none, so there is
+ * no second channel to fall back on.
+ *
+ * Borders are what survives. The UA forces a border's COLOUR and leaves its
+ * STYLE alone, so the same three states are redrawn as three border styles,
+ * in the same order a reader already learnt them:
+ *
+ *   solid   measured
+ *   dashed  modelled -- the weave
+ *   dotted  no reading -- the void
+ *
+ * System colour keywords (`CanvasText`) rather than the palette above: in
+ * this mode the reader's own colours are the point, and `forced-color-adjust`
+ * is deliberately NOT used -- overriding a person's high-contrast choice is
+ * the failure this whole block exists to avoid.
+ */
+@media (forced-colors: active) {
+  .disc-share {
+    /* 5px of track with a border on both edges leaves nothing between. */
+    block-size: 7px;
+    border: 1px solid CanvasText;
+  }
+
+  /* What the UNFILLED part means -- the one thing the two meters differ on. */
+  .disc-share[data-rest="void"] {
+    border-style: dotted;
+  }
+
+  .disc-share[data-rest="weave"] {
+    border-style: dashed;
+  }
+
+  /* Forced colors flattens this to the canvas, which would erase the share
+     the meter exists to draw. */
+  .disc-share-fill {
+    background: CanvasText;
+  }
+
+  /* A provisional factor's chip keeps its mark: dashed is the weave. */
+  .disc-chip {
+    border-style: dashed;
+  }
+}

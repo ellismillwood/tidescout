@@ -583,7 +583,7 @@ def artifacts(slug: str) -> None:
         console.print(f"{name}: {path} ({path.stat().st_size:,} bytes)")
 
     from tidescout.paths import fishery_data_dir
-    from tidescout.pipeline.webartifacts import hillshade_png, simplify_oysters
+    from tidescout.pipeline.webartifacts import depth_tint_png, hillshade_png, simplify_oysters
 
     d = fishery_data_dir(slug)
     if (d / "oyster_reefs.geojson").exists():
@@ -596,6 +596,9 @@ def artifacts(slug: str) -> None:
             d / "hillshade.tif", d / "hillshade.png", d / "hillshade.bounds.json"
         )
         console.print(f"hillshade: {meta['width']}x{meta['height']} png + bounds")
+    if (d / "bathy_utm.tif").exists():
+        meta = depth_tint_png(d / "bathy_utm.tif", d / "depth_tint.png")
+        console.print(f"depth tint: {meta['width']}x{meta['height']} rgba png")
 
 
 @bathy_app.command("wetlands")
