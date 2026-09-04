@@ -264,3 +264,33 @@ def test_every_api_route_still_resolves_with_the_spa_catch_all_registered(
     shell = client.get("/some/unknown/client-route")
     assert shell.status_code == 200, shell.text
     assert "TideScout" in shell.text
+
+
+def test_no_api_route_is_registered_below_the_spa_catch_all(dist):
+    """The STRUCTURAL half of the test above, which lists six paths by hand.
+
+    That behavioural test is correct today and will stay correct for exactly
+    the six routes it names -- and the defect it guards was CAUSED by a
+    seventh route being added below the catch-all. A test that can only see
+    the routes someone remembered to add to it cannot see the next one; the
+    only other protection is a prose comment in `app.py`, and prose is what
+    failed the first time.
+
+    This asserts the property itself, over whatever `app.routes` actually
+    holds: nothing matching `/api` may appear after `/{spa_path:path}`.
+    Starlette matches in registration order, so a later `/api` route is
+    unreachable -- it answers with the catch-all's `no such endpoint`.
+
+    Built WITH `frontend_dist`, because the catch-all only registers when the
+    dist directory exists; without it there is no catch-all to be below.
+    """
+    app = create_app(coordinator=_FakeCoordinator(), frontend_dist=dist)
+    paths = [r.path for r in app.routes]
+    assert "/{spa_path:path}" in paths, f"the catch-all did not register: {paths}"
+    spa = paths.index("/{spa_path:path}")
+    shadowed = [p for i, p in enumerate(paths) if p.startswith("/api") and i > spa]
+    assert not shadowed, f"registered below the SPA catch-all, so unreachable: {shadowed}"
+    # ...and the invariant is not passing vacuously on an app with no API
+    # routes at all, which is the one way "nothing after the catch-all" is
+    # trivially true.
+    assert len([p for p in paths if p.startswith("/api")]) >= 6, paths

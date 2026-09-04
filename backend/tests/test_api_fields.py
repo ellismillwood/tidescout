@@ -3,6 +3,20 @@
 import dataclasses
 from datetime import date
 
+# The WHOLE top-level key set of a day payload, not a floor. `frontend/
+# fixtures/day-payload.json` is a frozen recording and `frontend/tests/
+# contract.test.ts` asserts exact key sets against it -- so a field added to
+# `build_payload` after that recording is invisible to the frontend suite and,
+# with a subset check here, invisible to this one too. It would pass ruff, all
+# 935 backend tests and all 108 frontend tests while the UI silently ignored
+# it. Equality is what makes adding a field a deliberate edit to a Python
+# constant, at which point RE-RECORDING the fixture is the next step (the
+# frontend contract test fails against the old recording until it is).
+PAYLOAD_KEYS = {
+    "slug", "day", "model_label", "missing", "freshness", "sub_scope",
+    "flow", "species", "conditions", "salinity", "water", "astro",
+}
+
 CONDITION_KEYS = {
     "time", "air_temp_f", "wind_speed_kn", "wind_dir_deg", "wind_gust_kn",
     "pressure_mb", "pressure_trend_mb_3h", "cloud_cover_pct", "precip_in",
@@ -52,10 +66,41 @@ def test_every_hour_carries_the_keys_the_rail_and_tide_curve_need(synthetic_day)
 
     p = build_payload(**synthetic_day)
     for row in p["conditions"]:
-        assert CONDITION_KEYS <= set(row), sorted(CONDITION_KEYS - set(row))
+        # EQUALITY, not `<=`. A subset check answers "does the UI have what it
+        # needs" and says nothing about drift the other way -- a new key in
+        # `_conditions_to_dict` passes it while the frozen frontend fixture
+        # (and so the frontend's own exact-key contract test) never sees the
+        # field at all.
+        assert set(row) == CONDITION_KEYS, {
+            "extra": sorted(set(row) - CONDITION_KEYS),
+            "missing": sorted(CONDITION_KEYS - set(row)),
+        }
     for key in REAL_EVERY_HOUR:
         values = [r[key] for r in p["conditions"]]
         assert all(v is not None for v in values), f"{key} has a null hour: {values}"
+
+
+def test_the_payload_carries_exactly_the_top_level_keys_the_client_declares(
+    synthetic_day,
+):
+    """The backend half of `frontend/tests/contract.test.ts`'s top-level
+    assertion, which can only see the frozen fixture.
+
+    Spec §2 claims "a new field in the payload fails that test rather than
+    being silently ignored by the UI". That is only true if a check on THIS
+    side sees the live `build_payload` output, because the frontend's copy is
+    a recording: without this, adding a key to the payload is a silent,
+    green-suite no-op for the UI. With it, the field cannot ship without
+    someone editing `PAYLOAD_KEYS`, `frontend/src/api/types.ts`, that test's
+    `TOP_LEVEL`, and re-recording `frontend/fixtures/day-payload.json`.
+    """
+    from tidescout.pipeline.payload import build_payload
+
+    p = build_payload(**synthetic_day)
+    assert set(p) == PAYLOAD_KEYS, {
+        "extra": sorted(set(p) - PAYLOAD_KEYS),
+        "missing": sorted(PAYLOAD_KEYS - set(p)),
+    }
 
 
 def test_conditions_are_positionally_aligned_with_the_species_hours(synthetic_day):
