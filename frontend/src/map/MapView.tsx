@@ -12,7 +12,7 @@
  * person to wonder why the water is flat.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
-import type { CSSProperties } from "react";
+import type { CSSProperties, ReactNode } from "react";
 
 import {
   MapLibreMap,
@@ -41,6 +41,19 @@ import {
   radiusExpr,
   UNSCORED_COLOR,
 } from "./layers";
+import {
+  arrowCollection,
+  classRange,
+  fetchFlowVectors,
+  fetchSalinityField,
+  KNOTS_PER_MS,
+  REFERENCE_SPEED_MS,
+  SALINITY_CLASS_COUNT,
+  SALINITY_CLASS_PPT,
+  useOverlay,
+  type Overlay,
+  type SalinitySection,
+} from "./overlays";
 import "./MapView.css";
 
 /**
@@ -75,18 +88,40 @@ const CONTOURS = "contours";
 const CONTOUR_LABELS = "contour-labels";
 const OYSTERS = "oyster-reefs";
 const MARKER_SOURCE = "marker-points";
+const FLOW_SOURCE = "flow-field";
+const FLOW_CASING = "flow-arrows-casing";
+const FLOW_ARROWS = "flow-arrows";
 
 /**
  * Bottom to top. `addInOrder` inserts a layer before the lowest layer already
  * present that belongs above it, so a slow fetch cannot land its layer on top
  * of one that should cover it.
  *
- * Between the oysters and the markers sit spec §4.1's slots 6 (salinity
- * field) and 7 (flow arrows). They are Task 13's, and they are left empty
- * here rather than stubbed -- an id in this array with no layer behind it
- * would be a promise this task cannot keep.
+ * Slot 7, the flow arrows, sits between the oysters and the markers, and it
+ * is two layers rather than one: a dark casing under a pale shaft. The tint
+ * beneath ramps pale cyan (198,232,240) in the shallows to deep navy
+ * (18,62,128) in the channel, so ONE ink cannot carry the field -- a pale
+ * arrow vanishes on the flats and a dark one vanishes in the deep. The casing
+ * is what a paper chart does when it prints over its own soundings.
+ *
+ * Spec §4.1's slot 6, the salinity field, is deliberately NOT here. It has no
+ * geometry to be a map layer with: the endpoint bins by along-estuary
+ * distance and the distance field is not on the layer allowlist, so painting
+ * it onto the water would mean inventing an estuary axis on the client and
+ * tinting the bay with it. That is the discounting-by-overclaiming spec §1.1
+ * forbids, applied to a model that is already falsified. It renders as a
+ * section inset in the chart's margin instead -- see `SalinityInset`.
  */
-const STACK = [DEPTH_TINT, HILLSHADE, CONTOURS, CONTOUR_LABELS, OYSTERS, MARKER_LAYER_ID];
+const STACK = [
+  DEPTH_TINT,
+  HILLSHADE,
+  CONTOURS,
+  CONTOUR_LABELS,
+  OYSTERS,
+  FLOW_CASING,
+  FLOW_ARROWS,
+  MARKER_LAYER_ID,
+];
 
 const IMAGE_LAYERS = [
   [DEPTH_TINT, { "raster-opacity": 0.82, "raster-fade-duration": 0 }],
@@ -178,6 +213,34 @@ type Anchor = {
   /** How tall the card may be before it would run out of chart to sit in. */
   room: number;
 };
+
+/**
+ * The current arrows, in the chart's own ink.
+ *
+ * NO COLOUR RAMP. `layers.ts` spends the entire hue channel on activation --
+ * "nothing in this palette but a marker is magenta or gold" -- and a
+ * second ramp beside it would make the chart ask which colour meant what.
+ * Speed rides on length and line width instead, both of which the reference
+ * arrow in the overlay panel gives a scale for.
+ */
+const ARROW_INK = "rgba(236,231,218,0.88)";
+const ARROW_CASING = "rgba(6,19,28,0.72)";
+
+/** Width from speed, at the same reference the arrow's length uses. */
+const arrowWidth = (extra: number): ExpressionSpecification =>
+  [
+    "interpolate",
+    ["linear"],
+    ["get", "speed"],
+    0,
+    0.55 + extra,
+    REFERENCE_SPEED_MS,
+    1.5 + extra,
+  ] as ExpressionSpecification;
+
+/** Dimmed while a later hour is in flight, so stale arrows never look current. */
+const ARROW_OPACITY = 0.92;
+const ARROW_OPACITY_STALE = 0.4;
 
 /** Half the popover's width plus its offset -- the edge it must not cross. */
 const POPOVER_MARGIN = 190;
@@ -273,8 +336,149 @@ function addInOrder(map: MapLibreMap, layer: Parameters<MapLibreMap["addLayer"]>
   map.addLayer(layer, above);
 }
 
+/**
+ * The reference arrow. Length means speed, so the key has to draw one at full
+ * length and say what full length is -- otherwise the field is a direction
+ * map with a decorative second variable.
+ */
+function ArrowScale() {
+  return (
+    <p className="ov-scale">
+      <svg viewBox="0 0 46 10" aria-hidden="true" focusable="false">
+        <path d="M2 5 H41 M33.6 1.4 L41 5 L33.6 8.6" />
+      </svg>
+      <span className="num">{(REFERENCE_SPEED_MS * KNOTS_PER_MS).toFixed(1)} kn</span>
+      <span>or faster, at full length</span>
+    </p>
+  );
+}
+
+/** What the section says about itself under the badge. Never empty. */
+function salinityNote(section: SalinitySection): string {
+  if (!section.fitted) {
+    return "The model behind this is unfitted: no observation constrains it, at any distance.";
+  }
+  if (section.extrapolated) {
+    return "Today's discharge sits outside the range this model was fit over.";
+  }
+  return "Modelled from today's discharge and the tide phase of this hour.";
+}
+
+/**
+ * The salinity field, as a section through the estuary.
+ *
+ * Spec §1.1 is "flagged, not discounted", and both halves of that are load
+ * bearing. It IS drawn. And every choice in this drawing exists so that it
+ * cannot be read as measurement:
+ *
+ *   - It is a SECTION, not a tint on the water. The endpoint returns one
+ *     value per kilometre of along-estuary distance, which is a curve, not a
+ *     field; painting it over the bay would need a distance field the client
+ *     does not have and would claim a two-dimensional structure the model
+ *     never produced.
+ *   - It is STEPPED, into 2.5 ppt classes, and the steps are the only heights
+ *     available -- `SalinityBand` carries an integer class and no ppt, so
+ *     there is nothing here to draw a smooth curve or a crisp isoline from.
+ *     See the header of `overlays.ts`.
+ *   - It wears the WEAVE this app already uses for "modelled, nothing
+ *     observed constrains it" (FactorBars, the strip, the disclosure band), so
+ *     a reader who has learnt the mark once reads it here without being told.
+ *   - The badge is PERMANENT. It is a required field of the section, typed as
+ *     a union of three non-empty literals, so no state of this component
+ *     renders without one.
+ */
+export function SalinityInset({
+  section,
+  busy = false,
+}: {
+  section: SalinitySection;
+  busy?: boolean;
+}) {
+  let peak = 0;
+  for (const band of section.bands) if (band.klass > peak) peak = band.klass;
+  const [saltLow, saltHigh] = classRange(peak);
+  return (
+    <figure
+      className="sal"
+      data-testid="salinity-section"
+      data-busy={busy}
+      data-fitted={section.fitted}
+      aria-busy={busy}
+    >
+      <figcaption>
+        <span className="eyebrow">Salinity section</span>
+        <span className="sal-badge" data-testid="salinity-badge">
+          {section.badge}
+        </span>
+      </figcaption>
+      <div
+        className="sal-plot"
+        role="img"
+        aria-label={
+          `Modelled salinity along ${Math.round(section.kmMax - section.kmMin)} km of ` +
+          `estuary, stepped into ${SALINITY_CLASS_PPT} ppt classes. The saltiest class ` +
+          `reached is ${saltLow} to ${saltHigh} ppt. ${section.badge}.`
+        }
+        style={{ "--sal-classes": SALINITY_CLASS_COUNT } as CSSProperties}
+      >
+        {section.bands.map((band) => (
+          <span
+            key={band.km}
+            className="sal-band"
+            data-klass={band.klass}
+            style={{ "--klass": band.klass } as CSSProperties}
+          />
+        ))}
+      </div>
+      <p className="sal-axis">
+        <span>{Math.round(section.kmMin)} km · mouth</span>
+        <span>{Math.round(section.kmMax)} km · head</span>
+      </p>
+      <p className="sal-note">
+        Each step is a {SALINITY_CLASS_PPT} ppt class, not a value, and no contour is
+        drawn through them. {salinityNote(section)}
+      </p>
+    </figure>
+  );
+}
+
+/** One overlay's row: its switch, what it is doing, and why it stopped. */
+function OverlayRow({
+  overlay,
+  name,
+  children,
+}: {
+  overlay: Overlay<unknown>;
+  name: string;
+  children?: ReactNode;
+}) {
+  const testId = name.toLowerCase().replace(/\s+/g, "-");
+  return (
+    <div className="ov-row">
+      <label className="ov-switch">
+        <input
+          type="checkbox"
+          checked={overlay.on}
+          data-testid={`toggle-${testId}`}
+          onChange={(event) => overlay.enable(event.target.checked)}
+        />
+        <span className="ov-name">{name}</span>
+        <span className="ov-state num" aria-hidden={!overlay.busy}>
+          {overlay.busy ? "…" : ""}
+        </span>
+      </label>
+      {overlay.on && children}
+      {overlay.error && (
+        <p className="ov-error" role="status" data-testid={`error-${testId}`}>
+          {name} did not load — {overlay.error}. Switch it back on to try again.
+        </p>
+      )}
+    </div>
+  );
+}
+
 export function MapView() {
-  const { slug, payload, state, species, hour } = useDay();
+  const { slug, payload, state, species, hour, date, model } = useDay();
   const containerRef = useRef<HTMLDivElement | null>(null);
   const mapRef = useRef<MapLibreMap | null>(null);
   // The join runs on payload arrival, not on a scrub, so it cannot take the
@@ -288,6 +492,16 @@ export function MapView() {
   const [revealed, setRevealed] = useState(false);
   const [picked, setPicked] = useState<Picked | null>(null);
   const [anchor, setAnchor] = useState<Anchor | null>(null);
+
+  /**
+   * The two optional overlays. Both off on mount, both per-hour, and both
+   * debounced -- the ONE place in this app where a scrub reaches the network.
+   * `useOverlay` owns the toggle as well as the fetch, so a failure reverts
+   * its own switch and the chart under it is never touched.
+   */
+  const request = { slug, date, hour, model };
+  const flow = useOverlay(fetchFlowVectors, request);
+  const salinity = useOverlay(fetchSalinityField, request);
 
   useEffect(() => {
     selectionRef.current = { species, hour };
@@ -633,6 +847,56 @@ export function MapView() {
     );
   }, [species, hour]);
 
+  // --- slot 7: the current arrows ------------------------------------------
+  // Adds on first arrival, `setData`s on every later hour, and REMOVES itself
+  // when the toggle goes off or a fetch fails. Removing the layer and its
+  // source rather than hiding them is what makes "toggling it off restores the
+  // base map" true of the map's own state and not just of what is on screen.
+  useEffect(() => {
+    if (!ready) return;
+    const field = flow.data;
+    if (!field) {
+      if (ready.getLayer(FLOW_ARROWS)) ready.removeLayer(FLOW_ARROWS);
+      if (ready.getLayer(FLOW_CASING)) ready.removeLayer(FLOW_CASING);
+      if (ready.getSource(FLOW_SOURCE)) ready.removeSource(FLOW_SOURCE);
+      return;
+    }
+    const arrows = arrowCollection(field) as unknown as SourceData;
+    const source = ready.getSource(FLOW_SOURCE) as GeoJSONSource | undefined;
+    if (source) {
+      source.setData(arrows);
+      return;
+    }
+    ready.addSource(FLOW_SOURCE, { type: "geojson", data: arrows });
+    for (const [id, colour, extra] of [
+      [FLOW_CASING, ARROW_CASING, 1.1],
+      [FLOW_ARROWS, ARROW_INK, 0],
+    ] as const) {
+      addInOrder(ready, {
+        id,
+        type: "line",
+        source: FLOW_SOURCE,
+        layout: { "line-cap": "round", "line-join": "round" },
+        paint: {
+          "line-color": colour,
+          "line-width": arrowWidth(extra),
+          "line-opacity": ARROW_OPACITY,
+        },
+      });
+    }
+  }, [ready, flow.data]);
+
+  // Stale arrows are dimmed rather than dropped: during a drag the previous
+  // hour's field is the best answer available, and blanking the layer for
+  // 220 ms would strobe. Dimming says "this is not the hour you are on" while
+  // keeping the shape of the channel visible.
+  useEffect(() => {
+    if (!ready || !ready.getLayer(FLOW_ARROWS)) return;
+    const opacity = flow.busy ? ARROW_OPACITY_STALE : ARROW_OPACITY;
+    ready.setPaintProperty(FLOW_ARROWS, "line-opacity", opacity);
+    ready.setPaintProperty(FLOW_CASING, "line-opacity", opacity);
+  }, [ready, flow.busy, flow.data]);
+
   // --- the popover's anchor: reprojected on every map move ------------------
   // The card is a DOM overlay, so nothing keeps it over its marker while the
   // map pans or zooms except projecting the marker's lng/lat again. Closing
@@ -712,6 +976,15 @@ export function MapView() {
           <FeaturePopover featureKey={picked.key} onClose={() => setPicked(null)} />
         </div>
       )}
+      <div className="overlays" data-testid="overlays">
+        <p className="eyebrow">Overlays</p>
+        <OverlayRow overlay={flow} name="Current arrows">
+          <ArrowScale />
+        </OverlayRow>
+        <OverlayRow overlay={salinity} name="Salinity section">
+          {salinity.data && <SalinityInset section={salinity.data} busy={salinity.busy} />}
+        </OverlayRow>
+      </div>
       <figure className="key" data-testid="map-key">
         <figcaption className="eyebrow">
           Activation
