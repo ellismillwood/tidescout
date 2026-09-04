@@ -12,6 +12,7 @@
  * person to wonder why the water is flat.
  */
 import { useEffect, useMemo, useRef, useState } from "react";
+import type { CSSProperties } from "react";
 
 import {
   MapLibreMap,
@@ -29,6 +30,7 @@ import type {
 import "maplibre-gl/dist/maplibre-gl.css";
 
 import { layerUrl } from "../api/client";
+import { FeaturePopover } from "../rail/FeaturePopover";
 import { useDay } from "../state/DayContext";
 import { activationKey, joinActivations } from "./join";
 import { ACTIVE_BASEMAP } from "./basemap";
@@ -160,6 +162,30 @@ type MarkerFeature = {
 };
 type MarkerCollection = { type: "FeatureCollection"; features: MarkerFeature[] };
 
+/** The marker a click picked, kept in map coordinates so it can be reprojected. */
+type Picked = { key: string; lng: number; lat: number };
+
+/**
+ * Where the popover hangs off that marker, in pixels, plus which way it
+ * flips. `.map` clips its overflow, so a card anchored near an edge has to
+ * flip rather than hang off it.
+ */
+type Anchor = {
+  x: number;
+  y: number;
+  vertical: "above" | "below";
+  horizontal: "start" | "center" | "end";
+  /** How tall the card may be before it would run out of chart to sit in. */
+  room: number;
+};
+
+/** Half the popover's width plus its offset -- the edge it must not cross. */
+const POPOVER_MARGIN = 190;
+/** The gap between the marker and the card, and between the card and the edge. */
+const POPOVER_GAP = 14;
+/** Below this the card is not worth flipping for -- it scrolls instead. */
+const POPOVER_MIN = 190;
+
 /** Every [lng, lat] pair in a geometry, at any nesting depth. */
 function positions(coords: unknown, out: Position[]): void {
   if (!Array.isArray(coords)) return;
@@ -260,6 +286,8 @@ export function MapView() {
   const [degraded, setDegraded] = useState<string[]>([]);
   const [unsupported, setUnsupported] = useState<string | null>(null);
   const [revealed, setRevealed] = useState(false);
+  const [picked, setPicked] = useState<Picked | null>(null);
+  const [anchor, setAnchor] = useState<Anchor | null>(null);
 
   useEffect(() => {
     selectionRef.current = { species, hour };
@@ -483,6 +511,9 @@ export function MapView() {
       setRevealed(false);
       setDegraded([]);
       setGeojson(null);
+      // A popover keyed to a feature of the OLD fishery would outlive its
+      // payload and read as a feature of the new one.
+      setPicked(null);
       map.remove();
       for (const objectUrl of objectUrls) URL.revokeObjectURL(objectUrl);
     };
@@ -530,6 +561,35 @@ export function MapView() {
     ready.on("mouseleave", MARKER_LAYER_ID, () => {
       canvas.style.cursor = "";
     });
+
+    /**
+     * The click that opens the popover.
+     *
+     * ONE handler on the map, querying the marker layer itself, rather than a
+     * layer-scoped `on("click", MARKER_LAYER_ID, ...)` plus a second one for
+     * "clicked the water": both fire for a click on a marker, and the pair
+     * would open the popover and immediately close it depending on the order
+     * MapLibre happens to dispatch them.
+     */
+    ready.on("click", (event) => {
+      const hit = ready.queryRenderedFeatures(event.point, {
+        layers: [MARKER_LAYER_ID],
+      })[0];
+      if (!hit) {
+        setPicked(null);
+        return;
+      }
+      // `key` is the join key copied into properties by `toMarkerPoints` --
+      // MapLibre does not hand a non-numeric feature id back through a query.
+      const key = hit.properties?.["key"];
+      const coords = (hit.geometry as { coordinates?: unknown }).coordinates;
+      if (typeof key !== "string" || !Array.isArray(coords)) return;
+      const [lng, lat] = coords;
+      if (typeof lng !== "number" || typeof lat !== "number") return;
+      // The marker's own point, not the click point: the card stays pinned to
+      // the feature rather than to wherever the pointer happened to land.
+      setPicked({ key, lng, lat });
+    });
     // DO NOT ADD `species` OR `hour` TO THIS ARRAY. This effect re-joins
     // 2,162 features and rebuilds the whole marker source; running it on a
     // scrub tick is the single cost this design exists to avoid (measured:
@@ -573,6 +633,48 @@ export function MapView() {
     );
   }, [species, hour]);
 
+  // --- the popover's anchor: reprojected on every map move ------------------
+  // The card is a DOM overlay, so nothing keeps it over its marker while the
+  // map pans or zooms except projecting the marker's lng/lat again. Closing
+  // the popover on the first pan would be the cheaper answer and the wrong
+  // one: comparing two features means moving between them.
+  useEffect(() => {
+    if (!ready || !picked) {
+      setAnchor(null);
+      return;
+    }
+    const update = () => {
+      const point = ready.project([picked.lng, picked.lat]);
+      const box = ready.getContainer();
+      // `.map` clips its overflow, so the card takes whichever side of the
+      // marker has more room AND is told how much room that is. Choosing the
+      // side by a fixed fraction of the height (the first version of this)
+      // put a 520px card in 438px of space and the chart quietly ate its
+      // header -- measured in the running app.
+      const above = point.y - POPOVER_GAP * 2;
+      const below = box.clientHeight - point.y - POPOVER_GAP * 2;
+      setAnchor({
+        x: point.x,
+        y: point.y,
+        vertical: above >= below ? "above" : "below",
+        room: Math.max(Math.max(above, below), POPOVER_MIN),
+        horizontal:
+          point.x < POPOVER_MARGIN
+            ? "start"
+            : point.x > box.clientWidth - POPOVER_MARGIN
+              ? "end"
+              : "center",
+      });
+    };
+    update();
+    ready.on("move", update);
+    ready.on("resize", update);
+    return () => {
+      ready.off("move", update);
+      ready.off("resize", update);
+    };
+  }, [ready, picked]);
+
   const counts = useMemo(() => {
     const total = geojson?.features.length ?? 0;
     const block = species ? payload?.species[species] : undefined;
@@ -594,6 +696,22 @@ export function MapView() {
   return (
     <div className="map" data-testid="map">
       <div className="map-canvas" ref={containerRef} data-revealed={revealed} />
+      {picked && anchor && (
+        <div
+          className="popover-anchor"
+          data-testid="popover-anchor"
+          data-vertical={anchor.vertical}
+          data-horizontal={anchor.horizontal}
+          style={{
+            insetInlineStart: `${anchor.x}px`,
+            insetBlockStart: `${anchor.y}px`,
+            // The card reads this as its ceiling; past it, it scrolls.
+            "--popover-room": `${Math.round(anchor.room)}px`,
+          } as CSSProperties}
+        >
+          <FeaturePopover featureKey={picked.key} onClose={() => setPicked(null)} />
+        </div>
+      )}
       <figure className="key" data-testid="map-key">
         <figcaption className="eyebrow">
           Activation

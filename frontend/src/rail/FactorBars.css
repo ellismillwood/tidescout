@@ -1,0 +1,142 @@
+/*
+ * The factor bars. One hue, a meter track, and a texture that means
+ * "modelled, not measured" -- see the block comment in FactorBars.tsx for the
+ * two `validate_palette.js` runs behind the colour.
+ *
+ * Scoped to `.factors` rather than `:root` so the same chart renders on both
+ * surfaces it appears on (the rail panel and the raised popover) without
+ * either of them having to know the chart's tokens.
+ */
+
+.factors-group + .factors-group {
+  margin-block-start: 14px;
+}
+
+.factors-caption {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin-block-end: 7px;
+}
+
+.factors-count {
+  font-size: 10px;
+  letter-spacing: 0;
+}
+
+.factors-empty {
+  margin: 0;
+  font-size: 11.5px;
+  color: var(--paper-dim);
+}
+
+.factors {
+  --factor-bar: #b8822f; /* = the hour strip's score hue: these are its parts */
+  --factor-track: color-mix(in srgb, var(--factor-bar) 16%, transparent);
+
+  margin: 0;
+  padding: 0;
+  list-style: none;
+  display: grid;
+  /* Measured in the running app: at 11px a reason sat closer to the NEXT
+     factor's name than to the bar it explains. The gap between rows has to
+     beat the gap inside one. */
+  gap: 16px;
+}
+
+.factor-head {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 0 0 4px;
+}
+
+.factor-name {
+  font-size: 11.5px;
+  color: var(--paper);
+  text-transform: lowercase;
+}
+
+.factor-value {
+  font-size: 11.5px;
+  margin-inline-start: auto;
+}
+
+.factor-weight {
+  font-size: 10px;
+  color: var(--paper-dim);
+  font-variant-numeric: tabular-nums;
+}
+
+/* The meter: the track is the ceiling a sub-score is measured against (1.00),
+   drawn as a lighter step of the bar's own hue rather than a grey, so the
+   filled and unfilled halves read as one scale. */
+.factor-meter {
+  position: relative;
+  block-size: 7px; /* dataviz caps a bar at 24px; a ten-row list wants less */
+  background: var(--factor-track);
+  border-radius: 2px;
+  overflow: visible; /* nothing here is ever clipped */
+}
+
+.factor-fill {
+  display: block;
+  block-size: 100%;
+  background: var(--factor-bar);
+  /* Rounded data-end, square at the baseline. */
+  border-radius: 2px 4px 4px 2px;
+  min-inline-size: 2px; /* a real, tiny value still draws SOMETHING */
+}
+
+/* Provisional: scored at full weight with nothing observed constraining it.
+   The open weave is the same grammar the strip uses for a partly resolved
+   hour, and it survives greyscale, CVD and forced-colors. */
+.factor[data-provisional="true"] .factor-fill {
+  background-color: color-mix(in srgb, var(--factor-bar) 20%, transparent);
+  background-image: repeating-linear-gradient(
+    45deg,
+    var(--factor-bar) 0 2px,
+    rgba(0, 0, 0, 0) 2px 5px
+  );
+}
+
+/* An absent factor draws NO bar -- see the note in the .tsx on why a
+   zero-length bar would be a different claim. The track alone is the row. */
+.factor[data-scored="false"] .factor-meter {
+  background-image: repeating-linear-gradient(
+    45deg,
+    rgba(150, 166, 178, 0.34) 0 1px,
+    rgba(0, 0, 0, 0) 1px 4px
+  );
+}
+
+/*
+ * The reason string, verbatim and unclipped.
+ *
+ * No line-clamp, no ellipsis, no max-height: this is the sentence that says
+ * "UNCALIBRATED model estimate, no observation constrains it", and a UI that
+ * cuts it in half is a UI that hides the model's own uncertainty. It wraps,
+ * however long it is.
+ */
+.factor-reason {
+  margin: 5px 0 0;
+  font-size: 11px;
+  line-height: 1.4;
+  color: var(--paper-dim);
+  overflow-wrap: anywhere;
+}
+
+.factor-flags {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 4px 6px;
+  margin: 5px 0 0;
+}
+
+.factor-flag {
+  padding: 1px 6px;
+  border: 1px solid var(--rule);
+  border-radius: 2px;
+  font-size: 10px;
+  color: var(--paper);
+}

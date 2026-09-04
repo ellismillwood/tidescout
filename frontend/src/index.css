@@ -49,8 +49,30 @@ body {
   min-block-size: 0;
 }
 
+/* The chart and the rail beside it. The chart takes the slack; the rail is
+   sized to the longest thing it must show without wrapping mid-word -- a
+   reason string like "salinity ~34.9 ppt — salty (UNCALIBRATED model
+   estimate, no observation constrains it)", which is never truncated. It
+   scrolls itself rather than growing the row. */
 #root > main {
   min-block-size: 0;
+  display: grid;
+  grid-template-columns: minmax(0, 1fr) clamp(272px, 24vw, 348px);
+}
+
+/* Under ~900px there is no room for both, so the rail goes UNDER the chart and
+   keeps its own scroll -- the strip below stays reachable either way, which is
+   the one thing this row must not break.
+
+   Both row sizes are stated rather than left to the content. Measured at
+   860px: `1fr auto` gave the chart ZERO height (the rail's auto row, 1,208px
+   of content, took the lot and the map vanished), and letting the rail's box
+   overflow instead left its background painting only the first 213px. */
+@media (max-width: 900px) {
+  #root > main {
+    grid-template-columns: minmax(0, 1fr);
+    grid-template-rows: minmax(200px, 52svh) minmax(0, 1fr);
+  }
 }
 
 /* Eyebrows label a thing; they never carry the thing. Tracked wide and small,

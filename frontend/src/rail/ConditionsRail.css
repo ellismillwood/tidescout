@@ -1,0 +1,144 @@
+/*
+ * The rail: a column of the chart's margin, beside the chart.
+ *
+ * Same grammar as the rest of the app -- hairline rules, chart-paper text,
+ * every number in the mono face the way a sounding is set. It owns its own
+ * scroll so the map and the strip never move when the rail is long.
+ */
+
+.rail {
+  block-size: 100%;
+  min-block-size: 0;
+  overflow-y: auto;
+  overscroll-behavior: contain;
+  padding: 11px 14px 16px;
+  background: var(--ink-800);
+  border-inline-start: 1px solid var(--rule);
+}
+
+.rail-empty {
+  margin: 8px 0 0;
+  font-size: 11.5px;
+  color: var(--paper-dim);
+}
+
+.rail-head .eyebrow {
+  display: flex;
+  align-items: baseline;
+  justify-content: space-between;
+  gap: 8px;
+}
+
+.rail-clock {
+  font-size: 11px;
+  letter-spacing: 0;
+}
+
+/* A stat tile, not a hero: the map's key and the strip's readout are already
+   on screen, and dataviz allows exactly one hero figure per view -- which
+   this app spends on nothing, deliberately. */
+.rail-score {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  margin: 6px 0 0;
+}
+
+.rail-score .num {
+  font-size: 30px;
+  line-height: 1;
+  /* Proportional figures: a standalone display number is not a column. */
+  font-variant-numeric: proportional-nums;
+}
+
+.rail-score-unit {
+  font-size: 10.5px;
+  color: var(--paper-dim);
+}
+
+.rail-disclosure {
+  margin: 6px 0 0;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--paper-dim);
+}
+
+.rail-disclosure .num {
+  font-size: 10.5px;
+}
+
+.rail-block {
+  margin-block-start: 15px;
+  padding-block-start: 12px;
+  border-block-start: 1px solid var(--rule);
+}
+
+.rail-block > .eyebrow {
+  margin-block-end: 8px;
+}
+
+/* Label, value, note -- three lines per reading, so a long note never pushes
+   the number out of alignment with the one above it. */
+.cond {
+  display: grid;
+  gap: 8px;
+  margin: 0;
+}
+
+.cond-row {
+  display: grid;
+  grid-template-columns: 62px 1fr;
+  align-items: baseline;
+  column-gap: 10px;
+}
+
+.cond-label {
+  font-size: 10.5px;
+  color: var(--paper-dim);
+}
+
+.cond-value {
+  margin: 0;
+  font-size: 12px;
+}
+
+.cond-absent {
+  font-family: var(--ui);
+  color: var(--paper-dim);
+  font-style: italic;
+}
+
+.cond-note {
+  grid-column: 2;
+  margin: 2px 0 0;
+  font-size: 10.5px;
+  line-height: 1.35;
+  color: var(--paper-dim);
+}
+
+.rail-foot {
+  margin-block-start: 15px;
+  padding-block-start: 10px;
+  border-block-start: 1px solid var(--rule);
+}
+
+.rail-foot p {
+  margin: 0 0 6px;
+  font-size: 10.5px;
+  line-height: 1.4;
+  color: var(--paper-dim);
+}
+
+.rail-foot p:last-child {
+  margin-block-end: 0;
+}
+
+/* Stacked under the chart (see index.css's 900px query): the rule that divided
+   the two moves with it, from the side to the top. The rail keeps its own
+   scroll -- see that query for what happened when it did not. */
+@media (max-width: 900px) {
+  .rail {
+    border-inline-start: none;
+    border-block-start: 1px solid var(--rule);
+  }
+}

@@ -1,5 +1,6 @@
 import { DayProvider, useDay } from "./state/DayContext";
 import { MapView } from "./map/MapView";
+import { ConditionsRail } from "./rail/ConditionsRail";
 import { HourStrip } from "./strip/HourStrip";
 
 // Until Task 12's picker exists there is one fishery and one day. The picker
@@ -20,7 +21,7 @@ const STATUS: Record<string, string> = {
 };
 
 /**
- * The chart margin above, the chart, and the day's strip below.
+ * The chart margin above, the chart and its rail, and the day's strip below.
  *
  * The species buttons are TEMPORARY -- Task 12 replaces them with the real
  * pickers. The hour slider that used to sit beside them is GONE: it existed
@@ -58,8 +59,12 @@ function Shell() {
           {state === "failed" ? (error ?? STATUS.failed) : STATUS[state]}
         </span>
       </header>
+      {/* The chart and the rail share the middle row: the map answers
+          "where", the rail answers "why", and both read the same `hour` from
+          the context the strip below sets. */}
       <main>
         <MapView />
+        <ConditionsRail />
       </main>
       <HourStrip />
     </>
