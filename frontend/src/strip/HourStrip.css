@@ -157,8 +157,10 @@
 
 /* Disclosure. An hour whose factors did not all resolve is drawn as an open
    weave rather than a solid fill -- the same "modelled, not measured" grammar
-   the salinity overlay uses, and a channel that survives greyscale, CVD and
-   forced-colors, none of which a colour change would. Hue still says
+   the salinity overlay uses, and a channel that survives greyscale and CVD,
+   neither of which a colour change would. Forced colors strips background
+   images and so strips this weave; the block at the foot of this file redraws
+   it as a dashed border, which is what makes that claim true. Hue still says
    "score", so the bar stays in its series. */
 .hour-bar[data-confidence="partial"] .hour-bar-fill {
   background-color: color-mix(in srgb, var(--fill) 20%, transparent);
@@ -326,4 +328,37 @@
     rgba(150, 166, 178, 0.5) 0 1px,
     rgba(0, 0, 0, 0) 1px 4px
   );
+}
+
+/* Forced colors strips `background-image`, taking the weave with it -- and
+   the strip's whole disclosure channel is that weave, since hue is spent on
+   the series. Same three border styles as everywhere else in this app
+   (`ui/Disclosure.css` carries the full note): solid measured, dashed
+   modelled, dotted no reading. */
+@media (forced-colors: active) {
+  .hour-bar-fill {
+    background: CanvasText;
+  }
+
+  /* An hour whose factors did not all resolve: outlined, not filled. */
+  .hour-bar[data-confidence="partial"] .hour-bar-fill {
+    background: Canvas;
+    border: 1px dashed CanvasText;
+  }
+
+  /* The tide gap: an absence, drawn as one. */
+  .strip-tide-gap {
+    border-inline: 1px dotted CanvasText;
+  }
+
+  /* The legend mirrors its mark, in this mode as in every other. */
+  .strip-swatch-partial {
+    background: Canvas;
+    border: 1px dashed CanvasText;
+  }
+
+  .strip-swatch-gap {
+    background: Canvas;
+    border: 1px dotted CanvasText;
+  }
 }

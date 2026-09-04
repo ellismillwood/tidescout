@@ -28,8 +28,10 @@
  *
  *   - provisional (scored at full weight, but no observation constrains it)
  *     -> the 45-degree open weave, the same "modelled, not measured" grammar
- *        the strip uses for a partly resolved hour. It survives greyscale,
- *        CVD and forced-colors, which a colour change would not.
+ *        the strip uses for a partly resolved hour. It survives greyscale
+ *        and CVD, which a colour change would not -- and forced-colors by way
+ *        of the `@media (forced-colors: active)` block in `FactorBars.css`,
+ *        since that mode strips the background image the weave is drawn with.
  *   - missing / no value -> no fill at all, just the track and a flag. An
  *     absent factor is an absence, never a bar of length zero: a zero-length
  *     bar reads as "scored, and the answer is zero", which is a different

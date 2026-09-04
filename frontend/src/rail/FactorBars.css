@@ -90,7 +90,9 @@
 
 /* Provisional: scored at full weight with nothing observed constraining it.
    The open weave is the same grammar the strip uses for a partly resolved
-   hour, and it survives greyscale, CVD and forced-colors. */
+   hour. It survives greyscale and CVD as drawn; forced colors strips
+   background images, and the block at the foot of this file is what carries
+   the distinction there. */
 .factor[data-provisional="true"] .factor-fill {
   background-color: color-mix(in srgb, var(--factor-bar) 20%, transparent);
   background-image: repeating-linear-gradient(
@@ -139,4 +141,30 @@
   border-radius: 2px;
   font-size: 10px;
   color: var(--paper);
+}
+
+/* Forced colors strips `background-image`, and these rows carry the
+   measured/modelled/absent distinction in nothing else -- see the block at
+   the foot of `ui/Disclosure.css` for the full reasoning and the same three
+   border styles: solid measured, dashed modelled, dotted no reading. */
+@media (forced-colors: active) {
+  .factor-meter {
+    border: 1px solid CanvasText;
+  }
+
+  .factor-fill {
+    background: CanvasText;
+  }
+
+  /* Modelled: an outline where there was a weave, so the bar is still a bar
+     and still not a solid one. */
+  .factor[data-provisional="true"] .factor-fill {
+    background: Canvas;
+    border: 1px dashed CanvasText;
+  }
+
+  /* No reading at all: the track alone, dotted. An absence with a shape. */
+  .factor[data-scored="false"] .factor-meter {
+    border-style: dotted;
+  }
 }

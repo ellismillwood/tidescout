@@ -392,3 +392,16 @@
     transition: opacity 160ms ease-out;
   }
 }
+
+/* Forced colors strips `background-image`, and the salinity profile's bands
+   are weave and nothing else -- an UNCALIBRATED model is the one reading in
+   this app that must never be mistaken for a measurement. Dashed is the
+   weave here as it is in the rail, the strip and the disclosure band. */
+@media (forced-colors: active) {
+  .sal-band {
+    border: 1px dashed CanvasText;
+    /* The feathered top is a mask, which forced colors also drops; the
+       dashed edge is what carries "class boundary, not a measured level". */
+    mask-image: none;
+  }
+}

@@ -9,8 +9,10 @@
  * omission. The one warm colour in this interface means "the fish are here",
  * and a disclosure that borrowed it would be competing with the map for the
  * same signal. Every mark below is the ink/paper duotone the chrome already
- * uses -- so the three states are told apart by TEXTURE, not colour, and they
- * survive greyscale, CVD and forced-colors:
+ * uses -- so the three states are told apart by TEXTURE, not colour. They
+ * survive greyscale and CVD as drawn, and forced-colors through the
+ * `@media (forced-colors: active)` block at the foot of this file, which
+ * restates them as border styles because that mode strips background images:
  *
  *   solid   measured
  *   weave   modelled (45deg, the same weave FactorBars gives a provisional
@@ -193,5 +195,56 @@
   .disc-flag {
     padding-inline-start: 0;
     border-inline-start: none;
+  }
+}
+
+/*
+ * FORCED COLORS: where the weave's claim is actually kept.
+ *
+ * Every mark above is a `background-image`, and forced-colors mode STRIPS
+ * background images -- so without this block the three states collapse into
+ * one flat shape and the file's own claim at the top ("they survive
+ * greyscale, CVD and forced-colors") is false. It cannot be papered over
+ * with colour either: this component deliberately spends none, so there is
+ * no second channel to fall back on.
+ *
+ * Borders are what survives. The UA forces a border's COLOUR and leaves its
+ * STYLE alone, so the same three states are redrawn as three border styles,
+ * in the same order a reader already learnt them:
+ *
+ *   solid   measured
+ *   dashed  modelled -- the weave
+ *   dotted  no reading -- the void
+ *
+ * System colour keywords (`CanvasText`) rather than the palette above: in
+ * this mode the reader's own colours are the point, and `forced-color-adjust`
+ * is deliberately NOT used -- overriding a person's high-contrast choice is
+ * the failure this whole block exists to avoid.
+ */
+@media (forced-colors: active) {
+  .disc-share {
+    /* 5px of track with a border on both edges leaves nothing between. */
+    block-size: 7px;
+    border: 1px solid CanvasText;
+  }
+
+  /* What the UNFILLED part means -- the one thing the two meters differ on. */
+  .disc-share[data-rest="void"] {
+    border-style: dotted;
+  }
+
+  .disc-share[data-rest="weave"] {
+    border-style: dashed;
+  }
+
+  /* Forced colors flattens this to the canvas, which would erase the share
+     the meter exists to draw. */
+  .disc-share-fill {
+    background: CanvasText;
+  }
+
+  /* A provisional factor's chip keeps its mark: dashed is the weave. */
+  .disc-chip {
+    border-style: dashed;
   }
 }

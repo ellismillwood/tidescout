@@ -35,9 +35,13 @@
  *   weave   modelled -- scored at full weight, nothing observed constrains it
  *   void    no reading at all, excluded from the score
  *
- * The 45-degree weave survives greyscale, CVD and forced-colors, which is why
- * this file spends no colour on the distinction: the one warm accent in this
- * interface means "the fish are here", and disclosure must never borrow it.
+ * The 45-degree weave survives greyscale and CVD as drawn, and forced-colors
+ * BY THE BLOCK AT THE FOOT OF `Disclosure.css` -- that mode strips background
+ * images, so the same three states are restated there as three border styles.
+ * Together that is why this file spends no colour on the distinction: the one
+ * warm accent in this interface means "the fish are here", and disclosure must
+ * never borrow it. Nothing here is a fallback channel, so the weave has to
+ * hold in every mode on its own.
  *
  * AND IT IS QUIET WHEN THERE IS NOTHING TO SAY. A component that warned on
  * every hour would pass every "does it warn?" test and be ignored by week
