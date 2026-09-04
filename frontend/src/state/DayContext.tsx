@@ -3,6 +3,7 @@ import {
   useContext,
   useEffect,
   useMemo,
+  useRef,
   useState,
 } from "react";
 import type { ReactNode } from "react";
@@ -77,6 +78,25 @@ export function DayProvider({
   const [error, setError] = useState<string | null>(null);
   const [hour, setHour] = useState(0);
   const [species, setSpecies] = useState("");
+  /**
+   * The (fishery, day) the payload in state was applied for, or null before
+   * the first one lands.
+   *
+   * WHAT THE SELECTION IS ABOUT. `hour` and `species` are a question -- "how
+   * does 15:00 look for redfish?" -- and a MODEL change does not change the
+   * question, it changes who is answering it. Resetting to hour 0 and the
+   * first species there would defeat the one comparison the model picker
+   * exists for: Winyah's own hours read confidence 1.00 / constrained_share
+   * 0.92 under one model and 0.92 / 1.00 under another, and a reader who has
+   * to re-find their hour after every switch cannot see that.
+   *
+   * A DATE or FISHERY change is the opposite: the question itself moved, the
+   * hours are different hours, and hour 0 with the first species is the right
+   * place to start. So the reset is keyed on this pair and not on "a new
+   * payload arrived" -- which is also what keeps a background rebuild
+   * (`stale`, same day, same model) from yanking a reader back to midnight.
+   */
+  const appliedFor = useRef<string | null>(null);
 
   // This effect owns the whole load-or-build lifecycle for one (slug, date,
   // model) triple. `hour`/`species` are deliberately NOT in the dependency
@@ -116,10 +136,25 @@ export function DayProvider({
       // Whatever this payload is, it is the newest the backend has: the
       // rebuild it replaces is exactly what `stale` was reporting.
       setStale(false);
-      setHour(0);
-      // First key of `species` -- an insertion-ordered Record, so this is
-      // deterministic for a given payload.
-      setSpecies(Object.keys(next.species)[0] ?? "");
+
+      // First key of `species` -- an insertion-ordered Record, so the default
+      // is deterministic for a given payload.
+      const names = Object.keys(next.species);
+      const subject = `${slug}\u0000${date}`;
+      const sameSubject = appliedFor.current === subject;
+      appliedFor.current = subject;
+      if (sameSubject) {
+        // Same water, same day: keep the hour and the fish. `hour` is left
+        // exactly as it is -- every payload carries all 24 -- and the species
+        // is kept only if this payload actually scores it. A fishery whose
+        // species list differs between runs would otherwise leave a name in
+        // state that nothing in the payload answers to, and the rail, the map
+        // and the strip would all read empty for a day that scored fine.
+        setSpecies((current) => (names.includes(current) ? current : (names[0] ?? "")));
+      } else {
+        setHour(0);
+        setSpecies(names[0] ?? "");
+      }
       setError(null);
       setState("ready");
     }

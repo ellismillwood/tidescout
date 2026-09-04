@@ -159,6 +159,89 @@ describe("DayProvider", () => {
     expect(fetchDay).toHaveBeenCalledTimes(1);
   });
 
+  it("keeps the hour and the fish across a MODEL change, and resets on a DATE change", async () => {
+    // The whole point of the model picker is reading the same hour under two
+    // models -- Winyah's own hours go confidence 1.00 / share 0.92 under one
+    // and 0.92 / 1.00 under another. A reset to hour 0 and the first species
+    // makes that comparison impossible to see. A date change is the opposite
+    // case: different hours, different day, start at the top. Both directions
+    // are asserted here, because a context that never reset and one that
+    // always reset would each pass half of this test.
+    const client = await import("../src/api/client");
+    vi.spyOn(client, "fetchDay").mockResolvedValue({
+      kind: "ready", payload: fixture as never,
+    });
+    vi.spyOn(client, "fetchStatus").mockResolvedValue({
+      status: "ready", generated_at: "x", stale: false,
+    });
+
+    let ctx: DayContextValue | null = null;
+    function Capture() {
+      ctx = useDay();
+      return null;
+    }
+    render(
+      <DayProvider slug="winyah-bay" initialDate="2026-09-01">
+        <Capture />
+        <Probe />
+      </DayProvider>,
+    );
+    await waitFor(() => expect(ctx?.state).toBe("ready"));
+
+    act(() => ctx?.setHour(14));
+    act(() => ctx?.setSpecies("speckled_trout"));
+
+    act(() => ctx?.setModel("ecmwf"));
+    await waitFor(() => expect(ctx?.model).toBe("ecmwf"));
+    // The payload landed (a new object in state) and the selection survived
+    // it -- not merely "nothing re-rendered".
+    await waitFor(() => expect(screen.getByTestId("state")).toHaveTextContent("ready"));
+    expect(screen.getByTestId("hour")).toHaveTextContent("14");
+    expect(screen.getByTestId("species")).toHaveTextContent("speckled_trout");
+
+    act(() => ctx?.setDate("2026-09-02"));
+    await waitFor(() => expect(screen.getByTestId("hour")).toHaveTextContent("0"));
+    expect(screen.getByTestId("species")).toHaveTextContent("redfish");
+  });
+
+  it("falls back to the first species when a preserved one is not in the new payload", async () => {
+    // A model change preserves the species BY NAME, and nothing guarantees
+    // the next run scores the same set. Left alone, `species` would name
+    // something the payload has no block for and the rail, the map and the
+    // strip would all read empty for a day that scored perfectly well.
+    const client = await import("../src/api/client");
+    const narrowed = structuredClone(fixture) as unknown as DayPayload;
+    for (const name of Object.keys(narrowed.species)) {
+      if (name !== "redfish") delete narrowed.species[name];
+    }
+    vi.spyOn(client, "fetchDay")
+      .mockResolvedValueOnce({ kind: "ready", payload: fixture as never })
+      .mockResolvedValue({ kind: "ready", payload: narrowed });
+    vi.spyOn(client, "fetchStatus").mockResolvedValue({
+      status: "ready", generated_at: "x", stale: false,
+    });
+
+    let ctx: DayContextValue | null = null;
+    function Capture() {
+      ctx = useDay();
+      return null;
+    }
+    render(
+      <DayProvider slug="winyah-bay" initialDate="2026-09-01">
+        <Capture />
+        <Probe />
+      </DayProvider>,
+    );
+    await waitFor(() => expect(ctx?.state).toBe("ready"));
+    act(() => ctx?.setHour(9));
+    act(() => ctx?.setSpecies("speckled_trout"));
+
+    act(() => ctx?.setModel("ecmwf"));
+    await waitFor(() => expect(screen.getByTestId("species")).toHaveTextContent("redfish"));
+    // The hour is still preserved: only the unanswerable half was dropped.
+    expect(screen.getByTestId("hour")).toHaveTextContent("9");
+  });
+
   it("does not refetch on hour/species scrubs, but does refetch on a model change", async () => {
     // The contrast is the point: a context that never fetched at all would
     // pass a test asserting only the first two, and one that refetches on
